@@ -36,27 +36,28 @@ Build the PVF company-discovery pipeline in small reviewable milestones. Each mi
   - usage/cost report
   - documentation and final validation
 
-## GitHub PR stacking
+## Native GitHub stacked pull requests
 
-Milestones are developed as a stacked series of branches and pull requests, so each PR shows only the incremental diff for that milestone:
+Use GitHub's public-preview stacked pull request feature, not a manually managed approximation. Prefer the official `gh stack` CLI extension when it is available; GitHub's `Create stack` / `Add to stack` web flow is the equivalent fallback.
 
 ```text
 main
-└── feat/milestone-1-core                 PR1 -> main
-    └── feat/milestone-2-discovery        PR2 -> feat/milestone-1-core
-        └── feat/milestone-3-research     PR3 -> feat/milestone-2-discovery
-            └── feat/milestone-4-scoring  PR4 -> feat/milestone-3-research
-                └── feat/milestone-5-e2e  PR5 -> feat/milestone-4-scoring
+└── M1
+    └── M2
+        └── M3
+            └── M4
+                └── M5
 ```
 
 Rules:
 
-1. Create each milestone branch from the previous milestone branch, not from `main`.
-2. Target each PR at the immediately preceding milestone branch so reviewers see only that milestone's changes.
-3. Keep every PR independently green under the validation gate below.
-4. Do not squash or rewrite an earlier branch in a way that silently invalidates descendant branches; if an earlier stack layer changes, propagate/rebase the dependent stack deliberately.
-5. After a parent PR merges, retarget/rebase the next PR onto its new base so the remaining stack stays clean.
-6. The review approval gate still applies: do not begin implementation of the next milestone until the current milestone is reviewed and approved.
+1. Each milestone is one native stack layer with its own focused pull request and CI.
+2. Create later layers on top of the current top layer so each PR shows only its incremental diff.
+3. Prefer `gh stack init`, `gh stack add`, and `gh stack submit` for creating/managing the stack when the CLI is available.
+4. If using github.com instead, explicitly select `Create stack` / `Add to stack`; merely pointing PR bases at each other is not treated as completion of the native-stack setup.
+5. Let GitHub's stack machinery handle stack navigation and post-merge rebase/retarget behavior instead of manually maintaining it where the native feature supports the operation.
+6. Keep every layer independently green under the validation gate below.
+7. The review approval gate still applies: do not begin implementation of the next milestone until the current milestone is reviewed and approved.
 
 ## Validation gate per milestone
 
