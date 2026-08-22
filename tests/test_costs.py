@@ -47,3 +47,21 @@ def test_cost_tracker_keeps_unreported_exact_cost_unknown() -> None:
 
     assert summary["providers"]["exa"]["exact_cost_usd"] is None
     assert summary["total"]["exact_cost_usd"] is None
+
+
+def test_cost_tracker_keeps_partial_exact_cost_unknown() -> None:
+    """One missing exact-cost event must keep the aggregate exact total unknown."""
+    tracker = CostTracker()
+    tracker.record(
+        UsageEvent(
+            provider="exa",
+            operation="search",
+            exact_cost_usd=0.01,
+        )
+    )
+    tracker.record(UsageEvent(provider="exa", operation="search", exact_cost_usd=None))
+
+    summary = tracker.summary()
+
+    assert summary["providers"]["exa"]["exact_cost_usd"] is None
+    assert summary["total"]["exact_cost_usd"] is None
