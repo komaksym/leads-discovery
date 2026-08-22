@@ -6,7 +6,7 @@ Build the PVF company-discovery pipeline in small reviewable milestones. Each mi
 
 ## Milestones
 
-- [ ] **M1 — Core state and persistence**
+- [x] **M1 — Core state and persistence**
   - Python package/config skeleton
   - canonical company/evidence/run models
   - JSONL/JSON persistence
