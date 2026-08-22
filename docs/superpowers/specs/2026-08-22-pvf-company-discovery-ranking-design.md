@@ -137,13 +137,13 @@ DEEPSEEK_API_KEY
 APIFY_TOKEN              # optional
 
 MAX_EVALUATED_COMPANIES=20
-MAX_DISCOVERY_CANDIDATES=<reasonable default>
-EXA_BUDGET_USD=<optional run ceiling>
-DEEPSEEK_BUDGET_USD=<optional run ceiling>
-APIFY_BUDGET_USD=<optional run ceiling>
+MAX_DISCOVERY_CANDIDATES=100
+EXA_BUDGET_USD            # optional local run ceiling; unset means no extra local ceiling
+DEEPSEEK_BUDGET_USD       # optional local run ceiling; unset means no extra local ceiling
+APIFY_BUDGET_USD          # optional local run ceiling; unset means no extra local ceiling
 ```
 
-Provider budget ceilings are run-level safety limits in addition to provider-side credit exhaustion.
+Provider budget ceilings are run-level safety limits in addition to provider-side credit exhaustion. The default calibration discovers at most 100 raw candidates and fully evaluates at most 20 deduplicated companies unless the user explicitly overrides those limits.
 
 No credentials are committed.
 
@@ -241,7 +241,7 @@ If the currently required work cannot proceed because Exa or DeepSeek has reache
 2. Persist usage/cost accounting.
 3. Persist the exact pending stage/company.
 4. Mark the run `paused_budget` with a machine-readable reason.
-5. Exit cleanly with a distinct non-zero or documented pause exit status.
+5. Exit cleanly with a documented pause exit status distinct from success.
 6. On the next run with budget restored, resume without repeating completed paid work.
 
 Transient provider/network errors are not automatically treated as budget exhaustion; they follow bounded retry behavior and, if unresolved, leave the affected company/stage pending or failed with provenance.
