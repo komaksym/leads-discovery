@@ -5,8 +5,8 @@ from pathlib import Path
 from leads_discovery.models import CompanyRecord, RunCheckpoint
 from leads_discovery.pipeline.state import (
     append_company_snapshot,
-    load_latest_company_records,
     load_checkpoint,
+    load_latest_company_records,
     stage_completed,
     write_checkpoint,
 )
