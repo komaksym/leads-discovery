@@ -35,9 +35,11 @@ class _UsageTotals:
     estimated_cost_usd: float = 0.0
     exact_cost_usd: float = 0.0
     exact_cost_event_count: int = 0
+    event_count: int = 0
 
     def add(self, event: UsageEvent) -> None:
         """Add one usage event to these totals."""
+        self.event_count += 1
         self.request_count += event.request_count
         self.input_tokens += event.input_tokens
         self.output_tokens += event.output_tokens
@@ -47,14 +49,16 @@ class _UsageTotals:
             self.exact_cost_event_count += 1
 
     def to_dict(self) -> UsageTotalsDict:
-        """Return stable JSON-friendly totals with normalized floating-point values."""
+        """Return stable JSON-friendly totals without overstating partial exact costs."""
         return {
             "request_count": self.request_count,
             "input_tokens": self.input_tokens,
             "output_tokens": self.output_tokens,
             "estimated_cost_usd": round(self.estimated_cost_usd, 10),
             "exact_cost_usd": (
-                round(self.exact_cost_usd, 10) if self.exact_cost_event_count else None
+                round(self.exact_cost_usd, 10)
+                if self.event_count and self.exact_cost_event_count == self.event_count
+                else None
             ),
         }
 
