@@ -11,13 +11,30 @@ from typing import Any
 from leads_discovery.models import CompanyRecord, RunCheckpoint
 
 
+def _fsync_directory(path: Path) -> None:
+    """Persist directory-entry changes on POSIX filesystems when supported."""
+    if os.name != "posix":
+        return
+    flags = os.O_RDONLY
+    if hasattr(os, "O_DIRECTORY"):
+        flags |= os.O_DIRECTORY
+    fd = os.open(path, flags)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
 def append_company_snapshot(path: Path, company: CompanyRecord) -> None:
     """Append and fsync one company snapshot so completed paid work survives interruption."""
     path.parent.mkdir(parents=True, exist_ok=True)
+    is_new = not path.exists()
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(company.to_dict(), sort_keys=True) + "\n")
         handle.flush()
         os.fsync(handle.fileno())
+    if is_new:
+        _fsync_directory(path.parent)
 
 
 def load_latest_company_records(path: Path) -> dict[str, CompanyRecord]:
@@ -66,6 +83,7 @@ def write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temp_path, path)
+        _fsync_directory(path.parent)
     finally:
         if temp_path is not None and temp_path.exists():
             temp_path.unlink()

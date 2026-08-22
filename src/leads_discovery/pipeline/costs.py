@@ -14,7 +14,7 @@ class UsageTotalsDict(TypedDict):
     request_count: int
     input_tokens: int
     output_tokens: int
-    estimated_cost_usd: float
+    estimated_cost_usd: float | None
     exact_cost_usd: float | None
 
 
@@ -33,6 +33,7 @@ class _UsageTotals:
     input_tokens: int = 0
     output_tokens: int = 0
     estimated_cost_usd: float = 0.0
+    estimated_cost_event_count: int = 0
     exact_cost_usd: float = 0.0
     exact_cost_event_count: int = 0
     event_count: int = 0
@@ -43,18 +44,24 @@ class _UsageTotals:
         self.request_count += event.request_count
         self.input_tokens += event.input_tokens
         self.output_tokens += event.output_tokens
-        self.estimated_cost_usd += event.estimated_cost_usd
+        if event.estimated_cost_usd is not None:
+            self.estimated_cost_usd += event.estimated_cost_usd
+            self.estimated_cost_event_count += 1
         if event.exact_cost_usd is not None:
             self.exact_cost_usd += event.exact_cost_usd
             self.exact_cost_event_count += 1
 
     def to_dict(self) -> UsageTotalsDict:
-        """Return stable JSON-friendly totals without overstating partial exact costs."""
+        """Return totals without presenting partial cost information as complete."""
         return {
             "request_count": self.request_count,
             "input_tokens": self.input_tokens,
             "output_tokens": self.output_tokens,
-            "estimated_cost_usd": round(self.estimated_cost_usd, 10),
+            "estimated_cost_usd": (
+                round(self.estimated_cost_usd, 10)
+                if self.event_count and self.estimated_cost_event_count == self.event_count
+                else None
+            ),
             "exact_cost_usd": (
                 round(self.exact_cost_usd, 10)
                 if self.event_count and self.exact_cost_event_count == self.event_count

@@ -82,7 +82,7 @@ class UsageEvent:
     request_count: int = 1
     input_tokens: int = 0
     output_tokens: int = 0
-    estimated_cost_usd: float = 0.0
+    estimated_cost_usd: float | None = None
     exact_cost_usd: float | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
     recorded_at: str = field(default_factory=_utc_now)

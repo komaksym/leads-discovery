@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import patch
 
 from leads_discovery.models import CompanyRecord, RunCheckpoint
 from leads_discovery.pipeline.state import (
@@ -81,3 +82,26 @@ def test_atomic_json_helpers_persist_usage_payload(tmp_path: Path) -> None:
     write_json_atomic(path, payload)
 
     assert read_json(path) == payload
+
+
+def test_atomic_json_fsyncs_file_and_parent_directory(tmp_path: Path) -> None:
+    """Atomic JSON replacement must sync both file contents and the renamed directory entry."""
+    from leads_discovery.pipeline import state
+
+    with patch("leads_discovery.pipeline.state.os.fsync") as fsync:
+        state.write_json_atomic(tmp_path / "checkpoint.json", {"status": "running"})
+
+    assert fsync.call_count == 2
+
+
+def test_first_jsonl_creation_fsyncs_parent_directory(tmp_path: Path) -> None:
+    """The first JSONL snapshot must sync its new directory entry after syncing file data."""
+    from leads_discovery.pipeline import state
+
+    path = tmp_path / "companies.jsonl"
+    with patch("leads_discovery.pipeline.state.os.fsync") as fsync:
+        state.append_company_snapshot(path, CompanyRecord(company_id="acme", name="Acme PVF"))
+        assert fsync.call_count == 2
+
+        state.append_company_snapshot(path, CompanyRecord(company_id="beta", name="Beta PVF"))
+        assert fsync.call_count == 3

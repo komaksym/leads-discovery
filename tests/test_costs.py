@@ -65,3 +65,26 @@ def test_cost_tracker_keeps_partial_exact_cost_unknown() -> None:
 
     assert summary["providers"]["exa"]["exact_cost_usd"] is None
     assert summary["total"]["exact_cost_usd"] is None
+
+
+def test_cost_tracker_keeps_unreported_estimated_cost_unknown() -> None:
+    """Missing estimated cost must remain unknown instead of looking like a free request."""
+    tracker = CostTracker()
+    tracker.record(UsageEvent(provider="exa", operation="search"))
+
+    summary = tracker.summary()
+
+    assert summary["providers"]["exa"]["estimated_cost_usd"] is None
+    assert summary["total"]["estimated_cost_usd"] is None
+
+
+def test_cost_tracker_keeps_partial_estimated_cost_unknown() -> None:
+    """One missing estimate must keep the aggregate estimated total unknown."""
+    tracker = CostTracker()
+    tracker.record(UsageEvent(provider="exa", operation="search", estimated_cost_usd=0.01))
+    tracker.record(UsageEvent(provider="exa", operation="search"))
+
+    summary = tracker.summary()
+
+    assert summary["providers"]["exa"]["estimated_cost_usd"] is None
+    assert summary["total"]["estimated_cost_usd"] is None
