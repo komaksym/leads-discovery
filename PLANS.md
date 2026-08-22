@@ -36,6 +36,28 @@ Build the PVF company-discovery pipeline in small reviewable milestones. Each mi
   - usage/cost report
   - documentation and final validation
 
+## GitHub PR stacking
+
+Milestones are developed as a stacked series of branches and pull requests, so each PR shows only the incremental diff for that milestone:
+
+```text
+main
+└── feat/milestone-1-core                 PR1 -> main
+    └── feat/milestone-2-discovery        PR2 -> feat/milestone-1-core
+        └── feat/milestone-3-research     PR3 -> feat/milestone-2-discovery
+            └── feat/milestone-4-scoring  PR4 -> feat/milestone-3-research
+                └── feat/milestone-5-e2e  PR5 -> feat/milestone-4-scoring
+```
+
+Rules:
+
+1. Create each milestone branch from the previous milestone branch, not from `main`.
+2. Target each PR at the immediately preceding milestone branch so reviewers see only that milestone's changes.
+3. Keep every PR independently green under the validation gate below.
+4. Do not squash or rewrite an earlier branch in a way that silently invalidates descendant branches; if an earlier stack layer changes, propagate/rebase the dependent stack deliberately.
+5. After a parent PR merges, retarget/rebase the next PR onto its new base so the remaining stack stays clean.
+6. The review approval gate still applies: do not begin implementation of the next milestone until the current milestone is reviewed and approved.
+
 ## Validation gate per milestone
 
 1. Run the narrowest new/changed tests first.
