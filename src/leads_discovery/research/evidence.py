@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 from collections import defaultdict
 from collections.abc import Iterable
@@ -330,7 +331,12 @@ def _exa_cost(payload: dict[str, Any], company_id: str, attempted: int) -> float
     total = cost.get("total")
     if total is None:
         return None
-    if isinstance(total, bool) or not isinstance(total, (int, float)) or total < 0:
+    if (
+        isinstance(total, bool)
+        or not isinstance(total, (int, float))
+        or not math.isfinite(total)
+        or total < 0
+    ):
         raise provider_error(
             provider="exa",
             request_id=company_id,
