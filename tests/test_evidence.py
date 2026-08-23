@@ -9,7 +9,7 @@ from datetime import datetime
 import httpx
 import pytest
 
-from leads_discovery.models import CompanyRecord, EvidenceItem, UsageEvent
+from leads_discovery.models import CompanyRecord, EvidenceBundle, EvidenceItem, UsageEvent
 from leads_discovery.research.evidence import (
     ExaEvidenceResearcher,
     build_evidence_bundle,
@@ -57,7 +57,7 @@ def _evidence(
     excerpt: str | None = None,
 ) -> EvidenceItem:
     """Build a deterministic evidence item for bundle-boundary tests."""
-    final_url = url or f"https://source{index}.example.com/page/{index}"
+    final_url = url or f"https://source{index}.com/page/{index}"
     return EvidenceItem(
         evidence_id=f"ev_{index:024x}",
         url=final_url,
@@ -165,7 +165,7 @@ def test_exa_research_exact_payload_call_order_raw_preservation_ids_and_usage() 
                 "results": [
                     {
                         "id": f"result-{index}",
-                        "url": f"https://source{index}.example.com/page",
+                        "url": f"https://source{index}.com/page",
                         "title": f"Source {index}",
                         "highlights": [f"highlight-{index}-a", f"highlight-{index}-b"],
                         "opaque": {"full": [index, "preserve"]},
@@ -194,9 +194,9 @@ def test_exa_research_exact_payload_call_order_raw_preservation_ids_and_usage() 
 
     assert bundle.company_id == "cmp_acme"
     assert [item.url for item in bundle.items] == [
-        "https://source0.example.com/page",
-        "https://source1.example.com/page",
-        "https://source2.example.com/page",
+        "https://source0.com/page",
+        "https://source1.com/page",
+        "https://source2.com/page",
     ]
     assert [item.excerpt for item in bundle.items] == [
         "highlight-0-a\nhighlight-0-b",
@@ -224,6 +224,54 @@ def test_exa_research_exact_payload_call_order_raw_preservation_ids_and_usage() 
     assert usage.estimated_cost_usd == pytest.approx(0.006)
     assert usage.exact_cost_usd is None
     assert API_KEY not in json.dumps(usage.to_dict(), sort_keys=True)
+
+
+def test_research_progress_callback_precedes_next_http_request_and_reports_deltas() -> None:
+    """Each successful Exa response is exposed as one durable delta before the next call."""
+    progress: list[EvidenceBundle] = []
+    call_index = 0
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal call_index
+        assert len(progress) == call_index
+        index = call_index
+        call_index += 1
+        return httpx.Response(
+            200,
+            json={
+                "results": [
+                    {
+                        "id": f"progress-{index}",
+                        "url": f"https://progress{index}.com/page",
+                        "title": f"Progress {index}",
+                        "highlights": [f"excerpt-{index}"],
+                    }
+                ],
+                "costDollars": {"total": 0.001 * (index + 1)},
+            },
+        )
+
+    company = _company("cmp_progress", name="Progress Co", domain="progress.com")
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        bundle = ExaEvidenceResearcher(api_key=API_KEY, client=client).research(
+            company,
+            on_progress=progress.append,
+        )
+
+    assert call_index == 3
+    assert len(progress) == 3
+    assert [len(delta.raw_records) for delta in progress] == [1, 1, 1]
+    assert [delta.raw_records[0]["id"] for delta in progress] == [
+        "progress-0",
+        "progress-1",
+        "progress-2",
+    ]
+    assert [delta.usage_events[0].request_count for delta in progress] == [1, 1, 1]
+    assert [delta.usage_events[0].estimated_cost_usd for delta in progress] == pytest.approx(
+        [0.001, 0.002, 0.003]
+    )
+    assert bundle.usage_events[0].request_count == 3
+    assert bundle.usage_events[0].estimated_cost_usd == pytest.approx(0.006)
 
 
 def test_evidence_ids_are_stable_across_research_timestamps() -> None:

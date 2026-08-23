@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from contextlib import suppress
 from copy import deepcopy
 from pathlib import Path
@@ -28,7 +29,7 @@ from leads_discovery.models import (
 )
 from leads_discovery.pipeline.m2_batch import M2BatchConfig, run_m2_batch
 from leads_discovery.research.evidence import ExaEvidenceResearcher
-from leads_discovery.research.extract import DeepSeekPriceSchedule
+from leads_discovery.research.extract import DeepSeekExtractor, DeepSeekPriceSchedule
 
 FACT_KEYS = (
     "pvf_relevant",
@@ -63,9 +64,14 @@ ARTIFACTS = {
 }
 
 
-def _record(request: DiscoveryRequest, index: int) -> DiscoveryRecord:
+def _record(
+    request: DiscoveryRequest,
+    index: int,
+    *,
+    raw_metadata: dict[str, Any] | None = None,
+) -> DiscoveryRecord:
     """Build one valid deterministic raw discovery row for a supplied request."""
-    domain = f"company-{index}.example.com"
+    domain = f"company-{index}.com"
     return DiscoveryRecord(
         record_id=f"raw_{index:024x}",
         provider=request.provider,
@@ -82,7 +88,11 @@ def _record(request: DiscoveryRequest, index: int) -> DiscoveryRecord:
         country_code="US",
         title=f"Company {index}",
         snippet="PVF distributor",
-        raw_metadata={"index": index, "nested": {"keep": [1, 2]}},
+        raw_metadata=(
+            {"index": index, "nested": {"keep": [1, 2]}}
+            if raw_metadata is None
+            else raw_metadata
+        ),
         retrieved_at="2026-08-23T10:00:00+00:00",
     )
 
@@ -114,15 +124,20 @@ class FakeDiscovery:
         )
 
 
-class FakeResearcher:
+class FakeResearcher(ExaEvidenceResearcher):
     """Deterministic research fake with observable artifact-order checks."""
 
     def __init__(self, run_dir: Path | None = None) -> None:
         self.calls = 0
         self.run_dir = run_dir
 
-    def research(self, company: CompanyRecord) -> EvidenceBundle:
-        """Return one retained evidence item and one full raw research row."""
+    def research(
+        self,
+        company: CompanyRecord,
+        *,
+        on_progress: Callable[[EvidenceBundle], None] | None = None,
+    ) -> EvidenceBundle:
+        """Return one retained evidence delta and expose it before returning when requested."""
         if self.run_dir is not None:
             assert (self.run_dir / "companies_raw.jsonl").exists()
             assert (self.run_dir / "companies_deduped.jsonl").exists()
@@ -132,7 +147,7 @@ class FakeResearcher:
             assert "in_flight" in checkpoint
         self.calls += 1
         evidence_id = f"ev_{self.calls:024x}"
-        return EvidenceBundle(
+        bundle = EvidenceBundle(
             company_id=company.company_id,
             items=[
                 EvidenceItem(
@@ -155,10 +170,13 @@ class FakeResearcher:
                 )
             ],
         )
+        if on_progress is not None:
+            on_progress(bundle)
+        return bundle
 
 
-class FakeExtractor:
-    """Deterministic extractor fake exposing the public model and price configuration."""
+class FakeExtractor(DeepSeekExtractor):
+    """Deterministic extractor fake with coherent reservation and authenticated usage."""
 
     def __init__(
         self,
@@ -174,6 +192,17 @@ class FakeExtractor:
         self.prices = prices or DeepSeekPriceSchedule(0.0, 0.0, 0.0)
         self.model = "deepseek-v4-flash"
         self.crash = crash
+
+    def reservation_cost_usd(self, company: CompanyRecord, bundle: EvidenceBundle) -> float:
+        """Approximate the production worst-case cache-miss/input plus 2,048 output tokens."""
+        prompt_characters = 2_000 + len(company.name) + sum(
+            len(item.url) + len(item.title or "") + len(item.excerpt or "")
+            for item in bundle.items
+        )
+        return (
+            prompt_characters * self.prices.cache_miss_input_per_million
+            + 2_048 * self.prices.output_per_million
+        ) / 1_000_000
 
     def extract(self, company: CompanyRecord, bundle: EvidenceBundle) -> ExtractionResult:
         """Return the complete fact map or simulate process death after intent persistence."""
@@ -220,14 +249,13 @@ def _config(tmp_path: Path, run_id: str, **overrides: Any) -> M2BatchConfig:
 
 def test_new_models_round_trip_nested_json_and_defensively_copy_callers() -> None:
     """Every M2 model round-trips JSON-safe nested data without aliasing caller mutables."""
-    nested = {"nested": {"values": [1, 2]}}
+    nested: dict[str, Any] = {"nested": {"values": [1, 2]}}
     request = DiscoveryRequest("exa:us:test:v1", "exa", "test", "US", ("query",), 1, 1)
-    record = _record(request, 1)
-    record.raw_metadata = nested
+    record = _record(request, 1, raw_metadata=nested)
     usage = UsageEvent(provider="exa", operation="company_search", metadata=deepcopy(nested))
     company = CompanyRecord(company_id="cmp_1", name="Acme", discovery_records=[record.to_dict()])
     evidence = EvidenceItem(evidence_id="ev_1", url="https://acme.com/e", provider="exa")
-    models = [
+    models: list[Any] = [
         record,
         DiscoveryBatch(request, [record], [usage]),
         DeduplicationResult([company], [record]),
@@ -309,10 +337,7 @@ def test_preexisting_artifact_symlink_cannot_redirect_writes_outside_data_root(
     outside = tmp_path.parent / f"{tmp_path.name}-outside.jsonl"
     outside.write_text("sentinel\n", encoding="utf-8")
     link = run_dir / "companies_raw.jsonl"
-    try:
-        link.symlink_to(outside)
-    except OSError:
-        pytest.skip("filesystem does not support symlinks")
+    link.symlink_to(outside)
 
     with suppress(OSError, RuntimeError, ValueError):
         run_m2_batch(
@@ -389,7 +414,7 @@ def test_successful_research_response_is_durable_before_next_paid_search(tmp_pat
     calls = 0
     first_row = {
         "id": "research-1",
-        "url": "https://company-1.example.com/about",
+        "url": "https://research-one.com/about",
         "title": "Company 1 research",
         "highlights": ["Industrial valves and fittings"],
     }
@@ -419,14 +444,69 @@ def test_successful_research_response_is_durable_before_next_paid_search(tmp_pat
     raw_path = run_dir / "research_raw.jsonl"
     assert raw_path.exists()
     raw_rows = [json.loads(line) for line in raw_path.read_text().splitlines()]
-    assert first_row in raw_rows
+    assert raw_rows == [first_row]
     usage_rows = [
         json.loads(line)
         for line in (run_dir / "usage_events.jsonl").read_text().splitlines()
     ]
     research_usage = [row for row in usage_rows if row["operation"] == "company_research"]
-    assert research_usage
+    assert len(research_usage) == 1
+    assert research_usage[0]["request_count"] == 1
     assert research_usage[0]["estimated_cost_usd"] == pytest.approx(0.01)
+
+
+def test_three_call_research_progress_is_counted_once_without_aggregate_double_count(
+    tmp_path: Path,
+) -> None:
+    """Three successful Exa responses persist three deltas and no duplicate aggregate usage."""
+    costs = [0.01, 0.02, 0.03]
+    calls = 0
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        index = calls
+        calls += 1
+        return httpx.Response(
+            200,
+            json={
+                "results": [
+                    {
+                        "id": f"research-{index}",
+                        "url": f"https://research-{index}.com/page",
+                        "title": f"Research {index}",
+                        "highlights": [f"Evidence {index}"],
+                    }
+                ],
+                "costDollars": {"total": costs[index]},
+            },
+        )
+
+    run_dir = tmp_path / "research-complete"
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        checkpoint = run_m2_batch(
+            _config(tmp_path, "research-complete"),
+            discovery={"exa": FakeDiscovery()},
+            researcher=ExaEvidenceResearcher(api_key="test-key", client=client),
+            extractor=FakeExtractor(),
+        )
+
+    assert checkpoint.status == "completed"
+    assert calls == 3
+    raw_rows = [
+        json.loads(line)
+        for line in (run_dir / "research_raw.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert [row["id"] for row in raw_rows] == ["research-0", "research-1", "research-2"]
+    usage_rows = [
+        json.loads(line)
+        for line in (run_dir / "usage_events.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    research_usage = [row for row in usage_rows if row["operation"] == "company_research"]
+    assert len(research_usage) == 3
+    assert [row["request_count"] for row in research_usage] == [1, 1, 1]
+    assert [row["estimated_cost_usd"] for row in research_usage] == pytest.approx(costs)
+    assert sum(row["request_count"] for row in research_usage) == 3
+    assert sum(row["estimated_cost_usd"] for row in research_usage) == pytest.approx(sum(costs))
 
 
 def test_conservative_deepseek_reservation_persists_paused_budget_without_call(
@@ -449,10 +529,10 @@ def test_conservative_deepseek_reservation_persists_paused_budget_without_call(
 
 
 def test_usage_replay_prevents_budget_reset_and_second_model_call(tmp_path: Path) -> None:
-    """Persisted authenticated usage is replayed so restart cannot reset DeepSeek spend."""
+    """Persisted usage plus the next real reservation blocks operation two after restart."""
     extractor = FakeExtractor(
         estimated_cost_usd=0.6,
-        prices=DeepSeekPriceSchedule(10.0, 10.0, 10.0),
+        prices=DeepSeekPriceSchedule(100.0, 100.0, 100.0),
     )
     config = _config(
         tmp_path,
@@ -552,13 +632,17 @@ def test_persisted_apify_run_id_is_resumed_without_replacement_search(tmp_path: 
     )
 
     class ResumeOnlyApify:
+        """Apify fake that permits only resuming the persisted remote run."""
+
         def __init__(self) -> None:
             self.resume_calls: list[tuple[str, str]] = []
 
         def search(self, _request: DiscoveryRequest) -> DiscoveryBatch:
+            """Reject any attempt to start a replacement Actor run."""
             raise AssertionError("persisted Apify run must not start a replacement search")
 
         def resume(self, request: DiscoveryRequest, run_id: str) -> DiscoveryBatch:
+            """Return one successful result for the exact persisted Actor run."""
             self.resume_calls.append((request.request_id, run_id))
             return DiscoveryBatch(
                 request=request,
@@ -591,7 +675,10 @@ def test_unknown_in_flight_exa_is_not_automatically_repeated(tmp_path: Path) -> 
     calls = 0
 
     class CrashDiscovery:
+        """Discovery fake that simulates process death after the in-flight marker."""
+
         def search(self, _request: DiscoveryRequest) -> DiscoveryBatch:
+            """Crash exactly once after paid intent is persisted."""
             nonlocal calls
             calls += 1
             raise KeyboardInterrupt
@@ -607,7 +694,10 @@ def test_unknown_in_flight_exa_is_not_automatically_repeated(tmp_path: Path) -> 
     assert calls == 1
 
     class BombDiscovery:
+        """Discovery fake that fails if an unknown prior call is repeated."""
+
         def search(self, _request: DiscoveryRequest) -> DiscoveryBatch:
+            """Reject any automatic repeat after an unknown outcome."""
             raise AssertionError("unknown Exa operation must not repeat")
 
     resumed = run_m2_batch(
@@ -634,7 +724,10 @@ def test_unknown_in_flight_deepseek_is_not_automatically_repeated(tmp_path: Path
     assert crashing.calls == 1
 
     class BombExtractor(FakeExtractor):
+        """Extractor fake that fails if an unknown prior model call is repeated."""
+
         def extract(self, company: CompanyRecord, bundle: EvidenceBundle) -> ExtractionResult:
+            """Reject any automatic repeat after an unknown DeepSeek outcome."""
             raise AssertionError("unknown DeepSeek operation must not repeat")
 
     resumed = run_m2_batch(
