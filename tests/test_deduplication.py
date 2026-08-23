@@ -266,21 +266,21 @@ def test_ded08_row_without_name_or_domain_is_unresolved() -> None:
 
 
 def test_source_url_is_provenance_not_identity() -> None:
-    """A corporate-looking source URL never substitutes for a missing website URL."""
+    """A valid corporate source URL never substitutes for a missing website URL."""
     result = deduplicate(
         [
             _record(
                 "raw_a",
                 name="Alpha Valve",
                 website_url=None,
-                source_url="https://same.example/company",
+                source_url="https://same.com/company",
                 country_code=None,
             ),
             _record(
                 "raw_b",
                 name="Beta Valve",
                 website_url=None,
-                source_url="https://same.example/company",
+                source_url="https://same.com/company",
                 country_code=None,
             ),
         ]
