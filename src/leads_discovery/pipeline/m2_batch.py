@@ -461,14 +461,14 @@ def _discovery_phase(
 
     for request in requests:
         operation_id = f"discovery:{request.request_id}"
-        entry = _operations(checkpoint).get(operation_id)
-        if entry is not None and entry.get("state") in {"completed", "failed"}:
+        request_entry = _operations(checkpoint).get(operation_id)
+        if request_entry is not None and request_entry.get("state") in {"completed", "failed"}:
             continue
         if (
             request.provider == "apify"
-            and entry is not None
-            and entry.get("state") == "pending"
-            and isinstance(entry.get("run_id"), str)
+            and request_entry is not None
+            and request_entry.get("state") == "pending"
+            and isinstance(request_entry.get("run_id"), str)
         ):
             continue
         provider = discovery.get(request.provider)
