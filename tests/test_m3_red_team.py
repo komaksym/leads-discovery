@@ -6,16 +6,16 @@ import csv
 from pathlib import Path
 
 import pytest
-
-import leads_discovery.pipeline.state as state_module
-from leads_discovery.pipeline.evaluation import EvaluationConfig, evaluate_run
-from leads_discovery.scoring import ScoringPolicy, evaluate_company
 from m3_factories import (
     accepted_facts,
     build_company,
     exact_threshold_facts,
     write_run_inputs,
 )
+
+import leads_discovery.pipeline.state as state_module
+from leads_discovery.pipeline.evaluation import EvaluationConfig, evaluate_run
+from leads_discovery.scoring import ScoringPolicy, evaluate_company
 
 
 def test_exact_coverage_gates_are_inclusive_and_epsilon_above_blocks() -> None:
