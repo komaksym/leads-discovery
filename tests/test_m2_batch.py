@@ -283,16 +283,59 @@ def test_unsafe_run_ids_fail_before_provider_work(tmp_path: Path, run_id: str) -
     assert not (tmp_path.parent / "escape").exists()
 
 
-def test_explicit_live_flag_is_required_before_provider_calls(tmp_path: Path) -> None:
-    """The M2 command boundary cannot make paid calls without explicit live authorization."""
+def test_fractional_extraction_cap_fails_before_provider_work(tmp_path: Path) -> None:
+    """INV-13 requires an integer 1..20 extraction cap before any paid provider intent."""
     discovery = FakeDiscovery()
-    with pytest.raises((RuntimeError, ValueError)):
+    with pytest.raises((TypeError, ValueError)):
         run_m2_batch(
-            _config(tmp_path, "dry", execute_live=False),
+            _config(tmp_path, "fractional-cap", max_extracted=1.5),
             discovery={"exa": discovery},
             researcher=FakeResearcher(),
             extractor=FakeExtractor(),
         )
+
+    assert discovery.calls == 0
+
+
+def test_preexisting_artifact_symlink_cannot_redirect_writes_outside_data_root(
+    tmp_path: Path,
+) -> None:
+    """Run isolation requires every M2 artifact write to remain beneath the configured data root."""
+    run_dir = tmp_path / "symlink-escape"
+    run_dir.mkdir()
+    outside = tmp_path.parent / f"{tmp_path.name}-outside.jsonl"
+    outside.write_text("sentinel\n", encoding="utf-8")
+    link = run_dir / "companies_raw.jsonl"
+    try:
+        link.symlink_to(outside)
+    except OSError:
+        pytest.skip("filesystem does not support symlinks")
+
+    try:
+        run_m2_batch(
+            _config(tmp_path, "symlink-escape"),
+            discovery={"exa": FakeDiscovery()},
+            researcher=FakeResearcher(),
+            extractor=FakeExtractor(),
+        )
+    except (OSError, RuntimeError, ValueError):
+        pass
+
+    assert outside.read_text(encoding="utf-8") == "sentinel\n"
+
+
+def test_explicit_live_flag_is_required_before_provider_calls(tmp_path: Path) -> None:
+    """Without explicit live authorization the runner returns dry-run state and makes no calls."""
+    discovery = FakeDiscovery()
+    checkpoint = run_m2_batch(
+        _config(tmp_path, "dry", execute_live=False),
+        discovery={"exa": discovery},
+        researcher=FakeResearcher(),
+        extractor=FakeExtractor(),
+    )
+
+    assert checkpoint.status == "dry_run"
+    assert checkpoint.pause_reason == "live_execution_not_authorized"
     assert discovery.calls == 0
 
 
