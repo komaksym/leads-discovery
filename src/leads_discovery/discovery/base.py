@@ -1,0 +1,223 @@
+"""Shared contracts and sanitized helpers for synchronous discovery providers."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+from datetime import UTC, datetime
+from typing import Any, Protocol, cast
+
+import httpx
+
+from leads_discovery.models import (
+    DiscoveryBatch,
+    DiscoveryProviderName,
+    DiscoveryRecord,
+    DiscoveryRequest,
+    ErrorKind,
+    UsageEvent,
+)
+
+
+class DiscoveryProvider(Protocol):
+    """Define the synchronous discovery interface used by the M2 runner."""
+
+    def search(self, request: DiscoveryRequest) -> DiscoveryBatch:
+        """Execute one validated bounded discovery request."""
+        ...
+
+
+class DiscoveryProviderError(RuntimeError):
+    """Expose a sanitized provider failure plus safe accounting metadata."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        provider: str,
+        kind: ErrorKind,
+        request_id: str,
+        retryable: bool,
+        status_code: int | None,
+        usage_event: UsageEvent,
+    ) -> None:
+        """Initialize a provider error without retaining unsafe response or request content."""
+        super().__init__(message)
+        self.provider = provider
+        self.kind = kind
+        self.request_id = request_id
+        self.retryable = retryable
+        self.status_code = status_code
+        self.usage_event = UsageEvent.from_dict(usage_event.to_dict())
+
+
+def utc_timestamp() -> str:
+    """Return one timezone-aware UTC timestamp for a provider operation."""
+    return datetime.now(UTC).isoformat()
+
+
+def classify_http_status(status_code: int) -> tuple[ErrorKind, bool]:
+    """Map an HTTP status to the frozen M2 provider failure taxonomy."""
+    if status_code in {401, 403}:
+        return "authentication", False
+    if status_code == 402:
+        return "budget_exhausted", False
+    if status_code in {400, 422}:
+        return "invalid_request", False
+    if status_code in {408, 429}:
+        return "rate_limited", True
+    if 500 <= status_code <= 599:
+        return "transient", True
+    if 400 <= status_code <= 499:
+        return "permanent", False
+    return "invalid_response", False
+
+
+def validate_common_request(request: DiscoveryRequest, provider: DiscoveryProviderName) -> None:
+    """Reject wrong-provider, geography, query, and result-cap inputs before HTTP work."""
+    if request.provider != provider:
+        raise ValueError(f"request provider must be {provider}")
+    if request.target_country_code not in {"US", "CA"}:
+        raise ValueError("target country must be US or CA")
+    if (
+        not isinstance(request.queries, tuple)
+        or not request.queries
+        or any(not isinstance(query, str) or not query.strip() for query in request.queries)
+    ):
+        raise ValueError("queries must be a nonempty tuple of nonblank strings")
+    if (
+        isinstance(request.max_results_total, bool)
+        or not isinstance(request.max_results_total, int)
+        or not 1 <= request.max_results_total <= 100
+    ):
+        raise ValueError("max_results_total must be an integer in 1..100")
+    if (
+        isinstance(request.max_results_per_query, bool)
+        or not isinstance(request.max_results_per_query, int)
+        or not 1 <= request.max_results_per_query <= 100
+    ):
+        raise ValueError("max_results_per_query must be an integer in 1..100")
+    if request.max_results_per_query * len(request.queries) < request.max_results_total:
+        raise ValueError("per-query cap cannot satisfy total result cap")
+
+
+def validation_error(
+    *, provider: str, request_id: str, message: str, operation: str
+) -> DiscoveryProviderError:
+    """Build a sanitized zero-attempt invalid-request error."""
+    return DiscoveryProviderError(
+        message,
+        provider=provider,
+        kind="invalid_request",
+        request_id=request_id,
+        retryable=False,
+        status_code=None,
+        usage_event=UsageEvent(
+            provider=provider,
+            operation=operation,
+            request_count=0,
+            metadata={"request_id": request_id},
+        ),
+    )
+
+
+def provider_error(
+    *,
+    provider: str,
+    request_id: str,
+    operation: str,
+    request_count: int,
+    kind: ErrorKind,
+    retryable: bool,
+    status_code: int | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> DiscoveryProviderError:
+    """Build a sanitized attempted-call provider error with safe usage metadata."""
+    return DiscoveryProviderError(
+        f"{provider} {operation} failed: {kind}",
+        provider=provider,
+        kind=kind,
+        request_id=request_id,
+        retryable=retryable,
+        status_code=status_code,
+        usage_event=UsageEvent(
+            provider=provider,
+            operation=operation,
+            request_count=request_count,
+            metadata=metadata or {"request_id": request_id},
+        ),
+    )
+
+
+def request_json(
+    response: httpx.Response,
+    *,
+    provider: str,
+    request_id: str,
+    operation: str,
+    request_count: int,
+) -> dict[str, Any]:
+    """Decode a provider response as a JSON object or raise a sanitized invalid response."""
+    try:
+        payload = response.json()
+    except Exception:
+        raise provider_error(
+            provider=provider,
+            request_id=request_id,
+            operation=operation,
+            request_count=request_count,
+            kind="invalid_response",
+            retryable=False,
+            status_code=response.status_code,
+        ) from None
+    if not isinstance(payload, dict):
+        raise provider_error(
+            provider=provider,
+            request_id=request_id,
+            operation=operation,
+            request_count=request_count,
+            kind="invalid_response",
+            retryable=False,
+            status_code=response.status_code,
+        ) from None
+    return cast(dict[str, Any], payload)
+
+
+def stable_raw_record_id(
+    *,
+    provider: DiscoveryProviderName,
+    request: DiscoveryRequest,
+    provider_result_id: str | None,
+    parsed_identity: dict[str, Any],
+    raw_metadata: dict[str, Any],
+) -> str:
+    """Build the deterministic frozen raw-row ID while excluding retrieval time and secrets."""
+    if provider_result_id:
+        identity: Any = [provider, request.request_id, provider_result_id]
+    else:
+        identity = [provider, request.request_id, parsed_identity, raw_metadata]
+    encoded = json.dumps(identity, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    return "raw_" + hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:24]
+
+
+def safe_transport_call(
+    call: Any,
+    *,
+    provider: str,
+    request_id: str,
+    operation: str,
+    request_count: int,
+) -> httpx.Response:
+    """Run one injected-client call and sanitize transport failures without chaining details."""
+    try:
+        response = call()
+    except httpx.HTTPError:
+        raise provider_error(
+            provider=provider,
+            request_id=request_id,
+            operation=operation,
+            request_count=request_count,
+            kind="transient",
+            retryable=True,
+        ) from None
+    return cast(httpx.Response, response)
