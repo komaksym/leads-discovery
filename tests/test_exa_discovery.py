@@ -384,6 +384,8 @@ def test_invalid_exa_requests_fail_before_http(request: DiscoveryRequest) -> Non
 def test_blank_exa_credential_is_rejected_without_http() -> None:
     """Adapters require a nonempty credential and never source one from the environment."""
     transport = httpx.MockTransport(lambda _request: httpx.Response(500))
-    with httpx.Client(transport=transport) as client:
-        with pytest.raises((TypeError, ValueError)):
-            ExaDiscoveryProvider(api_key="", client=client)
+    with (
+        httpx.Client(transport=transport) as client,
+        pytest.raises((TypeError, ValueError)),
+    ):
+        ExaDiscoveryProvider(api_key="", client=client)
