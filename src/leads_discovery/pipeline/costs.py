@@ -1,7 +1,8 @@
-"""Provider usage and cost aggregation for one pipeline run."""
+"""Provider usage, cost aggregation, and replayable independent budget helpers."""
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import TypedDict
 
@@ -51,17 +52,21 @@ class _UsageTotals:
             self.exact_cost_usd += event.exact_cost_usd
             self.exact_cost_event_count += 1
 
+    def estimated(self) -> float | None:
+        """Return complete estimated spend, or unknown when any event omitted its estimate."""
+        if not self.event_count:
+            return None
+        if self.estimated_cost_event_count != self.event_count:
+            return None
+        return round(self.estimated_cost_usd, 10)
+
     def to_dict(self) -> UsageTotalsDict:
         """Return totals without presenting partial cost information as complete."""
         return {
             "request_count": self.request_count,
             "input_tokens": self.input_tokens,
             "output_tokens": self.output_tokens,
-            "estimated_cost_usd": (
-                round(self.estimated_cost_usd, 10)
-                if self.event_count and self.estimated_cost_event_count == self.event_count
-                else None
-            ),
+            "estimated_cost_usd": self.estimated(),
             "exact_cost_usd": (
                 round(self.exact_cost_usd, 10)
                 if self.event_count and self.exact_cost_event_count == self.event_count
@@ -71,18 +76,25 @@ class _UsageTotals:
 
 
 class CostTracker:
-    """Aggregate provider usage events for reporting and budget decisions."""
+    """Aggregate provider usage events for reporting and independent budget decisions."""
 
-    def __init__(self) -> None:
-        """Create an empty run-level cost tracker."""
+    def __init__(self, events: Iterable[UsageEvent] = ()) -> None:
+        """Create a tracker and replay any already persisted usage events."""
         self._providers: dict[str, _UsageTotals] = {}
         self._total = _UsageTotals()
+        for event in events:
+            self.record(event)
 
     def record(self, event: UsageEvent) -> None:
         """Record one provider usage event in provider and run-level totals."""
         totals = self._providers.setdefault(event.provider, _UsageTotals())
         totals.add(event)
         self._total.add(event)
+
+    def provider_estimated_spend(self, provider: str) -> float | None:
+        """Return replayed estimated spend for one provider without pooling other providers."""
+        totals = self._providers.get(provider)
+        return 0.0 if totals is None else totals.estimated()
 
     def summary(self) -> UsageSummary:
         """Return a JSON-friendly summary grouped by provider plus the run total."""

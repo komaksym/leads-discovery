@@ -1,5 +1,9 @@
 # PVF Company Discovery & Ranking Implementation Plan
 
+> **Historical:** M1 used this original five-task plan. For M2 onward it is superseded by
+> `PLANS.md` and the approved M2 candidate-intelligence contract. Do not execute Tasks 2–5
+> from this file as current milestone boundaries.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build the smallest complete, resumable Python pipeline that discovers, researches, extracts, deterministically scores, and classifies approximately 20 North American PVF distributors without spending people-enrichment credits.

@@ -1,5 +1,9 @@
 # PVF Company Discovery & Ranking — Milestone 1 Design
 
+> **Foundational product design:** The product thesis remains relevant, but milestone
+> boundaries are superseded by `PLANS.md`. M2 implementation authority lives in
+> `docs/superpowers/specs/2026-08-23-m2-discovery-deduplication-design.md`.
+
 ## Goal
 
 Build and validate a cheap, mostly automated Python pipeline that discovers, researches, evaluates, and deterministically ranks North American PVF distributors for startup validation.
