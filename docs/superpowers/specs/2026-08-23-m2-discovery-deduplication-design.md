@@ -186,6 +186,7 @@ class ResearchRequest:
 class EvidenceBundle:
     company_id: str
     items: list[EvidenceItem]
+    raw_records: list[dict[str, Any]]
     usage_events: list[UsageEvent]
 
 
@@ -211,7 +212,8 @@ optional because Apify may omit `searchString`; never substitute another query.
 
 `DiscoveryProvider.search(request) -> DiscoveryBatch` is a synchronous protocol.
 Provider constructors receive a nonempty credential and an injected `httpx.Client`;
-Apify also receives injectable monotonic-clock and sleep functions for hermetic tests.
+Apify also receives injectable monotonic-clock, sleep, and optional run-start callback
+functions for hermetic persistence tests.
 Callers own the client. Adapters do not read environment variables, create global
 clients, close injected clients, log bodies/secrets, or retry.
 
@@ -332,6 +334,11 @@ capped remote run untouched. Never start a replacement run or raise/evade the su
 cap. `FAILED`, `TIMED-OUT`, and `ABORTED` are terminal errors; unknown states are
 invalid responses. If Apify rejects a cap below the Actor's current minimum, return
 `invalid_request` without increasing it.
+
+After validating the start response, invoke the optional run-start callback with the safe
+run ID before the first poll. `resume(request, run_id)` performs no start POST and polls/fetches
+only that existing run. These are the only live-run additions beyond the shared search
+protocol.
 
 Map `placeId`/`cid`, title, Maps URL, website, structured location, `searchString`, and
 description/category into `DiscoveryRecord`; preserve closed status and the full row.
@@ -483,9 +490,10 @@ as estimated. Discovery and research usage remain separate operations.
 ## DeepSeek structured extraction
 
 `DeepSeekExtractor.extract(company, bundle) -> ExtractionResult` receives a nonempty API
-key, injected `httpx.Client`, explicit model, explicit per-run budget state, and a price
-schedule. It does not read environment variables, construct/close the client, retry,
-repair malformed output with another paid call, or score the company.
+key, injected `httpx.Client`, explicit model, and a price schedule. The runner owns the
+persisted per-run budget state and reservation. The extractor does not read environment
+variables, construct/close the client, retry, repair malformed output with another paid
+call, or score the company.
 
 The current live configuration uses `POST https://api.deepseek.com/chat/completions` with
 Bearer auth and exactly these behavioral controls:
