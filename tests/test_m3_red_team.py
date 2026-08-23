@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import os
 from pathlib import Path
 
 import pytest
@@ -180,7 +181,7 @@ def test_atomic_text_write_failure_preserves_existing_target_and_cleans_temp(
     def fail_replace(_source: object, _target: object) -> None:
         raise OSError("injected replace failure")
 
-    monkeypatch.setattr(state_module.os, "replace", fail_replace)
+    monkeypatch.setattr(os, "replace", fail_replace)
     with pytest.raises(OSError, match="injected replace failure"):
         state_module.write_text_atomic(target, "new\n")
 
