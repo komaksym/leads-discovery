@@ -131,8 +131,9 @@ def test_exact_exa_wire_request_mapping_raw_preservation_and_usage() -> None:
     assert first.retrieved_at == second.retrieved_at
     parsed_timestamp = datetime.fromisoformat(first.retrieved_at)
     assert parsed_timestamp.tzinfo is not None
-    assert parsed_timestamp.utcoffset() is not None
-    assert parsed_timestamp.utcoffset().total_seconds() == 0
+    offset = parsed_timestamp.utcoffset()
+    assert offset is not None
+    assert offset.total_seconds() == 0
     assert re.fullmatch(r"raw_[0-9a-f]{24}", first.record_id)
     assert re.fullmatch(r"raw_[0-9a-f]{24}", second.record_id)
     assert first.record_id != second.record_id
