@@ -10,7 +10,7 @@ from collections.abc import Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Final, cast
+from typing import Any, Final, Never, cast
 
 from leads_discovery.calibration import CalibrationSummary, calibrate_run
 from leads_discovery.models import RunCheckpoint
@@ -27,7 +27,7 @@ _RUN_ID: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$
 class _ArgumentParser(argparse.ArgumentParser):
     """Convert CLI parse failures into sanitized application-level failures."""
 
-    def error(self, message: str) -> None:
+    def error(self, message: str) -> Never:
         """Raise instead of printing argparse's unsanitized error and exiting with code two."""
         raise ValueError(message)
 

@@ -8,7 +8,7 @@ import math
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Final, cast
+from typing import Any, Final
 
 from leads_discovery.models import CompanyRecord, RunCheckpoint
 from leads_discovery.pipeline.state import (
@@ -203,7 +203,7 @@ def _validate_company_shape(company: CompanyRecord) -> None:
 def _load_latest_extracted(path: Path) -> tuple[CompanyRecord, ...]:
     """Load the latest M2 extraction snapshot per company without mutating M2 state."""
     if not path.exists():
-        raise ValueError("companies_extracted.jsonl does not exist")
+        return ()
     latest: dict[str, CompanyRecord] = {}
     for payload in load_jsonl(path):
         company = CompanyRecord.from_dict(payload)
@@ -271,7 +271,7 @@ def _csv_row(company: CompanyRecord) -> dict[str, str]:
         "direct_pain_coverage": _coverage_cell(coverage["direct_pain"]),
         "overall_coverage": _coverage_cell(coverage["overall"]),
         "final_score": _score_cell(company.final_score),
-        "final_decision": cast(str, company.final_decision),
+        "final_decision": company.final_decision,
         "review_reasons": ";".join(company.review_reasons),
         "rejection_reasons": ";".join(company.rejection_reasons),
     }
@@ -291,7 +291,7 @@ def _rank_records(
         """Build one ranking key with missing scores after known scores."""
         if company.final_decision not in _DECISION_ORDER:
             raise ValueError("evaluated company has an invalid final decision")
-        decision = cast(str, company.final_decision)
+        decision = company.final_decision
         score = company.final_score
         return (
             _DECISION_ORDER[decision],

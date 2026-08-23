@@ -7,7 +7,7 @@ import io
 from dataclasses import dataclass
 from pathlib import Path
 from statistics import fmean
-from typing import Final, Literal, cast
+from typing import Final, Literal
 
 from leads_discovery.models import CompanyRecord
 from leads_discovery.pipeline.evaluation import (
@@ -99,7 +99,7 @@ def _load_labels(path: Path, known_ids: set[str]) -> dict[str, _ManualEntry]:
         label = raw_label.upper()
         if label not in _LABELS:
             raise ValueError("manual_label must be exactly A, B, or C")
-        entries[company_id] = _ManualEntry(cast(ManualLabel, label), notes)
+        entries[company_id] = _ManualEntry(label, notes)
     return entries
 
 
@@ -113,7 +113,7 @@ def _policy_version(records: tuple[CompanyRecord, ...], run_summary: Path) -> st
             not isinstance(value, str) or not value.strip()
         ):
             raise ValueError("run summary policy_version is invalid")
-        summary_version = cast(str | None, value)
+        summary_version = value
     record_version = records[0].evaluation_policy_version if records else None
     if (
         record_version is not None
@@ -190,7 +190,7 @@ def _matrix(
         decision = company.final_decision
         if decision not in _DECISIONS:
             raise ValueError("evaluated company has an invalid final decision")
-        matrix[entry.label][cast(str, decision)] += 1
+        matrix[entry.label][decision] += 1
     return matrix
 
 
