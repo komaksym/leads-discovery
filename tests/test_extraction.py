@@ -285,8 +285,8 @@ def test_invalid_fact_schema_is_rejected_without_repair(
     assert caught.value.retryable is False
 
 
-def test_boolean_is_not_accepted_as_integer_branch_count() -> None:
-    """Python bool must not pass integer validation for a count-valued fact."""
+def test_boolean_fact_value_is_allowed_for_branch_count_without_integer_coercion() -> None:
+    """The owner-defined FactValue union applies uniformly, so bool stays a bool for every key."""
     facts = _unknown_facts()
     facts["branch_count"] = {
         "value": True,
@@ -297,16 +297,15 @@ def test_boolean_is_not_accepted_as_integer_branch_count() -> None:
     with httpx.Client(
         transport=httpx.MockTransport(lambda _request: httpx.Response(200, json=_response(facts)))
     ) as client:
-        extractor = DeepSeekExtractor(
+        result = DeepSeekExtractor(
             api_key=API_KEY,
             client=client,
             model=MODEL,
             prices=PRICES,
-        )
-        with pytest.raises(DiscoveryProviderError) as caught:
-            extractor.extract(_company(), _bundle())
+        ).extract(_company(), _bundle())
 
-    assert caught.value.kind == "invalid_response"
+    assert result.facts["branch_count"].value is True
+    assert type(result.facts["branch_count"].value) is bool
 
 
 @pytest.mark.parametrize(
