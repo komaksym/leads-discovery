@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import suppress
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -312,15 +313,13 @@ def test_preexisting_artifact_symlink_cannot_redirect_writes_outside_data_root(
     except OSError:
         pytest.skip("filesystem does not support symlinks")
 
-    try:
+    with suppress(OSError, RuntimeError, ValueError):
         run_m2_batch(
             _config(tmp_path, "symlink-escape"),
             discovery={"exa": FakeDiscovery()},
             researcher=FakeResearcher(),
             extractor=FakeExtractor(),
         )
-    except (OSError, RuntimeError, ValueError):
-        pass
 
     assert outside.read_text(encoding="utf-8") == "sentinel\n"
 
