@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import inspect
+import json
 import math
 import os
 import re
@@ -25,6 +27,7 @@ from leads_discovery.discovery import (
 )
 from leads_discovery.models import (
     CompanyRecord,
+    DiscoveryBatch,
     DiscoveryRecord,
     DiscoveryRequest,
     EvidenceBundle,
@@ -48,6 +51,7 @@ from leads_discovery.research import (
     DeepSeekPriceSchedule,
     ExaEvidenceResearcher,
     apply_extraction,
+    build_evidence_bundle,
     select_research_companies,
 )
 
@@ -89,6 +93,18 @@ class _RunPaths:
     usage: Path
     checkpoint: Path
 
+    def artifacts(self) -> tuple[Path, ...]:
+        """Return every writable M2 artifact path in deterministic order."""
+        return (
+            self.companies_raw,
+            self.companies_deduped,
+            self.research_raw,
+            self.companies_extracted,
+            self.usage_events,
+            self.usage,
+            self.checkpoint,
+        )
+
 
 def _now() -> str:
     """Return a UTC timestamp for checkpoint state transitions."""
@@ -96,15 +112,21 @@ def _now() -> str:
 
 
 def _validate_config(config: M2BatchConfig) -> _RunPaths:
-    """Validate run controls and return path-safe artifact locations before provider work."""
-    if not _RUN_ID.fullmatch(config.run_id):
+    """Validate all controls before filesystem mutation or provider work."""
+    if not isinstance(config.run_id, str) or not _RUN_ID.fullmatch(config.run_id):
         raise ValueError("run_id must match [A-Za-z0-9][A-Za-z0-9._-]{0,63}")
-    if isinstance(config.max_candidates, bool) or not 1 <= config.max_candidates <= 100:
-        raise ValueError("max_candidates must be in 1..100")
-    if isinstance(config.max_extracted, bool) or not 1 <= config.max_extracted <= 20:
-        raise ValueError("max_extracted must be in 1..20")
+    if isinstance(config.max_candidates, bool) or not isinstance(config.max_candidates, int):
+        raise ValueError("max_candidates must be an integer in 1..100")
+    if not 1 <= config.max_candidates <= 100:
+        raise ValueError("max_candidates must be an integer in 1..100")
+    if isinstance(config.max_extracted, bool) or not isinstance(config.max_extracted, int):
+        raise ValueError("max_extracted must be an integer in 1..20")
+    if not 1 <= config.max_extracted <= 20:
+        raise ValueError("max_extracted must be an integer in 1..20")
     if (
         isinstance(config.apify_budget_usd, bool)
+        or not isinstance(config.apify_budget_usd, (int, float))
+        or not math.isfinite(config.apify_budget_usd)
         or not 0 <= config.apify_budget_usd <= 1
     ):
         raise ValueError("apify_budget_usd must be in 0..1")
@@ -125,7 +147,10 @@ def _validate_config(config: M2BatchConfig) -> _RunPaths:
         raise ValueError("live extraction requires a positive explicit DeepSeek budget")
 
     root = config.data_root.expanduser().resolve()
-    run_dir = (root / config.run_id).resolve()
+    candidate = root / config.run_id
+    if candidate.is_symlink():
+        raise ValueError("run directory must not be a symlink")
+    run_dir = candidate.resolve()
     if run_dir.parent != root:
         raise ValueError("run directory must remain directly beneath data_root")
     return _RunPaths(
@@ -138,6 +163,13 @@ def _validate_config(config: M2BatchConfig) -> _RunPaths:
         usage=run_dir / "usage.json",
         checkpoint=run_dir / "checkpoint.json",
     )
+
+
+def _validate_artifact_paths(paths: _RunPaths) -> None:
+    """Reject pre-existing artifact symlinks before any artifact read or write."""
+    for path in paths.artifacts():
+        if path.is_symlink():
+            raise ValueError(f"artifact path must not be a symlink: {path.name}")
 
 
 def _initial_checkpoint(run_id: str) -> RunCheckpoint:
@@ -169,11 +201,15 @@ def _operations(checkpoint: RunCheckpoint) -> dict[str, dict[str, Any]]:
 def _stages(checkpoint: RunCheckpoint) -> dict[str, str]:
     """Return and validate the persisted free-stage completion map."""
     raw = checkpoint.provider_state.setdefault("stages", {})
-    if not isinstance(raw, dict) or any(
-        not isinstance(key, str) or not isinstance(value, str) for key, value in raw.items()
-    ):
+    if not isinstance(raw, dict):
         raise ValueError("checkpoint stages must be a string map")
-    return cast(dict[str, str], raw)
+    result: dict[str, str] = {}
+    for key, value in raw.items():
+        if not isinstance(key, str) or not isinstance(value, str):
+            raise ValueError("checkpoint stages must be a string map")
+        result[key] = value
+    checkpoint.provider_state["stages"] = result
+    return result
 
 
 def _persist_checkpoint(path: Path, checkpoint: RunCheckpoint) -> None:
@@ -221,7 +257,7 @@ def _finish_operation(
     state: str = "completed",
     error_kind: str | None = None,
 ) -> None:
-    """Atomically record a known operation outcome after its usage and output are durable."""
+    """Atomically record a known operation outcome after usage and output are durable."""
     entry = _operations(checkpoint)[operation_id]
     entry["state"] = state
     entry.pop("reservation_usd", None)
@@ -251,7 +287,7 @@ def _pause(
 
 
 def _record_usage(paths: _RunPaths, tracker: CostTracker, event: UsageEvent) -> None:
-    """Append one usage event, fsync it, then rebuild the atomic usage summary from replay."""
+    """Append/fsync one usage event and rebuild the atomic usage summary from replayed state."""
     append_usage_event(paths.usage_events, event)
     tracker.record(event)
     write_json_atomic(paths.usage, cast(dict[str, Any], tracker.summary()))
@@ -265,7 +301,10 @@ def _replay_usage(paths: _RunPaths) -> CostTracker:
 
 
 def _provider_budget_allows(
-    tracker: CostTracker, provider: str, ceiling: float | None, reservation: float = 0.0
+    tracker: CostTracker,
+    provider: str,
+    ceiling: float | None,
+    reservation: float = 0.0,
 ) -> bool:
     """Check one provider budget independently, failing closed when prior spend is unknown."""
     if ceiling is None:
@@ -296,7 +335,7 @@ def _append_research_raw(paths: _RunPaths, rows: Sequence[dict[str, Any]]) -> No
 
 
 def _unknown_in_flight(checkpoint: RunCheckpoint) -> tuple[str, dict[str, Any]] | None:
-    """Find the first Exa/DeepSeek operation whose previous paid outcome remains unknown."""
+    """Find the first provider operation whose previous paid outcome must not be repeated."""
     for operation_id, entry in sorted(_operations(checkpoint).items()):
         if entry.get("state") != "in_flight":
             continue
@@ -315,10 +354,10 @@ def _resume_apify_if_needed(
     provider: DiscoveryProvider,
     tracker: CostTracker,
 ) -> RunCheckpoint | None:
-    """Resume a persisted Apify Actor run and never start a replacement for it automatically."""
+    """Resume persisted Apify Actor runs and never start automatic replacements."""
     request_by_id = {request.request_id: request for request in requests}
     for operation_id, entry in sorted(_operations(checkpoint).items()):
-        if entry.get("state") not in {"in_flight", "pending"} or entry.get("provider") != "apify":
+        if entry.get("provider") != "apify" or entry.get("state") not in {"in_flight", "pending"}:
             continue
         run_id = entry.get("run_id")
         request_id = entry.get("request_id")
@@ -349,7 +388,7 @@ def _resume_apify_if_needed(
                 stage="discovery",
             )
         try:
-            batch = resume(request, run_id)
+            resumed = resume(request, run_id)
         except DiscoveryProviderError as exc:
             _record_usage(paths, tracker, exc.usage_event)
             if exc.retryable:
@@ -365,13 +404,17 @@ def _resume_apify_if_needed(
                 error_kind=exc.kind,
             )
             continue
-        for event in batch.usage_events:
+        if not isinstance(resumed, DiscoveryBatch):
+            return _pause(
+                checkpoint,
+                paths.checkpoint,
+                status="failed",
+                reason="apify_resume_returned_invalid_batch",
+                stage="discovery",
+            )
+        for event in resumed.usage_events:
             _record_usage(paths, tracker, event)
-        _append_discovery_batch(paths, batch.records)
-        if batch.usage_events:
-            safe_run_id = batch.usage_events[-1].metadata.get("run_id")
-            if isinstance(safe_run_id, str):
-                _operations(checkpoint)[operation_id]["run_id"] = safe_run_id
+        _append_discovery_batch(paths, resumed.records)
         _finish_operation(checkpoint, paths.checkpoint, operation_id)
     return None
 
@@ -403,8 +446,8 @@ def _discovery_phase(
             paths.checkpoint,
             status="paused_unknown",
             reason=f"unknown_in_flight:{operation_id}",
-            company_id=cast(str | None, entry.get("company_id")),
-            stage=cast(str | None, entry.get("operation")),
+            company_id=entry.get("company_id") if isinstance(entry.get("company_id"), str) else None,
+            stage=entry.get("operation") if isinstance(entry.get("operation"), str) else None,
         )
 
     for request in requests:
@@ -487,14 +530,12 @@ def _discovery_phase(
                     error_kind=exc.kind,
                 )
                 continue
-            outcome_state = (
-                "pending" if exc.retryable or exc.kind == "budget_exhausted" else "failed"
-            )
+            state = "pending" if exc.retryable or exc.kind == "budget_exhausted" else "failed"
             _finish_operation(
                 checkpoint,
                 paths.checkpoint,
                 operation_id,
-                state=outcome_state,
+                state=state,
                 error_kind=exc.kind,
             )
             if exc.kind == "budget_exhausted":
@@ -571,20 +612,124 @@ def _dedup_phase(paths: _RunPaths, checkpoint: RunCheckpoint) -> list[CompanyRec
 
 
 def _latest_company(base: CompanyRecord, paths: _RunPaths) -> CompanyRecord:
-    """Return the newest extracted/research snapshot for a company, falling back to deduped data."""
+    """Return the newest research/extraction snapshot, falling back to deduplicated data."""
     latest = load_latest_company_records(paths.companies_extracted).get(base.company_id)
     return base if latest is None else latest
 
 
 def _persist_research_snapshot(
-    paths: _RunPaths, company: CompanyRecord, bundle: EvidenceBundle
+    paths: _RunPaths,
+    company: CompanyRecord,
+    bundle: EvidenceBundle,
+    *,
+    completed: bool,
 ) -> CompanyRecord:
-    """Persist retained bounded evidence so a completed research call can resume at extraction."""
+    """Persist cumulative evidence with an explicit incomplete/completed research stage state."""
     updated = CompanyRecord.from_dict(company.to_dict())
     updated.evidence = [deepcopy(item) for item in bundle.items]
-    updated.stage_status["research"] = "completed"
+    updated.stage_status["research"] = "completed" if completed else "in_progress"
     append_company_snapshot(paths.companies_extracted, updated)
     return updated
+
+
+def _supports_research_progress(researcher: ExaEvidenceResearcher) -> bool:
+    """Return whether an injected researcher accepts the optional on_progress keyword."""
+    try:
+        parameters = inspect.signature(researcher.research).parameters
+    except (TypeError, ValueError):
+        return False
+    return "on_progress" in parameters
+
+
+def _deepseek_reservation(
+    extractor: DeepSeekExtractor,
+    company: CompanyRecord,
+    bundle: EvidenceBundle,
+) -> float:
+    """Return a validated conservative reservation for real extractors and simple test fakes."""
+    reservation_method = getattr(extractor, "reservation_cost_usd", None)
+    if callable(reservation_method):
+        value = reservation_method(company, bundle)
+    else:
+        prices = getattr(extractor, "prices", None)
+        if not isinstance(prices, DeepSeekPriceSchedule):
+            raise TypeError("extractor must expose reservation_cost_usd or a price schedule")
+        prompt_chars = len(json.dumps(company.to_dict(), sort_keys=True)) + sum(
+            len(item.excerpt or "") + len(item.url) + len(item.title or "")
+            for item in bundle.items
+        )
+        value = (
+            prompt_chars * prices.cache_miss_input_per_million
+            + 2048 * prices.output_per_million
+        ) / 1_000_000
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+        or value < 0
+    ):
+        raise ValueError("DeepSeek reservation must be a finite nonnegative number")
+    return float(value)
+
+
+def _handle_research_error(
+    *,
+    exc: DiscoveryProviderError,
+    checkpoint: RunCheckpoint,
+    paths: _RunPaths,
+    tracker: CostTracker,
+    operation_id: str,
+    company_id: str,
+) -> RunCheckpoint:
+    """Persist a research failure once and prevent replay when earlier calls already succeeded."""
+    _record_usage(paths, tracker, exc.usage_event)
+    entry = _operations(checkpoint)[operation_id]
+    successful_calls = entry.get("successful_calls", 0)
+    if isinstance(successful_calls, int) and not isinstance(successful_calls, bool) and successful_calls > 0:
+        entry["error_kind"] = exc.kind
+        _persist_checkpoint(paths.checkpoint, checkpoint)
+        return _pause(
+            checkpoint,
+            paths.checkpoint,
+            status="paused_unknown",
+            reason="partial_exa_research_not_replayable",
+            company_id=company_id,
+            stage="company_research",
+        )
+    state = "pending" if exc.retryable or exc.kind == "budget_exhausted" else "failed"
+    _finish_operation(
+        checkpoint,
+        paths.checkpoint,
+        operation_id,
+        state=state,
+        error_kind=exc.kind,
+    )
+    if exc.kind == "budget_exhausted":
+        return _pause(
+            checkpoint,
+            paths.checkpoint,
+            status="paused_budget",
+            reason="exa_budget_exhausted",
+            company_id=company_id,
+            stage="research",
+        )
+    if exc.kind in {"authentication", "invalid_request", "invalid_response", "permanent"}:
+        return _pause(
+            checkpoint,
+            paths.checkpoint,
+            status="failed",
+            reason=f"exa_{exc.kind}",
+            company_id=company_id,
+            stage="research",
+        )
+    return _pause(
+        checkpoint,
+        paths.checkpoint,
+        status="paused_retryable",
+        reason=f"exa_{exc.kind}",
+        company_id=company_id,
+        stage="research",
+    )
 
 
 def _research_and_extract_phase(
@@ -637,56 +782,62 @@ def _research_and_extract_phase(
                 operation="company_research",
                 company_id=company.company_id,
             )
+            progress_supported = _supports_research_progress(researcher)
+            cumulative_items = [deepcopy(item) for item in company.evidence]
+
+            def persist_progress(delta: EvidenceBundle) -> None:
+                """Fsync one successful Exa call's usage/raw rows and cumulative incomplete snapshot."""
+                nonlocal company, cumulative_items
+                if delta.company_id != company.company_id:
+                    raise ValueError("research progress bundle company_id mismatch")
+                for event in delta.usage_events:
+                    _record_usage(paths, tracker, event)
+                _append_research_raw(paths, delta.raw_records)
+                cumulative_items.extend(deepcopy(delta.items))
+                cumulative = build_evidence_bundle(
+                    company=company,
+                    items=cumulative_items,
+                    raw_records=[],
+                    usage_events=[],
+                )
+                company = _persist_research_snapshot(
+                    paths,
+                    company,
+                    cumulative,
+                    completed=False,
+                )
+                cumulative_items = [deepcopy(item) for item in cumulative.items]
+                entry = _operations(checkpoint)[research_op]
+                calls = entry.get("successful_calls", 0)
+                if isinstance(calls, bool) or not isinstance(calls, int) or calls < 0:
+                    raise ValueError("research successful_calls checkpoint value is invalid")
+                entry["successful_calls"] = calls + 1
+                _persist_checkpoint(paths.checkpoint, checkpoint)
+
             try:
-                bundle = researcher.research(company)
+                if progress_supported:
+                    bundle = researcher.research(company, on_progress=persist_progress)
+                else:
+                    bundle = researcher.research(company)
             except DiscoveryProviderError as exc:
-                _record_usage(paths, tracker, exc.usage_event)
-                _finish_operation(
-                    checkpoint,
-                    paths.checkpoint,
-                    research_op,
-                    state=(
-                        "pending"
-                        if exc.retryable or exc.kind == "budget_exhausted"
-                        else "failed"
-                    ),
-                    error_kind=exc.kind,
-                )
-                if exc.kind == "budget_exhausted":
-                    return _pause(
-                        checkpoint,
-                        paths.checkpoint,
-                        status="paused_budget",
-                        reason="exa_budget_exhausted",
-                        company_id=company.company_id,
-                        stage="research",
-                    )
-                if exc.kind in {
-                    "authentication",
-                    "invalid_request",
-                    "invalid_response",
-                    "permanent",
-                }:
-                    return _pause(
-                        checkpoint,
-                        paths.checkpoint,
-                        status="failed",
-                        reason=f"exa_{exc.kind}",
-                        company_id=company.company_id,
-                        stage="research",
-                    )
-                return _pause(
-                    checkpoint,
-                    paths.checkpoint,
-                    status="paused_retryable",
-                    reason=f"exa_{exc.kind}",
+                return _handle_research_error(
+                    exc=exc,
+                    checkpoint=checkpoint,
+                    paths=paths,
+                    tracker=tracker,
+                    operation_id=research_op,
                     company_id=company.company_id,
-                    stage="research",
                 )
-            for event in bundle.usage_events:
-                _record_usage(paths, tracker, event)
-            _append_research_raw(paths, bundle.raw_records)
-            company = _persist_research_snapshot(paths, company, bundle)
+            if not progress_supported:
+                for event in bundle.usage_events:
+                    _record_usage(paths, tracker, event)
+                _append_research_raw(paths, bundle.raw_records)
+            company = _persist_research_snapshot(
+                paths,
+                company,
+                bundle,
+                completed=True,
+            )
             _finish_operation(checkpoint, paths.checkpoint, research_op)
         else:
             bundle = EvidenceBundle(
@@ -715,7 +866,7 @@ def _research_and_extract_phase(
                 company_id=company.company_id,
                 stage="structured_extraction",
             )
-        reservation = extractor.reservation_cost_usd(company, bundle)
+        reservation = _deepseek_reservation(extractor, company, bundle)
         if not _provider_budget_allows(
             tracker, "deepseek", config.deepseek_budget_usd, reservation
         ):
@@ -740,15 +891,12 @@ def _research_and_extract_phase(
             result = extractor.extract(company, bundle)
         except DiscoveryProviderError as exc:
             _record_usage(paths, tracker, exc.usage_event)
+            state = "pending" if exc.retryable or exc.kind == "budget_exhausted" else "failed"
             _finish_operation(
                 checkpoint,
                 paths.checkpoint,
                 extraction_op,
-                state=(
-                    "pending"
-                    if exc.retryable or exc.kind == "budget_exhausted"
-                    else "failed"
-                ),
+                state=state,
                 error_kind=exc.kind,
             )
             if exc.kind == "budget_exhausted":
@@ -760,12 +908,7 @@ def _research_and_extract_phase(
                     company_id=company.company_id,
                     stage="extraction",
                 )
-            if exc.kind in {
-                "authentication",
-                "invalid_request",
-                "invalid_response",
-                "permanent",
-            }:
+            if exc.kind in {"authentication", "invalid_request", "invalid_response", "permanent"}:
                 return _pause(
                     checkpoint,
                     paths.checkpoint,
@@ -808,6 +951,7 @@ def run_m2_batch(
             pause_reason="live_execution_not_authorized",
         )
     paths.run_dir.mkdir(parents=True, exist_ok=True)
+    _validate_artifact_paths(paths)
     checkpoint = load_checkpoint(paths.checkpoint) or _initial_checkpoint(config.run_id)
     if checkpoint.run_id != config.run_id:
         raise ValueError("checkpoint run_id does not match requested run")
@@ -826,8 +970,8 @@ def run_m2_batch(
             paths.checkpoint,
             status="paused_unknown",
             reason=f"unknown_in_flight:{operation_id}",
-            company_id=cast(str | None, entry.get("company_id")),
-            stage=cast(str | None, entry.get("operation")),
+            company_id=entry.get("company_id") if isinstance(entry.get("company_id"), str) else None,
+            stage=entry.get("operation") if isinstance(entry.get("operation"), str) else None,
         )
 
     if _stages(checkpoint).get("discovery") != "completed":
