@@ -358,7 +358,7 @@ class ApifyDiscoveryProvider:
         country_code = _optional_str(raw.get("countryCode"))
         query = _optional_str(raw.get("searchString"))
         snippet = _optional_str(raw.get("description")) or _optional_str(raw.get("categoryName"))
-        parsed_identity = {
+        parsed_identity: dict[str, Any] = {
             "name": name,
             "website_url": website_url,
             "city": city,
@@ -438,7 +438,7 @@ def _run_cost(
     request_count: int,
     run_id: str,
 ) -> float | None:
-    """Read authenticated Apify spend or reject malformed present cost metadata."""
+    """Read authenticated Apify spend and enforce the exact request-level cap."""
     value = data.get("usageTotalUsd")
     if value is None:
         return None
@@ -448,6 +448,17 @@ def _run_cost(
         or not math.isfinite(value)
         or value < 0
     ):
+        raise provider_error(
+            provider="apify",
+            request_id=request.request_id,
+            operation="google_maps_search",
+            request_count=request_count,
+            kind="invalid_response",
+            retryable=False,
+            metadata={"request_id": request.request_id, "run_id": run_id},
+        ) from None
+    cap = request.max_cost_usd
+    if cap is None or float(value) > cap:
         raise provider_error(
             provider="apify",
             request_id=request.request_id,
