@@ -838,6 +838,8 @@ def _research_and_extract_phase(
             def persist_progress(
                 delta: EvidenceBundle,
                 operation_key: str = research_op,
+                query_count: int = len(research_requests),
+                budget_checked: bool = resumable_researcher,
             ) -> None:
                 """Fsync one Exa call then stop locally if the next call lacks budget."""
                 nonlocal company, cumulative_items
@@ -863,16 +865,16 @@ def _research_and_extract_phase(
                 entry = _operations(checkpoint)[operation_key]
                 calls = _research_successful_calls(
                     entry,
-                    max_queries=len(research_requests),
+                    max_queries=query_count,
                 )
                 calls += 1
-                if calls > len(research_requests):
+                if calls > query_count:
                     raise ValueError("research progress exceeded the bounded query count")
                 entry["successful_calls"] = calls
                 _persist_checkpoint(paths.checkpoint, checkpoint)
-                has_next_query = calls < len(research_requests)
+                has_next_query = calls < query_count
                 if (
-                    resumable_researcher
+                    budget_checked
                     and has_next_query
                     and not _provider_budget_allows(
                         tracker,
