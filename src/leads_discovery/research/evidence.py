@@ -7,7 +7,7 @@ import json
 import math
 import re
 from collections import defaultdict
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from typing import Any, cast
 from urllib.parse import urlsplit, urlunsplit
 
@@ -50,13 +50,13 @@ def select_research_companies(
     companies: Iterable[CompanyRecord], *, limit: int = 20
 ) -> tuple[CompanyRecord, ...]:
     """Select at most 20 in-scope companies using deterministic spend-priority ordering."""
-    if isinstance(limit, bool) or not 1 <= limit <= 20:
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 20:
         raise ValueError("limit must be in 1..20")
     eligible = [
         company
         for company in companies
         if "OUTSIDE_GEOGRAPHY" not in company.review_reasons
-        and (company.country in {None, "US", "CA"})
+        and company.country in {None, "US", "CA"}
     ]
     eligible.sort(
         key=lambda company: (
@@ -97,13 +97,11 @@ def _normalize_http_url(url: str) -> str | None:
             return None
         if parsed.username is not None or parsed.password is not None:
             return None
-        _ = parsed.port
+        port = parsed.port
         host = parsed.hostname.encode("idna").decode("ascii").casefold()
     except (ValueError, UnicodeError):
         return None
-    netloc = host
-    if parsed.port is not None:
-        netloc = f"{host}:{parsed.port}"
+    netloc = host if port is None else f"{host}:{port}"
     path = parsed.path or "/"
     return urlunsplit((parsed.scheme.casefold(), netloc, path, parsed.query, ""))
 
@@ -162,7 +160,7 @@ def build_evidence_bundle(
     return EvidenceBundle(
         company_id=company.company_id,
         items=bounded,
-        raw_records=[cast(dict[str, Any], row) for row in raw_records],
+        raw_records=[dict(row) for row in raw_records],
         usage_events=list(usage_events),
     )
 
@@ -177,8 +175,13 @@ class ExaEvidenceResearcher:
         self._api_key = api_key
         self._client = client
 
-    def research(self, company: CompanyRecord) -> EvidenceBundle:
-        """Execute the frozen three-query evidence catalog without retries or synthesis."""
+    def research(
+        self,
+        company: CompanyRecord,
+        *,
+        on_progress: Callable[[EvidenceBundle], None] | None = None,
+    ) -> EvidenceBundle:
+        """Execute three searches, optionally reporting each durable-success delta before the next."""
         requests = build_research_requests(company)
         retrieved_at = utc_timestamp()
         raw_records: list[dict[str, Any]] = []
@@ -188,6 +191,7 @@ class ExaEvidenceResearcher:
         attempted = 0
         for request in requests:
             attempted += 1
+            delta_request_count = 1 if on_progress is not None else attempted
             response = safe_transport_call(
                 lambda request=request: self._client.post(
                     _EXA_SEARCH_URL,
@@ -202,7 +206,7 @@ class ExaEvidenceResearcher:
                 provider="exa",
                 request_id=request.request_id,
                 operation="company_research",
-                request_count=attempted,
+                request_count=delta_request_count,
             )
             if not 200 <= response.status_code < 300:
                 kind, retryable = classify_http_status(response.status_code)
@@ -210,57 +214,88 @@ class ExaEvidenceResearcher:
                     provider="exa",
                     request_id=request.request_id,
                     operation="company_research",
-                    request_count=attempted,
+                    request_count=delta_request_count,
                     kind=kind,
                     retryable=retryable,
                     status_code=response.status_code,
                     metadata={"company_id": company.company_id, "attempted_requests": attempted},
                 ) from None
             try:
-                payload = response.json()
+                payload_raw = response.json()
             except Exception:
                 raise provider_error(
                     provider="exa",
                     request_id=request.request_id,
                     operation="company_research",
-                    request_count=attempted,
+                    request_count=delta_request_count,
                     kind="invalid_response",
                     retryable=False,
                     status_code=response.status_code,
                     metadata={"company_id": company.company_id, "attempted_requests": attempted},
                 ) from None
-            if not isinstance(payload, dict) or not isinstance(payload.get("results"), list):
+            if not isinstance(payload_raw, dict) or not isinstance(payload_raw.get("results"), list):
                 raise provider_error(
                     provider="exa",
                     request_id=request.request_id,
                     operation="company_research",
-                    request_count=attempted,
+                    request_count=delta_request_count,
                     kind="invalid_response",
                     retryable=False,
                     status_code=response.status_code,
                     metadata={"company_id": company.company_id, "attempted_requests": attempted},
                 ) from None
+            payload = cast(dict[str, Any], payload_raw)
             results = cast(list[Any], payload["results"])
             if any(not isinstance(row, dict) for row in results):
                 raise provider_error(
                     provider="exa",
                     request_id=request.request_id,
                     operation="company_research",
-                    request_count=attempted,
+                    request_count=delta_request_count,
                     kind="invalid_response",
                     retryable=False,
                     status_code=response.status_code,
                     metadata={"company_id": company.company_id, "attempted_requests": attempted},
                 ) from None
             bounded_results = results[: request.max_results]
-            result_counts.append(len(bounded_results))
-            for raw in bounded_results:
-                row = cast(dict[str, Any], raw)
-                raw_records.append(row)
-                item = self._to_evidence(row, retrieved_at)
-                if item is not None:
-                    items.append(item)
-            costs.append(_exa_cost(cast(dict[str, Any], payload), company.company_id, attempted))
+            call_raw_records = [cast(dict[str, Any], raw) for raw in bounded_results]
+            call_items = [
+                item
+                for raw in call_raw_records
+                if (item := self._to_evidence(raw, retrieved_at)) is not None
+            ]
+            call_cost = _exa_cost(
+                payload,
+                company.company_id,
+                delta_request_count,
+                attempted,
+            )
+            raw_records.extend(call_raw_records)
+            items.extend(call_items)
+            costs.append(call_cost)
+            result_counts.append(len(call_raw_records))
+
+            if on_progress is not None:
+                delta_usage = UsageEvent(
+                    provider="exa",
+                    operation="company_research",
+                    request_count=1,
+                    estimated_cost_usd=call_cost,
+                    metadata={
+                        "company_id": company.company_id,
+                        "request_id": request.request_id,
+                        "query_family": request.query_family,
+                        "result_count": len(call_raw_records),
+                    },
+                )
+                on_progress(
+                    build_evidence_bundle(
+                        company=company,
+                        items=call_items,
+                        raw_records=call_raw_records,
+                        usage_events=[delta_usage],
+                    )
+                )
 
         estimated = (
             sum(cost for cost in costs if cost is not None)
@@ -313,8 +348,13 @@ class ExaEvidenceResearcher:
         )
 
 
-def _exa_cost(payload: dict[str, Any], company_id: str, attempted: int) -> float | None:
-    """Read one nonnegative authenticated Exa research cost or reject malformed cost metadata."""
+def _exa_cost(
+    payload: dict[str, Any],
+    company_id: str,
+    request_count: int,
+    attempted: int,
+) -> float | None:
+    """Read one finite nonnegative authenticated Exa research cost or reject malformed metadata."""
     cost = payload.get("costDollars")
     if cost is None:
         return None
@@ -323,7 +363,7 @@ def _exa_cost(payload: dict[str, Any], company_id: str, attempted: int) -> float
             provider="exa",
             request_id=company_id,
             operation="company_research",
-            request_count=attempted,
+            request_count=request_count,
             kind="invalid_response",
             retryable=False,
             metadata={"company_id": company_id, "attempted_requests": attempted},
@@ -341,7 +381,7 @@ def _exa_cost(payload: dict[str, Any], company_id: str, attempted: int) -> float
             provider="exa",
             request_id=company_id,
             operation="company_research",
-            request_count=attempted,
+            request_count=request_count,
             kind="invalid_response",
             retryable=False,
             metadata={"company_id": company_id, "attempted_requests": attempted},
