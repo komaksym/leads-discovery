@@ -253,8 +253,8 @@ def _first_company_entity(raw: dict[str, Any]) -> dict[str, Any]:
                 first_untyped = entity
         if first_untyped is not None:
             return first_untyped
-    entity = raw.get("entity")
-    return cast(dict[str, Any], entity) if isinstance(entity, dict) else {}
+    raw_entity = raw.get("entity")
+    return raw_entity if isinstance(raw_entity, dict) else {}
 
 
 def _optional_str(value: Any) -> str | None:
