@@ -391,6 +391,27 @@ def test_duplicate_singleton_rows_receive_unique_deterministic_company_ids() -> 
     assert all(company.company_id.startswith("cmp_") for company in result.companies)
 
 
+def test_singleton_company_id_ignores_retrieval_time_for_same_stable_raw_identity() -> None:
+    """Stable singleton identity must not change only because the same raw row was retrieved later."""
+    earlier = _record(
+        "raw_stable",
+        website_url=None,
+        country_code=None,
+        retrieved_at="2026-08-23T09:00:00+00:00",
+    )
+    later = _record(
+        "raw_stable",
+        website_url=None,
+        country_code=None,
+        retrieved_at="2026-08-23T11:00:00+00:00",
+    )
+
+    earlier_id = deduplicate([earlier]).companies[0].company_id
+    later_id = deduplicate([later]).companies[0].company_id
+
+    assert earlier_id == later_id
+
+
 def test_permutation_invariance_and_exact_raw_row_conservation() -> None:
     """Every permutation serializes identically and every input occurrence is conserved once."""
     records = [
