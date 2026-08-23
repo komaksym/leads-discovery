@@ -16,9 +16,7 @@ def _fsync_directory(path: Path) -> None:
     """Persist directory-entry changes on POSIX filesystems when supported."""
     if os.name != "posix":
         return
-    flags = os.O_RDONLY
-    if hasattr(os, "O_DIRECTORY"):
-        flags |= os.O_DIRECTORY
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
     fd = os.open(path, flags)
     try:
         os.fsync(fd)
@@ -26,11 +24,21 @@ def _fsync_directory(path: Path) -> None:
         os.close(fd)
 
 
+def _ensure_write_target(path: Path) -> None:
+    """Reject a pre-existing symlink so artifact writes cannot escape through it."""
+    if path.is_symlink():
+        raise ValueError(f"artifact path must not be a symlink: {path.name}")
+
+
 def append_jsonl(path: Path, payload: dict[str, Any]) -> None:
-    """Append and fsync one JSON object, including its directory entry on first creation."""
+    """Append and fsync one JSON object without following a pre-existing artifact symlink."""
+    _ensure_write_target(path)
     path.parent.mkdir(parents=True, exist_ok=True)
+    _ensure_write_target(path)
     is_new = not path.exists()
-    with path.open("a", encoding="utf-8") as handle:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags, 0o666)
+    with os.fdopen(fd, "a", encoding="utf-8") as handle:
         handle.write(json.dumps(payload, sort_keys=True, ensure_ascii=False) + "\n")
         handle.flush()
         os.fsync(handle.fileno())
@@ -125,7 +133,8 @@ def _validate_usage_event(event: UsageEvent) -> None:
 
 
 def write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
-    """Atomically replace a JSON artifact so readers never observe a partial document."""
+    """Atomically replace JSON without following or mutating a pre-existing artifact symlink."""
+    _ensure_write_target(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     temp_path: Path | None = None
     try:
@@ -142,6 +151,7 @@ def write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
+        _ensure_write_target(path)
         os.replace(temp_path, path)
         _fsync_directory(path.parent)
     finally:
