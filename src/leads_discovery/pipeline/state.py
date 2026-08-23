@@ -108,22 +108,26 @@ def _validate_usage_event(event: UsageEvent) -> None:
         raise ValueError("usage provider must be a nonempty string")
     if not isinstance(event.operation, str) or not event.operation:
         raise ValueError("usage operation must be a nonempty string")
-    for name, value in (
+    for name, count_value in (
         ("request_count", event.request_count),
         ("input_tokens", event.input_tokens),
         ("output_tokens", event.output_tokens),
     ):
-        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        if (
+            isinstance(count_value, bool)
+            or not isinstance(count_value, int)
+            or count_value < 0
+        ):
             raise ValueError(f"usage {name} must be a nonnegative integer")
-    for name, value in (
+    for name, cost_value in (
         ("estimated_cost_usd", event.estimated_cost_usd),
         ("exact_cost_usd", event.exact_cost_usd),
     ):
-        if value is not None and (
-            isinstance(value, bool)
-            or not isinstance(value, (int, float))
-            or not math.isfinite(value)
-            or value < 0
+        if cost_value is not None and (
+            isinstance(cost_value, bool)
+            or not isinstance(cost_value, (int, float))
+            or not math.isfinite(cost_value)
+            or cost_value < 0
         ):
             raise ValueError(f"usage {name} must be a nonnegative number or null")
     if not isinstance(event.metadata, dict):
