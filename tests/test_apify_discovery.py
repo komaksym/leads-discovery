@@ -170,8 +170,9 @@ def test_apify_exact_start_input_one_run_callback_poll_dataset_mapping_and_usage
     assert len({item.retrieved_at for item in batch.records}) == 1
     retrieved = datetime.fromisoformat(record.retrieved_at)
     assert retrieved.tzinfo is not None
-    assert retrieved.utcoffset() is not None
-    assert retrieved.utcoffset().total_seconds() == 0
+    offset = retrieved.utcoffset()
+    assert offset is not None
+    assert offset.total_seconds() == 0
 
     assert len(batch.usage_events) == 1
     usage = batch.usage_events[0]
