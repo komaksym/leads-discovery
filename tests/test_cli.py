@@ -10,6 +10,7 @@ from typing import Any
 
 import httpx
 import pytest
+from m3_factories import accepted_facts, build_company, write_run_inputs
 
 import leads_discovery.cli as cli
 import leads_discovery.discovery as discovery_module
@@ -18,7 +19,6 @@ import leads_discovery.research as research_module
 from leads_discovery.models import RunCheckpoint
 from leads_discovery.pipeline.m2_batch import M2BatchConfig
 from leads_discovery.pipeline.state import load_checkpoint
-from m3_factories import accepted_facts, build_company, write_run_inputs
 
 _PROVIDER_KEYS = {"EXA_API_KEY", "APIFY_TOKEN", "DEEPSEEK_API_KEY"}
 
@@ -81,7 +81,7 @@ class _DummyHttp:
     def __init__(self, *_args: Any, **_kwargs: Any) -> None:
         pass
 
-    def __enter__(self) -> "_DummyHttp":
+    def __enter__(self) -> _DummyHttp:
         return self
 
     def __exit__(self, *_args: Any) -> None:
