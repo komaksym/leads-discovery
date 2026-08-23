@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from types import MappingProxyType
 from typing import Any, Final, Literal, cast
 
 from leads_discovery.models import CompanyRecord, DecisionReason, FactValue
@@ -110,7 +111,9 @@ _CATEGORY_RULES: Final[tuple[_CategoryRule, ...]] = (
         25.0,
         (
             _FeatureRule(
-                "known_current_direct_competitor_customer", 60.0, "inverted_boolean"
+                "known_current_direct_competitor_customer",
+                60.0,
+                "inverted_boolean",
             ),
             _FeatureRule(
                 "known_quote_automation_or_order_automation_relationship",
@@ -130,54 +133,79 @@ _CATEGORY_RULES: Final[tuple[_CategoryRule, ...]] = (
     ),
 )
 
-_FACT_KINDS: Final[dict[str, _FactKind]] = {
-    "pvf_relevant": "boolean",
-    "industrial_or_process_customer_focus": "boolean",
-    "branch_count": "positive_integer",
-    "inside_sales_or_estimating_presence": "boolean",
-    "rfq_or_quote_workflow_evidence": "boolean",
-    "project_or_tender_business": "boolean",
-    "bom_or_line_item_complexity": "boolean",
-    "manufacturer_count_or_breadth": "manufacturer",
-    "relevant_hiring": "boolean",
-    "employee_count": "positive_integer",
-    "revenue_if_reliably_available": "positive_number",
-    "regional_independent_signal": "boolean",
-    "multi_location_signal": "boolean",
-    "known_current_direct_competitor_customer": "boolean",
-    "known_competitor_evaluation_history": "boolean",
-    "known_quote_automation_or_order_automation_relationship": "boolean",
-    "direct_quotation_pain_evidence": "boolean",
-    "manual_workflow_evidence": "boolean",
-    "explicit_process_bottleneck_evidence": "boolean",
-}
+_FACT_KINDS: Final[Mapping[str, _FactKind]] = MappingProxyType(
+    {
+        "pvf_relevant": "boolean",
+        "industrial_or_process_customer_focus": "boolean",
+        "branch_count": "positive_integer",
+        "inside_sales_or_estimating_presence": "boolean",
+        "rfq_or_quote_workflow_evidence": "boolean",
+        "project_or_tender_business": "boolean",
+        "bom_or_line_item_complexity": "boolean",
+        "manufacturer_count_or_breadth": "manufacturer",
+        "relevant_hiring": "boolean",
+        "employee_count": "positive_integer",
+        "revenue_if_reliably_available": "positive_number",
+        "regional_independent_signal": "boolean",
+        "multi_location_signal": "boolean",
+        "known_current_direct_competitor_customer": "boolean",
+        "known_competitor_evaluation_history": "boolean",
+        "known_quote_automation_or_order_automation_relationship": "boolean",
+        "direct_quotation_pain_evidence": "boolean",
+        "manual_workflow_evidence": "boolean",
+        "explicit_process_bottleneck_evidence": "boolean",
+    }
+)
 
-_REVIEW_EXPLANATIONS: Final[dict[str, str]] = {
-    "pvf_relevance_unresolved": "PVF relevance is not positively resolved at the required confidence.",
-    "score_below_acceptance": "The usable evidence score is below the acceptance threshold.",
-    "score_unavailable": "No scored category has usable evidence.",
-    "low_overall_coverage": "Overall usable evidence coverage is below the acceptance threshold.",
-    "low_workload_coverage": "Workload evidence coverage is below the acceptance threshold.",
-    "low_economic_coverage": "Economic-fit evidence coverage is below the acceptance threshold.",
-    "incumbent_exposure_unresolved": "No incumbent-exposure fact is usable.",
-    "incumbent_exposure_ambiguous": "Usable evidence indicates a possible incumbent relationship.",
-    "competitor_history_review": "Public evidence indicates prior competitor evaluation history.",
-}
+_REVIEW_EXPLANATIONS: Final[Mapping[str, str]] = MappingProxyType(
+    {
+        "pvf_relevance_unresolved": (
+            "PVF relevance is not positively resolved at the required confidence."
+        ),
+        "score_below_acceptance": (
+            "The usable evidence score is below the acceptance threshold."
+        ),
+        "score_unavailable": "No scored category has usable evidence.",
+        "low_overall_coverage": (
+            "Overall usable evidence coverage is below the acceptance threshold."
+        ),
+        "low_workload_coverage": (
+            "Workload evidence coverage is below the acceptance threshold."
+        ),
+        "low_economic_coverage": (
+            "Economic-fit evidence coverage is below the acceptance threshold."
+        ),
+        "incumbent_exposure_unresolved": "No incumbent-exposure fact is usable.",
+        "incumbent_exposure_ambiguous": (
+            "Usable evidence indicates a possible incumbent relationship."
+        ),
+        "competitor_history_review": (
+            "Public evidence indicates prior competitor evaluation history."
+        ),
+    }
+)
 
-_REJECTION_EXPLANATIONS: Final[dict[str, str]] = {
-    "confirmed_not_pvf_relevant": "High-confidence cited evidence confirms the company is not PVF relevant.",
-    "confirmed_outside_us_canada": (
-        "Canonical and retained discovery geography agree the company is outside the US and Canada."
-    ),
-    "confirmed_inactive_or_dead": "Canonical company status is explicitly inactive or dead.",
-    "confirmed_current_direct_competitor_customer": (
-        "High-confidence cited evidence confirms a current direct-competitor relationship."
-    ),
-    "confirmed_too_small_for_meaningful_quote_workload": (
-        "High-confidence cited facts jointly confirm a very small company with no inside-sales "
-        "or RFQ workflow signal."
-    ),
-}
+_REJECTION_EXPLANATIONS: Final[Mapping[str, str]] = MappingProxyType(
+    {
+        "confirmed_not_pvf_relevant": (
+            "High-confidence cited evidence confirms the company is not PVF relevant."
+        ),
+        "confirmed_outside_us_canada": (
+            "Canonical and retained discovery geography agree the company is outside "
+            "the US and Canada."
+        ),
+        "confirmed_inactive_or_dead": (
+            "Canonical company status is explicitly inactive or dead."
+        ),
+        "confirmed_current_direct_competitor_customer": (
+            "High-confidence cited evidence confirms a current direct-competitor relationship."
+        ),
+        "confirmed_too_small_for_meaningful_quote_workload": (
+            "High-confidence cited facts jointly confirm a very small company with no "
+            "inside-sales or RFQ workflow signal."
+        ),
+    }
+)
 
 
 def _validate_threshold(name: str, value: object, *, maximum: float) -> None:
@@ -249,7 +277,9 @@ def _invalid_reason(key: str) -> DecisionReason:
     return DecisionReason(
         code=f"invalid_fact:{key}",
         kind="review",
-        explanation=f"Fact {key!r} is malformed, unsupported, or has invalid citations.",
+        explanation=(
+            f"Fact {key!r} is malformed, unsupported, or has invalid citations."
+        ),
     )
 
 
@@ -260,7 +290,7 @@ def _resolve_fact(
     retained_ids: set[str],
     policy: ScoringPolicy,
 ) -> tuple[_UsableFact | None, DecisionReason | None]:
-    """Resolve one cited fact as usable, unknown, or invalid without converting unknown to zero."""
+    """Resolve a cited fact as usable, unknown, or invalid without making unknown zero."""
     has_value = key in company.features
     has_meta = key in company.feature_confidence
     if not has_value and not has_meta:
@@ -300,7 +330,7 @@ def _resolve_fact(
 
 
 def _manufacturer_count(value: int | list[str]) -> int:
-    """Convert manufacturer count/list input to the deterministic distinct breadth count."""
+    """Convert manufacturer count/list input to the distinct breadth count."""
     if isinstance(value, int):
         return value
     return len({item.strip().casefold() for item in value if item.strip()})
@@ -327,10 +357,15 @@ def _signal(value: FactValue, transform: _SignalTransform) -> float:
         return 0.0 if cast(bool, value) else 100.0
     if transform == "manufacturer_breadth":
         if isinstance(value, str):
-            return {"none": 0.0, "narrow": 25.0, "moderate": 60.0, "broad": 100.0}[
-                value.casefold()
-            ]
-        return _count_signal(_manufacturer_count(cast(int | list[str], value)))
+            categories = {
+                "none": 0.0,
+                "narrow": 25.0,
+                "moderate": 60.0,
+                "broad": 100.0,
+            }
+            return categories[value.casefold()]
+        count = _manufacturer_count(cast(int | list[str], value))
+        return _count_signal(count)
 
     number = cast(int | float, value)
     if transform == "workload_branch_count":
@@ -362,6 +397,7 @@ def _signal(value: FactValue, transform: _SignalTransform) -> float:
         if count <= 500:
             return 70.0
         return 50.0
+
     revenue = float(number)
     if revenue < 1_000_000:
         return 20.0
@@ -375,10 +411,10 @@ def _signal(value: FactValue, transform: _SignalTransform) -> float:
 
 
 def _score_categories(
-    facts: dict[str, _UsableFact | None],
-) -> tuple[dict[str, float], dict[str, float], float | None, float]:
-    """Compute raw category scores, category coverage, final score, and overall coverage."""
-    category_scores: dict[str, float] = {}
+    facts: Mapping[str, _UsableFact | None],
+) -> tuple[dict[str, float], dict[str, float], float | None]:
+    """Compute raw category scores, category coverage, and the final score."""
+    scores: dict[str, float] = {}
     coverage: dict[str, float] = {}
     numerator = 0.0
     effective_total = 0.0
@@ -398,22 +434,21 @@ def _score_categories(
         category_coverage = usable_weight / configured_weight
         coverage[category.key] = category_coverage
         if usable_weight:
-            category_score = weighted_signal / usable_weight
-            category_scores[category.key] = category_score
+            score = weighted_signal / usable_weight
+            scores[category.key] = score
             effective_weight = category.product_weight * category_coverage
-            numerator += category_score * effective_weight
+            numerator += score * effective_weight
             effective_total += effective_weight
         overall_numerator += category.product_weight * category_coverage
         product_total += category.product_weight
 
+    coverage["overall"] = overall_numerator / product_total
     final_score = None if effective_total == 0.0 else numerator / effective_total
-    overall = overall_numerator / product_total
-    coverage["overall"] = overall
-    return category_scores, coverage, final_score, overall
+    return scores, coverage, final_score
 
 
 def _fact_review(code: str, fact: _UsableFact | None = None) -> DecisionReason:
-    """Build one stable review reason with citations when a resolved fact is relevant."""
+    """Build a stable review reason with citations when a fact is resolved."""
     return DecisionReason(
         code=code,
         kind="review",
@@ -424,7 +459,7 @@ def _fact_review(code: str, fact: _UsableFact | None = None) -> DecisionReason:
 
 
 def _fact_rejection(code: str, fact: _UsableFact) -> DecisionReason:
-    """Build one stable fact-backed hard rejection with retained citations."""
+    """Build a stable fact-backed hard rejection with retained citations."""
     return DecisionReason(
         code=code,
         kind="rejection",
@@ -435,7 +470,7 @@ def _fact_rejection(code: str, fact: _UsableFact) -> DecisionReason:
 
 
 def _structural_rejection(code: str) -> DecisionReason:
-    """Build one structural hard rejection that explains canonical/discovery provenance."""
+    """Build a structural hard rejection from canonical/discovery provenance."""
     return DecisionReason(
         code=code,
         kind="rejection",
@@ -459,9 +494,53 @@ def _confirmed_outside_us_canada(company: CompanyRecord) -> bool:
     return False
 
 
+def _small_company_rejection(
+    facts: Mapping[str, _UsableFact | None],
+    policy: ScoringPolicy,
+) -> DecisionReason | None:
+    """Return the exact four-fact high-confidence too-small rejection when complete."""
+    keys = (
+        "employee_count",
+        "branch_count",
+        "inside_sales_or_estimating_presence",
+        "rfq_or_quote_workflow_evidence",
+    )
+    raw_facts = tuple(facts.get(key) for key in keys)
+    if any(fact is None for fact in raw_facts):
+        return None
+    employee, branch, inside, rfq = cast(tuple[_UsableFact, ...], raw_facts)
+    selected = (employee, branch, inside, rfq)
+    if not all(
+        fact.confidence >= policy.hard_rejection_confidence for fact in selected
+    ):
+        return None
+    if not (
+        cast(int, employee.value) < 10
+        and branch.value == 1
+        and inside.value is False
+        and rfq.value is False
+    ):
+        return None
+    citations = sorted(
+        {
+            evidence_id
+            for fact in selected
+            for evidence_id in fact.evidence_ids
+        }
+    )
+    code = "confirmed_too_small_for_meaningful_quote_workload"
+    return DecisionReason(
+        code=code,
+        kind="rejection",
+        explanation=_REJECTION_EXPLANATIONS[code],
+        confidence=min(fact.confidence for fact in selected),
+        evidence_ids=citations,
+    )
+
+
 def _hard_rejections(
     company: CompanyRecord,
-    facts: dict[str, _UsableFact | None],
+    facts: Mapping[str, _UsableFact | None],
     policy: ScoringPolicy,
 ) -> list[DecisionReason]:
     """Evaluate only the five exact high-confidence hard rejection rules."""
@@ -487,54 +566,42 @@ def _hard_rejections(
         reasons.append(
             _fact_rejection("confirmed_current_direct_competitor_customer", incumbent)
         )
-
-    small_keys = (
-        "employee_count",
-        "branch_count",
-        "inside_sales_or_estimating_presence",
-        "rfq_or_quote_workflow_evidence",
-    )
-    small_facts = tuple(facts.get(key) for key in small_keys)
-    if all(fact is not None for fact in small_facts):
-        employee, branch, inside, rfq = cast(tuple[_UsableFact, ...], small_facts)
-        if (
-            employee.confidence >= policy.hard_rejection_confidence
-            and branch.confidence >= policy.hard_rejection_confidence
-            and inside.confidence >= policy.hard_rejection_confidence
-            and rfq.confidence >= policy.hard_rejection_confidence
-            and cast(int, employee.value) < 10
-            and branch.value == 1
-            and inside.value is False
-            and rfq.value is False
-        ):
-            citations = sorted(
-                {
-                    evidence_id
-                    for fact in (employee, branch, inside, rfq)
-                    for evidence_id in fact.evidence_ids
-                }
-            )
-            reasons.append(
-                DecisionReason(
-                    code="confirmed_too_small_for_meaningful_quote_workload",
-                    kind="rejection",
-                    explanation=_REJECTION_EXPLANATIONS[
-                        "confirmed_too_small_for_meaningful_quote_workload"
-                    ],
-                    confidence=min(fact.confidence for fact in (employee, branch, inside, rfq)),
-                    evidence_ids=citations,
-                )
-            )
+    small = _small_company_rejection(facts, policy)
+    if small is not None:
+        reasons.append(small)
     return reasons
 
 
+def _incumbent_review(
+    facts: Mapping[str, _UsableFact | None],
+) -> DecisionReason | None:
+    """Return the exact acceptance-gate review for unresolved or positive incumbency."""
+    keys = (
+        "known_current_direct_competitor_customer",
+        "known_quote_automation_or_order_automation_relationship",
+    )
+    usable = [fact for key in keys if (fact := facts.get(key)) is not None]
+    if not usable:
+        return _fact_review("incumbent_exposure_unresolved")
+    if not any(fact.value is True for fact in usable):
+        return None
+    cited = sorted({item for fact in usable for item in fact.evidence_ids})
+    return DecisionReason(
+        code="incumbent_exposure_ambiguous",
+        kind="review",
+        explanation=_REVIEW_EXPLANATIONS["incumbent_exposure_ambiguous"],
+        confidence=max(fact.confidence for fact in usable),
+        evidence_ids=cited,
+    )
+
+
 def _acceptance_reviews(
-    facts: dict[str, _UsableFact | None],
+    facts: Mapping[str, _UsableFact | None],
     final_score: float | None,
-    coverage: dict[str, float],
+    coverage: Mapping[str, float],
     policy: ScoringPolicy,
 ) -> list[DecisionReason]:
-    """Return one stable review reason for every failed precision-first acceptance gate."""
+    """Return a review reason for every failed precision-first acceptance gate."""
     reasons: list[DecisionReason] = []
     relevance = facts.get("pvf_relevant")
     if (
@@ -553,26 +620,9 @@ def _acceptance_reviews(
         reasons.append(_fact_review("low_workload_coverage"))
     if coverage["economic_fit"] < policy.minimum_economic_coverage:
         reasons.append(_fact_review("low_economic_coverage"))
-
-    incumbent_keys = (
-        "known_current_direct_competitor_customer",
-        "known_quote_automation_or_order_automation_relationship",
-    )
-    incumbent = [facts.get(key) for key in incumbent_keys]
-    usable = [fact for fact in incumbent if fact is not None]
-    if not usable:
-        reasons.append(_fact_review("incumbent_exposure_unresolved"))
-    elif any(fact.value is True for fact in usable):
-        cited = sorted({item for fact in usable for item in fact.evidence_ids})
-        reasons.append(
-            DecisionReason(
-                code="incumbent_exposure_ambiguous",
-                kind="review",
-                explanation=_REVIEW_EXPLANATIONS["incumbent_exposure_ambiguous"],
-                confidence=max(fact.confidence for fact in usable),
-                evidence_ids=cited,
-            )
-        )
+    incumbent = _incumbent_review(facts)
+    if incumbent is not None:
+        reasons.append(incumbent)
     return reasons
 
 
@@ -580,7 +630,7 @@ def evaluate_company(
     company: CompanyRecord,
     policy: ScoringPolicy = DEFAULT_POLICY,
 ) -> CompanyRecord:
-    """Return a detached deterministic M3 evaluation for one extraction-complete company."""
+    """Return a detached deterministic M3 evaluation for an extracted company."""
     if company.stage_status.get("extraction") != "completed":
         raise ValueError("company extraction stage must be completed before evaluation")
     updated = CompanyRecord.from_dict(company.to_dict())
@@ -593,27 +643,31 @@ def evaluate_company(
         if invalid_reason is not None:
             invalid.append(invalid_reason)
 
-    scores, raw_coverage, raw_final, _ = _score_categories(facts)
-    review_reasons = invalid
+    scores, raw_coverage, raw_final = _score_categories(facts)
+    reviews = list(invalid)
     history = facts.get("known_competitor_evaluation_history")
     if history is not None and history.value is True:
-        review_reasons.append(_fact_review("competitor_history_review", history))
+        reviews.append(_fact_review("competitor_history_review", history))
 
     rejections = _hard_rejections(updated, facts, policy)
     if rejections:
         decision: FinalDecision = "rejected"
     else:
         gate_reviews = _acceptance_reviews(facts, raw_final, raw_coverage, policy)
-        review_reasons.extend(gate_reviews)
+        reviews.extend(gate_reviews)
         decision = "accepted" if not gate_reviews else "uncertain"
 
-    updated.coverage = {key: round(value, 4) for key, value in raw_coverage.items()}
-    updated.score_components = {key: round(value, 2) for key, value in scores.items()}
+    updated.coverage = {
+        key: round(value, 4) for key, value in raw_coverage.items()
+    }
+    updated.score_components = {
+        key: round(value, 2) for key, value in scores.items()
+    }
     updated.final_score = None if raw_final is None else round(raw_final, 2)
     updated.final_decision = decision
-    updated.review_reasons = [reason.code for reason in review_reasons]
+    updated.review_reasons = [reason.code for reason in reviews]
     updated.rejection_reasons = [reason.code for reason in rejections]
-    updated.decision_reasons = review_reasons + rejections
+    updated.decision_reasons = reviews + rejections
     updated.evaluation_policy_version = policy.version
     updated.stage_status["scoring"] = "completed"
     updated.stage_status["decision"] = "completed"
@@ -635,7 +689,11 @@ def evaluate_companies(
     if len(ids) != len(set(ids)):
         raise ValueError("company IDs must be unique")
     selected = sorted(
-        (record for record in records if record.stage_status.get("extraction") == "completed"),
+        (
+            record
+            for record in records
+            if record.stage_status.get("extraction") == "completed"
+        ),
         key=lambda record: record.company_id,
     )[:limit]
     return tuple(evaluate_company(record, policy) for record in selected)

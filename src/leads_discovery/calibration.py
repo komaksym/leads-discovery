@@ -12,12 +12,12 @@ from typing import Final, Literal, cast
 from leads_discovery.models import CompanyRecord
 from leads_discovery.pipeline.evaluation import (
     _CSV_COLUMNS,
+    EvaluationConfig,
     _csv_row,
     _load_evaluated_records,
     _rank_records,
     _resolve_paths,
     _safe_csv_text,
-    EvaluationConfig,
 )
 from leads_discovery.pipeline.state import read_json, write_json_atomic, write_text_atomic
 
@@ -76,7 +76,9 @@ def _load_labels(path: Path, known_ids: set[str]) -> dict[str, _ManualEntry]:
     entries: dict[str, _ManualEntry] = {}
     for row_number, row in enumerate(rows[1:], start=2):
         if len(row) != len(headers):
-            raise ValueError(f"labels CSV row {row_number} has the wrong number of columns")
+            raise ValueError(
+                f"labels CSV row {row_number} has the wrong number of columns"
+            )
         company_id = row[id_index].strip()
         raw_label = row[label_index].strip()
         notes = "" if notes_index is None else row[notes_index].strip()
@@ -85,11 +87,15 @@ def _load_labels(path: Path, known_ids: set[str]) -> dict[str, _ManualEntry]:
         if company_id[0] in _FORMULA_PREFIXES:
             raise ValueError("formula-like company IDs are not allowed")
         if company_id in entries:
-            raise ValueError(f"labels CSV contains duplicate company_id {company_id!r}")
+            raise ValueError(
+                f"labels CSV contains duplicate company_id {company_id!r}"
+            )
         if company_id not in known_ids:
             raise ValueError(f"labels CSV contains unknown company_id {company_id!r}")
         if not raw_label:
-            raise ValueError(f"labels CSV row {row_number} has a blank manual_label")
+            raise ValueError(
+                f"labels CSV row {row_number} has a blank manual_label"
+            )
         label = raw_label.upper()
         if label not in _LABELS:
             raise ValueError("manual_label must be exactly A, B, or C")
@@ -98,16 +104,22 @@ def _load_labels(path: Path, known_ids: set[str]) -> dict[str, _ManualEntry]:
 
 
 def _policy_version(records: tuple[CompanyRecord, ...], run_summary: Path) -> str:
-    """Resolve one consistent evaluation policy version from evaluated records and summary."""
+    """Resolve one policy version from evaluated records and the run summary."""
     persisted = read_json(run_summary)
     summary_version: str | None = None
     if persisted is not None:
         value = persisted.get("policy_version")
-        if value is not None and (not isinstance(value, str) or not value.strip()):
+        if value is not None and (
+            not isinstance(value, str) or not value.strip()
+        ):
             raise ValueError("run summary policy_version is invalid")
         summary_version = cast(str | None, value)
     record_version = records[0].evaluation_policy_version if records else None
-    if record_version is not None and summary_version is not None and record_version != summary_version:
+    if (
+        record_version is not None
+        and summary_version is not None
+        and record_version != summary_version
+    ):
         raise ValueError("evaluated artifacts contain conflicting policy versions")
     version = record_version or summary_version
     if version is None:
@@ -115,7 +127,11 @@ def _policy_version(records: tuple[CompanyRecord, ...], run_summary: Path) -> st
     return version
 
 
-def _metric_summary(values: list[float], *, digits: int) -> dict[str, float | int] | None:
+def _metric_summary(
+    values: list[float],
+    *,
+    digits: int,
+) -> dict[str, float | int] | None:
     """Summarize one finite persisted score or coverage series for a manual label."""
     if not values:
         return None
@@ -131,8 +147,10 @@ def _label_summaries(
     records: tuple[CompanyRecord, ...],
     labels: dict[str, _ManualEntry],
 ) -> dict[str, dict[str, object]]:
-    """Compute report-only score and coverage summaries for every represented manual label."""
-    grouped: dict[ManualLabel, list[CompanyRecord]] = {label: [] for label in _LABELS}
+    """Compute score and coverage summaries for every represented manual label."""
+    grouped: dict[ManualLabel, list[CompanyRecord]] = {
+        label: [] for label in _LABELS
+    }
     for company in records:
         entry = labels.get(company.company_id)
         if entry is not None:
@@ -142,11 +160,15 @@ def _label_summaries(
         companies = grouped[label]
         if not companies:
             continue
-        scores = [company.final_score for company in companies if company.final_score is not None]
+        scores: list[float] = [
+            company.final_score
+            for company in companies
+            if company.final_score is not None
+        ]
         coverage = [company.coverage["overall"] for company in companies]
         result[label] = {
             "labeled_count": len(companies),
-            "final_score": _metric_summary(cast(list[float], scores), digits=2),
+            "final_score": _metric_summary(scores, digits=2),
             "overall_coverage": _metric_summary(coverage, digits=4),
         }
     return result
@@ -157,7 +179,10 @@ def _matrix(
     labels: dict[str, _ManualEntry],
 ) -> dict[str, dict[str, int]]:
     """Build the complete A/B/C by accepted/rejected/uncertain count matrix."""
-    matrix = {label: {decision: 0 for decision in _DECISIONS} for label in _LABELS}
+    matrix: dict[str, dict[str, int]] = {
+        label: {decision: 0 for decision in _DECISIONS}
+        for label in _LABELS
+    }
     for company in records:
         entry = labels.get(company.company_id)
         if entry is None:
@@ -197,7 +222,7 @@ def _render_joined_csv(
     records: tuple[CompanyRecord, ...],
     labels: dict[str, _ManualEntry],
 ) -> str:
-    """Regenerate ranked context and join only validated manual label and notes values."""
+    """Regenerate ranked context and join only validated manual label/notes values."""
     columns = _CSV_COLUMNS + ("manual_label", "manual_notes")
     stream = io.StringIO(newline="")
     writer = csv.DictWriter(stream, fieldnames=columns, lineterminator="\n")
@@ -206,7 +231,9 @@ def _render_joined_csv(
         row = _csv_row(company)
         entry = labels.get(company.company_id)
         row["manual_label"] = "" if entry is None else entry.label
-        row["manual_notes"] = "" if entry is None else _safe_csv_text(entry.notes)
+        row["manual_notes"] = (
+            "" if entry is None else _safe_csv_text(entry.notes)
+        )
         writer.writerow(row)
     return stream.getvalue()
 
@@ -216,10 +243,11 @@ def calibrate_run(
     *,
     labels_path: Path,
 ) -> CalibrationSummary:
-    """Compare manual A/B/C labels with evaluated decisions without mutating policy or state."""
+    """Compare labels with decisions without mutating policy, state, or M2 artifacts."""
     paths = _resolve_paths(config)
     records = _load_evaluated_records(paths.evaluated)
-    labels = _load_labels(labels_path, {company.company_id for company in records})
+    known_ids = {company.company_id for company in records}
+    labels = _load_labels(labels_path, known_ids)
     version = _policy_version(records, paths.run_summary)
     critical, review = _disagreements(records, labels)
     report = {

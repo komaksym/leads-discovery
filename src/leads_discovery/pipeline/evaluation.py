@@ -22,7 +22,11 @@ from leads_discovery.pipeline.state import (
 from leads_discovery.scoring import DEFAULT_POLICY, ScoringPolicy, evaluate_companies
 
 _RUN_ID: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
-_DECISION_ORDER: Final[dict[str, int]] = {"accepted": 0, "uncertain": 1, "rejected": 2}
+_DECISION_ORDER: Final[dict[str, int]] = {
+    "accepted": 0,
+    "uncertain": 1,
+    "rejected": 2,
+}
 _FORMULA_PREFIXES: Final[frozenset[str]] = frozenset("=+-@")
 _CSV_COLUMNS: Final[tuple[str, ...]] = (
     "company_id",
@@ -106,7 +110,7 @@ class _EvaluationPaths:
 
 
 def _resolve_paths(config: EvaluationConfig) -> _EvaluationPaths:
-    """Validate run ID, cap, direct-child path containment, and symlink boundaries."""
+    """Validate run ID, cap, path containment, and all relevant symlink boundaries."""
     if not isinstance(config.run_id, str) or not _RUN_ID.fullmatch(config.run_id):
         raise ValueError("run_id must match [A-Za-z0-9][A-Za-z0-9._-]{0,63}")
     if (
@@ -148,7 +152,7 @@ def _resolve_paths(config: EvaluationConfig) -> _EvaluationPaths:
 
 
 def _validate_company_shape(company: CompanyRecord) -> None:
-    """Reject run-level canonical corruption while leaving fact-level validity to scoring."""
+    """Reject run-level canonical corruption while leaving fact validity to scoring."""
     if not isinstance(company.company_id, str) or not company.company_id:
         raise ValueError("company_id must be a nonempty string")
     if not isinstance(company.name, str) or not company.name:
@@ -157,8 +161,10 @@ def _validate_company_shape(company: CompanyRecord) -> None:
         raise ValueError("company country must be a string or null")
     if not isinstance(company.status, str):
         raise ValueError("company status must be a string")
-    if not isinstance(company.features, dict) or not isinstance(company.feature_confidence, dict):
-        raise ValueError("company fact containers must be objects")
+    if not isinstance(company.features, dict):
+        raise ValueError("company features must be an object")
+    if not isinstance(company.feature_confidence, dict):
+        raise ValueError("company feature_confidence must be an object")
     if not isinstance(company.stage_status, dict) or any(
         not isinstance(key, str) or not isinstance(value, str)
         for key, value in company.stage_status.items()
@@ -169,12 +175,20 @@ def _validate_company_shape(company: CompanyRecord) -> None:
     ):
         raise ValueError("company discovery_records must contain objects")
     for name, value in company.coverage.items():
-        if not isinstance(name, str) or isinstance(value, bool) or not isinstance(value, (int, float)):
+        if (
+            not isinstance(name, str)
+            or isinstance(value, bool)
+            or not isinstance(value, (int, float))
+        ):
             raise ValueError("persisted coverage must be a finite numeric map")
         if not math.isfinite(value):
             raise ValueError("persisted coverage must be finite")
     for name, value in company.score_components.items():
-        if not isinstance(name, str) or isinstance(value, bool) or not isinstance(value, (int, float)):
+        if (
+            not isinstance(name, str)
+            or isinstance(value, bool)
+            or not isinstance(value, (int, float))
+        ):
             raise ValueError("persisted score_components must be a finite numeric map")
         if not math.isfinite(value):
             raise ValueError("persisted score_components must be finite")
@@ -187,7 +201,7 @@ def _validate_company_shape(company: CompanyRecord) -> None:
 
 
 def _load_latest_extracted(path: Path) -> tuple[CompanyRecord, ...]:
-    """Load the latest M2 extraction snapshot per company without mutating the append-only file."""
+    """Load the latest M2 extraction snapshot per company without mutating M2 state."""
     if not path.exists():
         raise ValueError("companies_extracted.jsonl does not exist")
     latest: dict[str, CompanyRecord] = {}
@@ -199,7 +213,7 @@ def _load_latest_extracted(path: Path) -> tuple[CompanyRecord, ...]:
 
 
 def _safe_csv_text(value: str) -> str:
-    """Neutralize spreadsheet formulas while preserving the original JSON text elsewhere."""
+    """Neutralize spreadsheet formulas while preserving original text in JSON."""
     stripped = value.lstrip()
     if stripped and stripped[0] in _FORMULA_PREFIXES:
         return "'" + value
@@ -207,7 +221,7 @@ def _safe_csv_text(value: str) -> str:
 
 
 def _score_cell(value: float | None) -> str:
-    """Render a persisted score with two decimal places or a blank missing cell."""
+    """Render a persisted score with two decimal places or a blank cell."""
     return "" if value is None else f"{value:.2f}"
 
 
@@ -241,7 +255,9 @@ def _csv_row(company: CompanyRecord) -> dict[str, str]:
         "policy_version": company.evaluation_policy_version,
         "workload_score": _score_cell(company.score_components.get("workload")),
         "workload_coverage": _coverage_cell(coverage["workload"]),
-        "economic_fit_score": _score_cell(company.score_components.get("economic_fit")),
+        "economic_fit_score": _score_cell(
+            company.score_components.get("economic_fit")
+        ),
         "economic_fit_coverage": _coverage_cell(coverage["economic_fit"]),
         "low_incumbent_exposure_score": _score_cell(
             company.score_components.get("low_incumbent_exposure")
@@ -249,7 +265,9 @@ def _csv_row(company: CompanyRecord) -> dict[str, str]:
         "low_incumbent_exposure_coverage": _coverage_cell(
             coverage["low_incumbent_exposure"]
         ),
-        "direct_pain_score": _score_cell(company.score_components.get("direct_pain")),
+        "direct_pain_score": _score_cell(
+            company.score_components.get("direct_pain")
+        ),
         "direct_pain_coverage": _coverage_cell(coverage["direct_pain"]),
         "overall_coverage": _coverage_cell(coverage["overall"]),
         "final_score": _score_cell(company.final_score),
@@ -260,20 +278,23 @@ def _csv_row(company: CompanyRecord) -> dict[str, str]:
 
 
 def _normalized_sort_name(company: CompanyRecord) -> str:
-    """Return the stable normalized name used only for deterministic export tie-breaking."""
+    """Return the normalized name used only for deterministic export tie-breaking."""
     raw = company.normalized_name or company.name
     return " ".join(raw.split()).casefold()
 
 
-def _rank_records(companies: tuple[CompanyRecord, ...]) -> tuple[CompanyRecord, ...]:
-    """Sort evaluated records by the frozen decision, score, coverage, name, and ID order."""
+def _rank_records(
+    companies: tuple[CompanyRecord, ...],
+) -> tuple[CompanyRecord, ...]:
+    """Sort by the frozen decision, score, coverage, name, and company-ID order."""
     def key(company: CompanyRecord) -> tuple[int, bool, float, float, str, str]:
-        """Build one deterministic ranking key with missing scores after known scores."""
+        """Build one ranking key with missing scores after known scores."""
         if company.final_decision not in _DECISION_ORDER:
             raise ValueError("evaluated company has an invalid final decision")
+        decision = cast(str, company.final_decision)
         score = company.final_score
         return (
-            _DECISION_ORDER[company.final_decision],
+            _DECISION_ORDER[decision],
             score is None,
             0.0 if score is None else -score,
             -company.coverage["overall"],
@@ -290,7 +311,8 @@ def _render_csv(
     include_manual_columns: bool = False,
 ) -> str:
     """Render RFC-4180-compatible UTF-8 CSV with exact LF line endings."""
-    columns = _CSV_COLUMNS + (("manual_label", "manual_notes") if include_manual_columns else ())
+    manual_columns = ("manual_label", "manual_notes")
+    columns = _CSV_COLUMNS + (manual_columns if include_manual_columns else ())
     stream = io.StringIO(newline="")
     writer = csv.DictWriter(stream, fieldnames=columns, lineterminator="\n")
     writer.writeheader()
@@ -316,7 +338,7 @@ def _empty_usage_summary() -> dict[str, Any]:
 
 
 def _load_usage_summary(path: Path) -> dict[str, Any]:
-    """Read the existing M2 usage summary without altering ledgers or fabricating costs."""
+    """Read existing M2 usage without altering ledgers or fabricating costs."""
     payload = read_json(path)
     if payload is None:
         return _empty_usage_summary()
@@ -342,7 +364,7 @@ def _summary_payload(
     companies: tuple[CompanyRecord, ...],
     paths: _EvaluationPaths,
 ) -> dict[str, Any]:
-    """Build the deterministic persisted run summary from local state and existing usage."""
+    """Build the persisted run summary from local state and existing usage."""
     decisions = [company.final_decision for company in companies]
     return {
         "run_id": config.run_id,
@@ -375,7 +397,9 @@ def _load_evaluated_records(path: Path) -> tuple[CompanyRecord, ...]:
         company = CompanyRecord.from_dict(payload)
         _validate_company_shape(company)
         if company.company_id in ids:
-            raise ValueError("companies_evaluated.jsonl contains duplicate company IDs")
+            raise ValueError(
+                "companies_evaluated.jsonl contains duplicate company IDs"
+            )
         ids.add(company.company_id)
         if company.stage_status.get("decision") != "completed":
             raise ValueError("evaluated company decision stage is not completed")
@@ -402,14 +426,24 @@ def evaluate_run(
         raise ValueError("checkpoint run_id does not match requested run")
 
     latest = _load_latest_extracted(paths.extracted)
-    evaluated = evaluate_companies(latest, limit=config.max_evaluated, policy=policy)
+    evaluated = evaluate_companies(
+        latest,
+        limit=config.max_evaluated,
+        policy=policy,
+    )
     if not evaluated and checkpoint.status == "completed":
-        raise ValueError("completed M2 checkpoint has no extraction-complete companies")
+        raise ValueError(
+            "completed M2 checkpoint has no extraction-complete companies"
+        )
 
     by_id = tuple(sorted(evaluated, key=lambda company: company.company_id))
     ranked = _rank_records(by_id)
-    rejected = tuple(company for company in ranked if company.final_decision == "rejected")
-    uncertain = tuple(company for company in ranked if company.final_decision == "uncertain")
+    rejected = tuple(
+        company for company in ranked if company.final_decision == "rejected"
+    )
+    uncertain = tuple(
+        company for company in ranked if company.final_decision == "uncertain"
+    )
     summary_payload = _summary_payload(config, policy, checkpoint, by_id, paths)
 
     evaluated_payloads = [company.to_dict() for company in by_id]
@@ -433,5 +467,5 @@ def evaluate_run(
         accepted_count=decisions.count("accepted"),
         rejected_count=decisions.count("rejected"),
         uncertain_count=decisions.count("uncertain"),
-        artifact_paths=tuple(Path(path) for path in paths.output_paths()),
+        artifact_paths=tuple(paths.output_paths()),
     )
