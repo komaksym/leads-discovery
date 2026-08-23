@@ -60,35 +60,96 @@ _LEGAL_SUFFIXES = {
     "ltée",
 }
 _US_REGIONS = {
-    "alabama": "AL", "alaska": "AK", "arizona": "AZ", "arkansas": "AR",
-    "california": "CA", "colorado": "CO", "connecticut": "CT", "delaware": "DE",
-    "district of columbia": "DC", "florida": "FL", "georgia": "GA", "hawaii": "HI",
-    "idaho": "ID", "illinois": "IL", "indiana": "IN", "iowa": "IA", "kansas": "KS",
-    "kentucky": "KY", "louisiana": "LA", "maine": "ME", "maryland": "MD",
-    "massachusetts": "MA", "michigan": "MI", "minnesota": "MN", "mississippi": "MS",
-    "missouri": "MO", "montana": "MT", "nebraska": "NE", "nevada": "NV",
-    "new hampshire": "NH", "new jersey": "NJ", "new mexico": "NM", "new york": "NY",
-    "north carolina": "NC", "north dakota": "ND", "ohio": "OH", "oklahoma": "OK",
-    "oregon": "OR", "pennsylvania": "PA", "rhode island": "RI",
-    "south carolina": "SC", "south dakota": "SD", "tennessee": "TN", "texas": "TX",
-    "utah": "UT", "vermont": "VT", "virginia": "VA", "washington": "WA",
-    "west virginia": "WV", "wisconsin": "WI", "wyoming": "WY",
+    "alabama": "AL",
+    "alaska": "AK",
+    "arizona": "AZ",
+    "arkansas": "AR",
+    "california": "CA",
+    "colorado": "CO",
+    "connecticut": "CT",
+    "delaware": "DE",
+    "district of columbia": "DC",
+    "florida": "FL",
+    "georgia": "GA",
+    "hawaii": "HI",
+    "idaho": "ID",
+    "illinois": "IL",
+    "indiana": "IN",
+    "iowa": "IA",
+    "kansas": "KS",
+    "kentucky": "KY",
+    "louisiana": "LA",
+    "maine": "ME",
+    "maryland": "MD",
+    "massachusetts": "MA",
+    "michigan": "MI",
+    "minnesota": "MN",
+    "mississippi": "MS",
+    "missouri": "MO",
+    "montana": "MT",
+    "nebraska": "NE",
+    "nevada": "NV",
+    "new hampshire": "NH",
+    "new jersey": "NJ",
+    "new mexico": "NM",
+    "new york": "NY",
+    "north carolina": "NC",
+    "north dakota": "ND",
+    "ohio": "OH",
+    "oklahoma": "OK",
+    "oregon": "OR",
+    "pennsylvania": "PA",
+    "rhode island": "RI",
+    "south carolina": "SC",
+    "south dakota": "SD",
+    "tennessee": "TN",
+    "texas": "TX",
+    "utah": "UT",
+    "vermont": "VT",
+    "virginia": "VA",
+    "washington": "WA",
+    "west virginia": "WV",
+    "wisconsin": "WI",
+    "wyoming": "WY",
 }
 _CA_REGIONS = {
-    "alberta": "AB", "british columbia": "BC", "manitoba": "MB", "new brunswick": "NB",
-    "newfoundland and labrador": "NL", "northwest territories": "NT", "nova scotia": "NS",
-    "nunavut": "NU", "ontario": "ON", "prince edward island": "PE", "quebec": "QC",
-    "québec": "QC", "saskatchewan": "SK", "yukon": "YT",
+    "alberta": "AB",
+    "british columbia": "BC",
+    "manitoba": "MB",
+    "new brunswick": "NB",
+    "newfoundland and labrador": "NL",
+    "northwest territories": "NT",
+    "nova scotia": "NS",
+    "nunavut": "NU",
+    "ontario": "ON",
+    "prince edward island": "PE",
+    "quebec": "QC",
+    "québec": "QC",
+    "saskatchewan": "SK",
+    "yukon": "YT",
 }
 _REGION_CODES = {
     **{code.casefold(): code for code in _US_REGIONS.values()},
     **{code.casefold(): code for code in _CA_REGIONS.values()},
 }
 _COUNTRY_ALIASES = {
-    "us": "US", "u s": "US", "usa": "US", "u s a": "US", "united states": "US",
-    "united states of america": "US", "america": "US", "ca": "CA", "can": "CA",
-    "canada": "CA", "mx": "MX", "mex": "MX", "mexico": "MX", "méxico": "MX",
-    "gb": "GB", "uk": "GB", "united kingdom": "GB",
+    "us": "US",
+    "u s": "US",
+    "usa": "US",
+    "u s a": "US",
+    "united states": "US",
+    "united states of america": "US",
+    "america": "US",
+    "ca": "CA",
+    "can": "CA",
+    "canada": "CA",
+    "mx": "MX",
+    "mex": "MX",
+    "mexico": "MX",
+    "méxico": "MX",
+    "gb": "GB",
+    "uk": "GB",
+    "united kingdom": "GB",
 }
 _HOST_LABEL = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 
@@ -99,6 +160,7 @@ class _Prepared:
 
     record: DiscoveryRecord
     raw_key: str
+    stable_identity: str
     domain: str | None
     name: str | None
     city: str | None
@@ -216,7 +278,7 @@ def _parse_timestamp(value: str) -> datetime:
 
 
 def _raw_key(record: DiscoveryRecord) -> str:
-    """Serialize a raw record deterministically for ordering and singleton identity."""
+    """Serialize a raw record deterministically for provenance ordering only."""
     return json.dumps(record.to_dict(), sort_keys=True, ensure_ascii=False, separators=(",", ":"))
 
 
@@ -227,13 +289,14 @@ def _prepare(record: DiscoveryRecord) -> _Prepared:
     region = _normalize_region(record.region)
     country = _normalize_country(record.country_code)
     fallback = (
-        "|".join((name, city, region, country))
-        if all((name, city, region, country))
+        f"{name}|{city}|{region}|{country}"
+        if name is not None and city is not None and region is not None and country is not None
         else None
     )
     return _Prepared(
         record=DiscoveryRecord.from_dict(record.to_dict()),
         raw_key=_raw_key(record),
+        stable_identity=record.record_id,
         domain=normalize_website_domain(record.website_url),
         name=name,
         city=city,
@@ -256,13 +319,16 @@ def _canonical_name(rows: list[_Prepared], domain: str | None) -> tuple[str, str
         if domain is None:
             raise AssertionError("domainless company group must have a usable name")
         return domain, domain, True
-    counts = Counter(row.name for row in usable)
+    normalized_names = [row.name for row in usable if row.name is not None]
+    counts: Counter[str] = Counter(normalized_names)
     max_count = max(counts.values())
     candidates = [name for name, count in counts.items() if count == max_count]
     candidates.sort(
-        key=lambda name: (
-            not any(row.record.provider == "exa" and row.name == name for row in usable),
-            name,
+        key=lambda candidate_name: (
+            not any(
+                row.record.provider == "exa" and row.name == candidate_name for row in usable
+            ),
+            candidate_name,
         )
     )
     normalized = candidates[0]
@@ -368,9 +434,7 @@ def deduplicate(records: Iterable[DiscoveryRecord]) -> DeduplicationResult:
     companies: list[CompanyRecord] = []
     for domain in sorted(domain_groups):
         companies.append(
-            _build_company(
-                domain_groups[domain], authority=f"domain:{domain}", domain=domain
-            )
+            _build_company(domain_groups[domain], authority=f"domain:{domain}", domain=domain)
         )
     for fallback in sorted(domainless_groups):
         companies.append(
@@ -382,10 +446,14 @@ def deduplicate(records: Iterable[DiscoveryRecord]) -> DeduplicationResult:
         )
 
     duplicate_rank: dict[str, int] = defaultdict(int)
-    for row, reasons in sorted(singleton_specs, key=lambda item: (item[0].raw_key, item[1])):
-        rank = duplicate_rank[row.raw_key]
-        duplicate_rank[row.raw_key] += 1
-        authority = f"singleton:{row.raw_key}:{rank}"
+    ordered_singletons = sorted(
+        singleton_specs,
+        key=lambda item: (item[0].stable_identity, item[0].raw_key, item[1]),
+    )
+    for row, reasons in ordered_singletons:
+        rank = duplicate_rank[row.stable_identity]
+        duplicate_rank[row.stable_identity] += 1
+        authority = f"singleton:{row.stable_identity}:{rank}"
         companies.append(
             _build_company([row], authority=authority, domain=None, extra_review=reasons)
         )
