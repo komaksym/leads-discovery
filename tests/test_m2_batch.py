@@ -27,6 +27,7 @@ from leads_discovery.models import (
     UsageEvent,
 )
 from leads_discovery.pipeline.m2_batch import M2BatchConfig, run_m2_batch
+from leads_discovery.research.evidence import ExaEvidenceResearcher
 from leads_discovery.research.extract import DeepSeekPriceSchedule
 
 FACT_KEYS = (
@@ -381,6 +382,51 @@ def test_fake_provider_end_to_end_writes_seven_artifacts_in_durable_order(
     assert (run_dir / "companies_deduped.jsonl").read_text(encoding="utf-8").strip()
     assert (run_dir / "research_raw.jsonl").read_text(encoding="utf-8").strip()
     assert (run_dir / "companies_extracted.jsonl").read_text(encoding="utf-8").strip()
+
+
+def test_successful_research_response_is_durable_before_next_paid_search(tmp_path: Path) -> None:
+    """A paid Exa research response is durable before the following paid search begins."""
+    calls = 0
+    first_row = {
+        "id": "research-1",
+        "url": "https://company-1.example.com/about",
+        "title": "Company 1 research",
+        "highlights": ["Industrial valves and fittings"],
+    }
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx.Response(
+                200,
+                json={"results": [first_row], "costDollars": {"total": 0.01}},
+            )
+        raise KeyboardInterrupt
+
+    run_dir = tmp_path / "research-crash"
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        researcher = ExaEvidenceResearcher(api_key="test-key", client=client)
+        with pytest.raises(KeyboardInterrupt):
+            run_m2_batch(
+                _config(tmp_path, "research-crash"),
+                discovery={"exa": FakeDiscovery()},
+                researcher=researcher,
+                extractor=FakeExtractor(),
+            )
+
+    assert calls == 2
+    raw_path = run_dir / "research_raw.jsonl"
+    assert raw_path.exists()
+    raw_rows = [json.loads(line) for line in raw_path.read_text().splitlines()]
+    assert first_row in raw_rows
+    usage_rows = [
+        json.loads(line)
+        for line in (run_dir / "usage_events.jsonl").read_text().splitlines()
+    ]
+    research_usage = [row for row in usage_rows if row["operation"] == "company_research"]
+    assert research_usage
+    assert research_usage[0]["estimated_cost_usd"] == pytest.approx(0.01)
 
 
 def test_conservative_deepseek_reservation_persists_paused_budget_without_call(
