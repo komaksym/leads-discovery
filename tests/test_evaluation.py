@@ -14,10 +14,10 @@ from m3_factories import (
     write_run_inputs,
 )
 
-from leads_discovery.pipeline.evaluation import EvaluationConfig, evaluate_run
+from leads_discovery.pipeline.evaluation import EvaluationConfig, EvaluationSummary, evaluate_run
 
 
-def _evaluate(root: Path, run_id: str, max_evaluated: int = 20):
+def _evaluate(root: Path, run_id: str, max_evaluated: int = 20) -> EvaluationSummary:
     """Run the frozen local evaluation API."""
     return evaluate_run(
         EvaluationConfig(run_id=run_id, data_root=root, max_evaluated=max_evaluated)
