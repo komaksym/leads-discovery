@@ -392,7 +392,7 @@ def test_duplicate_singleton_rows_receive_unique_deterministic_company_ids() -> 
 
 
 def test_singleton_company_id_ignores_retrieval_time_for_same_stable_raw_identity() -> None:
-    """Stable singleton identity must not change only because the same raw row was retrieved later."""
+    """Retrieval time is provenance and cannot change a singleton's stable company ID."""
     earlier = _record(
         "raw_stable",
         website_url=None,
