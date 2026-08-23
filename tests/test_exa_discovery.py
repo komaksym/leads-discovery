@@ -293,13 +293,19 @@ def test_negative_authenticated_exa_cost_is_invalid_response() -> None:
     assert caught.value.usage_event.request_count == 1
 
 
-@pytest.mark.parametrize("cost", [float("nan"), float("inf"), float("-inf")])
-def test_nonfinite_authenticated_exa_cost_is_invalid_response(cost: float) -> None:
+@pytest.mark.parametrize("raw_total", [b"NaN", b"Infinity", b"-Infinity"])
+def test_nonfinite_authenticated_exa_cost_is_invalid_response(raw_total: bytes) -> None:
     """PRV-04/INV-04 reject non-finite authenticated spend before it reaches budget state."""
-    response = {"results": [], "costDollars": {"total": cost}}
-    with httpx.Client(
-        transport=httpx.MockTransport(lambda _request: httpx.Response(200, json=response))
-    ) as client:
+    body = b'{"results":[],"costDollars":{"total":' + raw_total + b"}}"
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=body,
+            headers={"content-type": "application/json"},
+        )
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
         provider = ExaDiscoveryProvider(api_key=API_KEY, client=client)
         with pytest.raises(DiscoveryProviderError) as caught:
             provider.search(_request())
@@ -319,9 +325,7 @@ def test_nonfinite_authenticated_exa_cost_is_invalid_response(cost: float) -> No
 )
 def test_malformed_exa_responses_are_invalid_response(response: httpx.Response) -> None:
     """Malformed required envelopes fail closed without fabricating rows."""
-    with httpx.Client(
-        transport=httpx.MockTransport(lambda _request: response)
-    ) as client:
+    with httpx.Client(transport=httpx.MockTransport(lambda _request: response)) as client:
         provider = ExaDiscoveryProvider(api_key=API_KEY, client=client)
         with pytest.raises(DiscoveryProviderError) as caught:
             provider.search(_request())
@@ -354,7 +358,7 @@ def test_transport_failure_is_retryable_transient_and_sanitized() -> None:
 
 
 @pytest.mark.parametrize(
-    "request",
+    "discovery_request",
     [
         _request(provider="apify"),
         _request(target_country_code="MX"),
@@ -364,7 +368,7 @@ def test_transport_failure_is_retryable_transient_and_sanitized() -> None:
         _request(max_results_total=101),
     ],
 )
-def test_invalid_exa_requests_fail_before_http(request: DiscoveryRequest) -> None:
+def test_invalid_exa_requests_fail_before_http(discovery_request: DiscoveryRequest) -> None:
     """Wrong provider/geography/cardinality/query/total requests make zero HTTP attempts."""
     calls = 0
 
@@ -376,7 +380,7 @@ def test_invalid_exa_requests_fail_before_http(request: DiscoveryRequest) -> Non
     with httpx.Client(transport=httpx.MockTransport(handler)) as client:
         provider = ExaDiscoveryProvider(api_key=API_KEY, client=client)
         with pytest.raises((DiscoveryProviderError, TypeError, ValueError)):
-            provider.search(request)
+            provider.search(discovery_request)
 
     assert calls == 0
 

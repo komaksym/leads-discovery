@@ -200,7 +200,13 @@ def test_missing_search_string_and_returned_country_stay_unknown() -> None:
         if request.url.path == "/v2/actor-runs/run-1":
             return httpx.Response(
                 200,
-                json={"data": {"id": "run-1", "status": "SUCCEEDED", "defaultDatasetId": "ds"}},
+                json={
+                    "data": {
+                        "id": "run-1",
+                        "status": "SUCCEEDED",
+                        "defaultDatasetId": "ds",
+                    }
+                },
             )
         return httpx.Response(200, json=[row])
 
@@ -467,7 +473,13 @@ def test_malformed_apify_dataset_type_is_invalid_response() -> None:
         if request.method == "POST":
             return httpx.Response(
                 201,
-                json={"data": {"id": "run-x", "status": "SUCCEEDED", "defaultDatasetId": "ds"}},
+                json={
+                    "data": {
+                        "id": "run-x",
+                        "status": "SUCCEEDED",
+                        "defaultDatasetId": "ds",
+                    }
+                },
             )
         if request.url.path == "/v2/datasets/ds/items":
             return httpx.Response(200, json={"items": []})
@@ -483,7 +495,7 @@ def test_malformed_apify_dataset_type_is_invalid_response() -> None:
 
 
 @pytest.mark.parametrize(
-    "request",
+    "discovery_request",
     [
         _request(provider="exa"),
         _request(target_country_code="MX"),
@@ -496,7 +508,7 @@ def test_malformed_apify_dataset_type_is_invalid_response() -> None:
         _request(max_cost_usd=1.01),
     ],
 )
-def test_invalid_apify_requests_fail_before_http(request: DiscoveryRequest) -> None:
+def test_invalid_apify_requests_fail_before_http(discovery_request: DiscoveryRequest) -> None:
     """Invalid provider/geography/catalog/result/cap requests perform no HTTP calls."""
     calls = 0
 
@@ -508,6 +520,6 @@ def test_invalid_apify_requests_fail_before_http(request: DiscoveryRequest) -> N
     with httpx.Client(transport=httpx.MockTransport(handler)) as client:
         provider = ApifyDiscoveryProvider(api_token=TOKEN, client=client)
         with pytest.raises((DiscoveryProviderError, TypeError, ValueError)):
-            provider.search(request)
+            provider.search(discovery_request)
 
     assert calls == 0
