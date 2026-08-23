@@ -16,7 +16,7 @@ typecheck, tests, and build/package checks before moving on.
   - checkpoint/resume primitives
   - usage/cost ledger primitives
   - focused tests
-- [ ] **M2 — Candidate intelligence batch**
+- [x] **M2 — Candidate intelligence batch**
   - query generation
   - Exa discovery adapter
   - optional live Apify Google Maps adapter
