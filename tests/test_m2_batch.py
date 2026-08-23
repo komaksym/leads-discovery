@@ -249,13 +249,13 @@ def _config(tmp_path: Path, run_id: str, **overrides: Any) -> M2BatchConfig:
 
 def test_new_models_round_trip_nested_json_and_defensively_copy_callers() -> None:
     """Every M2 model round-trips JSON-safe nested data without aliasing caller mutables."""
-    nested = {"nested": {"values": [1, 2]}}
+    nested: dict[str, Any] = {"nested": {"values": [1, 2]}}
     request = DiscoveryRequest("exa:us:test:v1", "exa", "test", "US", ("query",), 1, 1)
     record = _record(request, 1, raw_metadata=nested)
     usage = UsageEvent(provider="exa", operation="company_search", metadata=deepcopy(nested))
     company = CompanyRecord(company_id="cmp_1", name="Acme", discovery_records=[record.to_dict()])
     evidence = EvidenceItem(evidence_id="ev_1", url="https://acme.com/e", provider="exa")
-    models = [
+    models: list[Any] = [
         record,
         DiscoveryBatch(request, [record], [usage]),
         DeduplicationResult([company], [record]),
