@@ -138,7 +138,11 @@ class ExaDiscoveryProvider:
         """Map one Exa result while preserving the complete provider row."""
         entity = _first_company_entity(raw)
         properties_raw = entity.get("properties")
-        properties = cast(dict[str, Any], properties_raw) if isinstance(properties_raw, dict) else entity
+        properties = (
+            cast(dict[str, Any], properties_raw)
+            if isinstance(properties_raw, dict)
+            else entity
+        )
         headquarters = properties.get("headquarters")
         hq = cast(dict[str, Any], headquarters) if isinstance(headquarters, dict) else {}
         provider_result_id = (
