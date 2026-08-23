@@ -115,7 +115,7 @@ def test_exact_exa_wire_request_mapping_raw_preservation_and_usage() -> None:
     assert first.provider_result_id in {"entity-1", "result-1"}
     assert first.name == "Acme Valve"
     assert first.source_url == "https://acme.example/about"
-    assert first.website_url == "https://www.acmevalve.com"
+    assert first.website_url == "https://acme.example/about"
     assert first.city == "Tulsa"
     assert first.region is None
     assert first.postal_code == "74101"
@@ -282,6 +282,21 @@ def test_exa_status_classification_and_safe_usage(
 def test_negative_authenticated_exa_cost_is_invalid_response() -> None:
     """Authenticated provider cost must be nonnegative when supplied."""
     response = {"results": [], "costDollars": {"total": -0.01}}
+    with httpx.Client(
+        transport=httpx.MockTransport(lambda _request: httpx.Response(200, json=response))
+    ) as client:
+        provider = ExaDiscoveryProvider(api_key=API_KEY, client=client)
+        with pytest.raises(DiscoveryProviderError) as caught:
+            provider.search(_request())
+
+    assert caught.value.kind == "invalid_response"
+    assert caught.value.usage_event.request_count == 1
+
+
+@pytest.mark.parametrize("cost", [float("nan"), float("inf"), float("-inf")])
+def test_nonfinite_authenticated_exa_cost_is_invalid_response(cost: float) -> None:
+    """PRV-04/INV-04 reject non-finite authenticated spend before it reaches budget state."""
+    response = {"results": [], "costDollars": {"total": cost}}
     with httpx.Client(
         transport=httpx.MockTransport(lambda _request: httpx.Response(200, json=response))
     ) as client:
