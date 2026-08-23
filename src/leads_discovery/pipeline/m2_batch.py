@@ -52,6 +52,7 @@ from leads_discovery.research import (
     ExaEvidenceResearcher,
     apply_extraction,
     build_evidence_bundle,
+    build_research_requests,
     select_research_companies,
 )
 
@@ -63,6 +64,10 @@ _DEFAULT_PRICES = DeepSeekPriceSchedule(
     cache_miss_input_per_million=0.14,
     output_per_million=0.28,
 )
+
+
+class _ResearchBudgetPause(Exception):
+    """Signal a known local Exa budget stop after durable successful-call progress."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -218,6 +223,29 @@ def _entry_str(entry: dict[str, Any], key: str) -> str | None:
     return value if isinstance(value, str) else None
 
 
+def _research_successful_calls(
+    entry: dict[str, Any] | None,
+    *,
+    max_queries: int,
+) -> int:
+    """Return a validated durable Exa completed-query cursor from operation state."""
+    if entry is None:
+        return 0
+    value = entry.get("successful_calls", 0)
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or not 0 <= value <= max_queries
+    ):
+        raise ValueError("research successful_calls checkpoint value is invalid")
+    return value
+
+
+def _uses_resumable_exa_researcher(researcher: ExaEvidenceResearcher) -> bool:
+    """Return whether the injected researcher uses the built-in resumable Exa loop."""
+    return type(researcher).research is ExaEvidenceResearcher.research
+
+
 def _persist_checkpoint(path: Path, checkpoint: RunCheckpoint) -> None:
     """Refresh the checkpoint timestamp and atomically persist all safe operation state."""
     checkpoint.updated_at = _now()
@@ -234,6 +262,7 @@ def _mark_in_flight(
     request_id: str | None = None,
     company_id: str | None = None,
     reservation_usd: float | None = None,
+    successful_calls: int | None = None,
 ) -> None:
     """Durably mark one paid operation in flight before any provider call occurs."""
     entry: dict[str, Any] = {
@@ -247,6 +276,8 @@ def _mark_in_flight(
         entry["company_id"] = company_id
     if reservation_usd is not None:
         entry["reservation_usd"] = reservation_usd
+    if successful_calls is not None:
+        entry["successful_calls"] = successful_calls
     _operations(checkpoint)[operation_id] = entry
     checkpoint.status = "running"
     checkpoint.pending_company_id = company_id
@@ -697,26 +728,8 @@ def _handle_research_error(
     operation_id: str,
     company_id: str,
 ) -> RunCheckpoint:
-    """Persist a research failure once and protect already-successful calls from replay."""
+    """Persist one known Exa failure while retaining any completed-query cursor."""
     _record_usage(paths, tracker, exc.usage_event)
-    entry = _operations(checkpoint)[operation_id]
-    successful_calls = entry.get("successful_calls", 0)
-    has_progress = (
-        isinstance(successful_calls, int)
-        and not isinstance(successful_calls, bool)
-        and successful_calls > 0
-    )
-    if has_progress:
-        entry["error_kind"] = exc.kind
-        _persist_checkpoint(paths.checkpoint, checkpoint)
-        return _pause(
-            checkpoint,
-            paths.checkpoint,
-            status="paused_unknown",
-            reason="partial_exa_research_not_replayable",
-            company_id=company_id,
-            stage="company_research",
-        )
     state = "pending" if exc.retryable or exc.kind == "budget_exhausted" else "failed"
     _finish_operation(
         checkpoint,
@@ -786,6 +799,21 @@ def _research_and_extract_phase(
             )
 
         if company.stage_status.get("research") != "completed":
+            research_requests = build_research_requests(company)
+            completed_queries = _research_successful_calls(
+                research_entry,
+                max_queries=len(research_requests),
+            )
+            resumable_researcher = _uses_resumable_exa_researcher(researcher)
+            if completed_queries and not resumable_researcher:
+                return _pause(
+                    checkpoint,
+                    paths.checkpoint,
+                    status="failed",
+                    reason="researcher_cannot_resume_partial_research",
+                    company_id=company.company_id,
+                    stage="research",
+                )
             if not _provider_budget_allows(tracker, "exa", config.exa_budget_usd):
                 return _pause(
                     checkpoint,
@@ -802,6 +830,7 @@ def _research_and_extract_phase(
                 provider="exa",
                 operation="company_research",
                 company_id=company.company_id,
+                successful_calls=completed_queries,
             )
             progress_supported = _supports_research_progress(researcher)
             cumulative_items = [deepcopy(item) for item in company.evidence]
@@ -810,7 +839,7 @@ def _research_and_extract_phase(
                 delta: EvidenceBundle,
                 operation_key: str = research_op,
             ) -> None:
-                """Fsync one Exa call's usage, raw rows, snapshot, and progress state."""
+                """Fsync one Exa call then stop locally if the next call lacks budget."""
                 nonlocal company, cumulative_items
                 if delta.company_id != company.company_id:
                     raise ValueError("research progress bundle company_id mismatch")
@@ -832,17 +861,51 @@ def _research_and_extract_phase(
                 )
                 cumulative_items = [deepcopy(item) for item in cumulative.items]
                 entry = _operations(checkpoint)[operation_key]
-                calls = entry.get("successful_calls", 0)
-                if isinstance(calls, bool) or not isinstance(calls, int) or calls < 0:
-                    raise ValueError("research successful_calls checkpoint value is invalid")
-                entry["successful_calls"] = calls + 1
+                calls = _research_successful_calls(
+                    entry,
+                    max_queries=len(research_requests),
+                )
+                calls += 1
+                if calls > len(research_requests):
+                    raise ValueError("research progress exceeded the bounded query count")
+                entry["successful_calls"] = calls
                 _persist_checkpoint(paths.checkpoint, checkpoint)
+                has_next_query = calls < len(research_requests)
+                if (
+                    resumable_researcher
+                    and has_next_query
+                    and not _provider_budget_allows(
+                        tracker,
+                        "exa",
+                        config.exa_budget_usd,
+                    )
+                ):
+                    raise _ResearchBudgetPause
 
             try:
-                if progress_supported:
+                if progress_supported and resumable_researcher:
+                    bundle = researcher._research_from(
+                        company,
+                        start_index=completed_queries,
+                        on_progress=persist_progress,
+                    )
+                elif progress_supported:
                     bundle = researcher.research(company, on_progress=persist_progress)
                 else:
                     bundle = researcher.research(company)
+            except _ResearchBudgetPause:
+                entry = _operations(checkpoint)[research_op]
+                entry["state"] = "pending"
+                entry.pop("error_kind", None)
+                _persist_checkpoint(paths.checkpoint, checkpoint)
+                return _pause(
+                    checkpoint,
+                    paths.checkpoint,
+                    status="paused_budget",
+                    reason="exa_budget_exhausted_or_unknown",
+                    company_id=company.company_id,
+                    stage="research",
+                )
             except DiscoveryProviderError as exc:
                 return _handle_research_error(
                     exc=exc,
@@ -856,6 +919,13 @@ def _research_and_extract_phase(
                 for event in bundle.usage_events:
                     _record_usage(paths, tracker, event)
                 _append_research_raw(paths, bundle.raw_records)
+            else:
+                bundle = build_evidence_bundle(
+                    company=company,
+                    items=cumulative_items,
+                    raw_records=[],
+                    usage_events=[],
+                )
             company = _persist_research_snapshot(
                 paths,
                 company,
