@@ -6,8 +6,6 @@ import json
 from pathlib import Path
 
 import pytest
-
-from leads_discovery.pipeline.evaluation import EvaluationConfig, evaluate_run
 from m3_factories import (
     accepted_facts,
     build_company,
@@ -15,6 +13,8 @@ from m3_factories import (
     read_jsonl,
     write_run_inputs,
 )
+
+from leads_discovery.pipeline.evaluation import EvaluationConfig, evaluate_run
 
 
 def _evaluate(root: Path, run_id: str, max_evaluated: int = 20):
