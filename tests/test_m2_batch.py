@@ -11,6 +11,7 @@ import httpx
 import pytest
 
 from leads_discovery.discovery.apify import ApifyDiscoveryProvider
+from leads_discovery.discovery.queries import build_discovery_requests
 from leads_discovery.models import (
     CompanyRecord,
     DeduplicationResult,
@@ -463,6 +464,81 @@ def test_optional_apify_budget_exhaustion_does_not_stop_required_exa(tmp_path: P
     assert apify_calls == 1
     assert checkpoint.status == "completed"
     assert (tmp_path / "optional-apify" / "companies_extracted.jsonl").read_text().strip()
+
+
+def test_persisted_apify_run_id_is_resumed_without_replacement_search(tmp_path: Path) -> None:
+    """Durable Apify state must call public resume(request, run_id) for the exact existing run."""
+    config = _config(
+        tmp_path,
+        "resume-apify",
+        max_candidates=4,
+        include_apify=True,
+        apify_budget_usd=0.25,
+    )
+    requests = build_discovery_requests(
+        include_apify=True,
+        max_candidates=4,
+        apify_budget_usd=0.25,
+    )
+    operations: dict[str, dict[str, Any]] = {}
+    for request in requests:
+        operation_id = f"discovery:{request.request_id}"
+        operations[operation_id] = {
+            "provider": request.provider,
+            "operation": "company_search" if request.provider == "exa" else "google_maps_search",
+            "request_id": request.request_id,
+            "state": "completed",
+        }
+    apify_request = next(request for request in requests if request.provider == "apify")
+    operations[f"discovery:{apify_request.request_id}"]["state"] = "in_flight"
+    operations[f"discovery:{apify_request.request_id}"]["run_id"] = "persisted-run-123"
+
+    run_dir = tmp_path / "resume-apify"
+    run_dir.mkdir()
+    (run_dir / "checkpoint.json").write_text(
+        json.dumps(
+            {
+                "run_id": "resume-apify",
+                "status": "running",
+                "provider_state": {"operations": operations, "stages": {}},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class ResumeOnlyApify:
+        def __init__(self) -> None:
+            self.resume_calls: list[tuple[str, str]] = []
+
+        def search(self, _request: DiscoveryRequest) -> DiscoveryBatch:
+            raise AssertionError("persisted Apify run must not start a replacement search")
+
+        def resume(self, request: DiscoveryRequest, run_id: str) -> DiscoveryBatch:
+            self.resume_calls.append((request.request_id, run_id))
+            return DiscoveryBatch(
+                request=request,
+                records=[_record(request, 1)],
+                usage_events=[
+                    UsageEvent(
+                        provider="apify",
+                        operation="google_maps_search",
+                        request_count=1,
+                        estimated_cost_usd=0.0,
+                        metadata={"run_id": run_id},
+                    )
+                ],
+            )
+
+    apify = ResumeOnlyApify()
+    checkpoint = run_m2_batch(
+        config,
+        discovery={"apify": apify},
+        researcher=FakeResearcher(),
+        extractor=FakeExtractor(),
+    )
+
+    assert checkpoint.status == "completed"
+    assert apify.resume_calls == [(apify_request.request_id, "persisted-run-123")]
 
 
 def test_unknown_in_flight_exa_is_not_automatically_repeated(tmp_path: Path) -> None:
