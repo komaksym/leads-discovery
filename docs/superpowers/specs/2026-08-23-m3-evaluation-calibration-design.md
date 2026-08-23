@@ -1,6 +1,6 @@
 # M3 Evaluation, Orchestration, and Calibration Design
 
-**Status:** draft implementation contract for review, Revision 1
+**Status:** approved implementation contract, Revision 1
 **Authority:** this document governs M3 when it is more specific than `PLANS.md` or the
 foundational product design. The merged M2 contract remains authoritative for discovery,
 research, extraction, paid-call persistence, and provider budgets.
