@@ -9,7 +9,7 @@ from typing import Any
 import pytest
 from m3_factories import accepted_facts, build_company, exact_threshold_facts
 
-from leads_discovery.models import CompanyRecord, DecisionReason
+from leads_discovery.models import CompanyRecord, DecisionReason, FactValue
 from leads_discovery.scoring import (
     DEFAULT_POLICY,
     ScoringPolicy,
@@ -53,13 +53,13 @@ from leads_discovery.scoring import (
 )
 def test_exact_nonshared_weights(
     fact: str,
-    value: object,
+    value: FactValue,
     category: str,
     category_cov: float,
     overall_cov: float,
 ) -> None:
     """A lone perfect fact exposes its exact local and product weight."""
-    company = build_company(facts={fact: (value, .90)})  # type: ignore[arg-type]
+    company = build_company(facts={fact: (value, .90)})
     result = evaluate_company(company)
 
     assert result.score_components == {category: 100.0}
@@ -115,10 +115,10 @@ def test_revenue_boundaries(value: float, score: float) -> None:
      (["", "  "], 0),
      (["A", " a ", "", "B", "b", "C", "D", "E"], 50)],
 )
-def test_manufacturer_breadth(value: object, score: float) -> None:
+def test_manufacturer_breadth(value: FactValue, score: float) -> None:
     """Breadth counts, exact categories, and casefolded list deduplication are frozen."""
     company = build_company(
-        facts={"manufacturer_count_or_breadth": (value, .90)}  # type: ignore[arg-type]
+        facts={"manufacturer_count_or_breadth": (value, .90)}
     )
     assert evaluate_company(company).score_components["workload"] == score
 
@@ -368,7 +368,7 @@ def test_batch_cap_sort_filter_and_duplicate_rules() -> None:
         with pytest.raises((TypeError, ValueError)):
             evaluate_companies(
                 [build_company(facts=accepted_facts())],
-                limit=bad,  # type: ignore[arg-type]
+                limit=bad,
             )
     duplicate = build_company(facts=accepted_facts(), company_id="cmp_dup")
     with pytest.raises(ValueError):
