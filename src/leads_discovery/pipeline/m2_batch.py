@@ -212,6 +212,12 @@ def _stages(checkpoint: RunCheckpoint) -> dict[str, str]:
     return result
 
 
+def _entry_str(entry: dict[str, Any], key: str) -> str | None:
+    """Return one optional string checkpoint field without coercion."""
+    value = entry.get(key)
+    return value if isinstance(value, str) else None
+
+
 def _persist_checkpoint(path: Path, checkpoint: RunCheckpoint) -> None:
     """Refresh the checkpoint timestamp and atomically persist all safe operation state."""
     checkpoint.updated_at = _now()
@@ -357,11 +363,14 @@ def _resume_apify_if_needed(
     """Resume persisted Apify Actor runs and never start automatic replacements."""
     request_by_id = {request.request_id: request for request in requests}
     for operation_id, entry in sorted(_operations(checkpoint).items()):
-        if entry.get("provider") != "apify" or entry.get("state") not in {"in_flight", "pending"}:
+        if entry.get("provider") != "apify" or entry.get("state") not in {
+            "in_flight",
+            "pending",
+        }:
             continue
-        run_id = entry.get("run_id")
-        request_id = entry.get("request_id")
-        if not isinstance(run_id, str) or not isinstance(request_id, str):
+        run_id = _entry_str(entry, "run_id")
+        request_id = _entry_str(entry, "request_id")
+        if run_id is None or request_id is None:
             return _pause(
                 checkpoint,
                 paths.checkpoint,
@@ -446,8 +455,8 @@ def _discovery_phase(
             paths.checkpoint,
             status="paused_unknown",
             reason=f"unknown_in_flight:{operation_id}",
-            company_id=entry.get("company_id") if isinstance(entry.get("company_id"), str) else None,
-            stage=entry.get("operation") if isinstance(entry.get("operation"), str) else None,
+            company_id=_entry_str(entry, "company_id"),
+            stage=_entry_str(entry, "operation"),
         )
 
     for request in requests:
@@ -482,7 +491,9 @@ def _discovery_phase(
                 stage="discovery",
             )
         if request.provider == "exa" and not _provider_budget_allows(
-            tracker, "exa", config.exa_budget_usd
+            tracker,
+            "exa",
+            config.exa_budget_usd,
         ):
             return _pause(
                 checkpoint,
@@ -506,8 +517,8 @@ def _discovery_phase(
             _record_usage(paths, tracker, exc.usage_event)
             if request.provider == "apify":
                 apify_entry = _operations(checkpoint)[operation_id]
-                run_id = apify_entry.get("run_id")
-                if exc.retryable and isinstance(run_id, str):
+                run_id = _entry_str(apify_entry, "run_id")
+                if exc.retryable and run_id is not None:
                     apify_entry["state"] = "pending"
                     apify_entry["error_kind"] = exc.kind
                     checkpoint.pending_company_id = None
@@ -546,7 +557,12 @@ def _discovery_phase(
                     reason="exa_budget_exhausted",
                     stage="discovery",
                 )
-            if exc.kind in {"authentication", "invalid_request", "invalid_response", "permanent"}:
+            if exc.kind in {
+                "authentication",
+                "invalid_request",
+                "invalid_response",
+                "permanent",
+            }:
                 return _pause(
                     checkpoint,
                     paths.checkpoint,
@@ -681,11 +697,16 @@ def _handle_research_error(
     operation_id: str,
     company_id: str,
 ) -> RunCheckpoint:
-    """Persist a research failure once and prevent replay when earlier calls already succeeded."""
+    """Persist a research failure once and protect already-successful calls from replay."""
     _record_usage(paths, tracker, exc.usage_event)
     entry = _operations(checkpoint)[operation_id]
     successful_calls = entry.get("successful_calls", 0)
-    if isinstance(successful_calls, int) and not isinstance(successful_calls, bool) and successful_calls > 0:
+    has_progress = (
+        isinstance(successful_calls, int)
+        and not isinstance(successful_calls, bool)
+        and successful_calls > 0
+    )
+    if has_progress:
         entry["error_kind"] = exc.kind
         _persist_checkpoint(paths.checkpoint, checkpoint)
         return _pause(
@@ -741,7 +762,7 @@ def _research_and_extract_phase(
     extractor: DeepSeekExtractor,
     tracker: CostTracker,
 ) -> RunCheckpoint | None:
-    """Research and extract selected companies in deterministic order under independent budgets."""
+    """Research and extract selected companies in order under independent budgets."""
     selected = select_research_companies(companies, limit=config.max_extracted)
     completed_count = 0
     for selected_company in selected:
@@ -785,8 +806,11 @@ def _research_and_extract_phase(
             progress_supported = _supports_research_progress(researcher)
             cumulative_items = [deepcopy(item) for item in company.evidence]
 
-            def persist_progress(delta: EvidenceBundle) -> None:
-                """Fsync one successful Exa call's usage/raw rows and cumulative incomplete snapshot."""
+            def persist_progress(
+                delta: EvidenceBundle,
+                operation_key: str = research_op,
+            ) -> None:
+                """Fsync one Exa call's usage, raw rows, snapshot, and progress state."""
                 nonlocal company, cumulative_items
                 if delta.company_id != company.company_id:
                     raise ValueError("research progress bundle company_id mismatch")
@@ -807,7 +831,7 @@ def _research_and_extract_phase(
                     completed=False,
                 )
                 cumulative_items = [deepcopy(item) for item in cumulative.items]
-                entry = _operations(checkpoint)[research_op]
+                entry = _operations(checkpoint)[operation_key]
                 calls = entry.get("successful_calls", 0)
                 if isinstance(calls, bool) or not isinstance(calls, int) or calls < 0:
                     raise ValueError("research successful_calls checkpoint value is invalid")
@@ -868,7 +892,10 @@ def _research_and_extract_phase(
             )
         reservation = _deepseek_reservation(extractor, company, bundle)
         if not _provider_budget_allows(
-            tracker, "deepseek", config.deepseek_budget_usd, reservation
+            tracker,
+            "deepseek",
+            config.deepseek_budget_usd,
+            reservation,
         ):
             return _pause(
                 checkpoint,
@@ -908,7 +935,12 @@ def _research_and_extract_phase(
                     company_id=company.company_id,
                     stage="extraction",
                 )
-            if exc.kind in {"authentication", "invalid_request", "invalid_response", "permanent"}:
+            if exc.kind in {
+                "authentication",
+                "invalid_request",
+                "invalid_response",
+                "permanent",
+            }:
                 return _pause(
                     checkpoint,
                     paths.checkpoint,
@@ -970,8 +1002,8 @@ def run_m2_batch(
             paths.checkpoint,
             status="paused_unknown",
             reason=f"unknown_in_flight:{operation_id}",
-            company_id=entry.get("company_id") if isinstance(entry.get("company_id"), str) else None,
-            stage=entry.get("operation") if isinstance(entry.get("operation"), str) else None,
+            company_id=_entry_str(entry, "company_id"),
+            stage=_entry_str(entry, "operation"),
         )
 
     if _stages(checkpoint).get("discovery") != "completed":
