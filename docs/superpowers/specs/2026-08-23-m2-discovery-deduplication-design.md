@@ -1,11 +1,10 @@
 # M2 Discovery and Deduplication Design Contract
 
-Status: awaiting product-owner review | Revision: 3 | Baseline: `616003f` (merged M1)
+Status: awaiting product-owner review | Revision: 4 | Baseline: `616003f` (merged M1)
 
-M2 is one atomic implementation, one pull request, and one validation/review gate. The
-headings below make this single contract readable; they are not sub-milestones, stack
-layers, partial deliveries, or separate approval points. A file-by-file implementation
-plan will be written only after this contract is approved.
+M2 is one atomic implementation, PR, and review gate. Headings are navigation, not
+sub-milestones, stack layers, or partial deliveries. Write the implementation plan only
+after this contract is approved.
 
 ## Outcome and scope
 
@@ -26,12 +25,10 @@ deterministic U.S./Canada request plan
                  └── unresolved raw records
 ```
 
-The discovery catalog is designed to find independent and regional PVF distributors,
-including companies visible through RFQ/BOM language, project-market positioning, and
-manufacturer line cards—not only the obvious accounts found in mainstream sales
-databases. M2 collects candidates and provenance; it does not decide whether a company
-is qualified. The default 100-row plan is a safe calibration batch, not a promise of
-100 unique or accepted accounts.
+The catalog targets independent/regional PVF distributors visible through RFQ/BOM
+language, project markets, and manufacturer line cards—not only obvious sales-database
+accounts. M2 collects candidates and provenance but does not qualify them. The default
+100 rows are a bounded discovery batch, not 100 promised unique or accepted accounts.
 
 M2 ends at canonical companies plus unresolved raw records. It does not add:
 
@@ -49,7 +46,7 @@ The critical invariants are:
 
 | ID | Requirement |
 | --- | --- |
-| INV-01 | The default plan requests at most 100 raw rows and places an aggregate provider-side ceiling of at most `$1.00` on Apify. |
+| INV-01 | The default plan requests at most 100 raw rows and places a `$0.25` aggregate provider-side ceiling on Apify. `$1.00` is an explicit absolute maximum, never the default. |
 | INV-02 | No generated request targets Mexico. Returned outside-scope rows are preserved and marked for review rather than hidden. |
 | INV-03 | Exa works when Apify is disabled or unavailable. |
 | INV-04 | Every attempted provider call is recoverable through usage accounting on success or failure; reported dollar usage remains estimated. |
@@ -87,9 +84,8 @@ The implementation remains separated by responsibility:
 | `tests/test_{queries,exa_discovery,apify_discovery,deduplication}.py` | behavioral contract tests |
 | `pyproject.toml`, `PLANS.md` | dependencies and M2 completion status |
 
-No production file outside this manifest should change unless an unavoidable repository
-constraint is documented without expanding M2. Every new or changed function and class
-requires a useful docstring.
+Do not change production files outside this manifest unless a documented repository
+constraint requires it. Every new or changed function/class requires a useful docstring.
 
 Add these public data contracts to `models.py`:
 
@@ -153,11 +149,10 @@ class DeduplicationResult:
     unresolved_records: list[DiscoveryRecord]
 ```
 
-All four models provide `to_dict()` and `from_dict()`, round-trip nested data without
-loss, emit JSON-compatible primitives, and do not retain caller-owned mutable
-collections. `query` is optional because Apify may omit `searchString`; the adapter
-must not substitute the request target or another query. `target_country_code` records
-intent only and is never evidence of the returned company's country.
+All four models round-trip nested JSON-safe data through `to_dict()`/`from_dict()` and
+do not retain caller-owned mutable collections. `query` is optional because Apify may
+omit `searchString`; never substitute another query. `target_country_code` records
+intent, not the returned company's country.
 
 `DiscoveryProvider.search(request) -> DiscoveryBatch` is a synchronous protocol.
 Provider constructors receive a nonempty credential and an injected `httpx.Client`;
@@ -178,7 +173,7 @@ def build_discovery_requests(
     *,
     include_apify: bool,
     max_candidates: int = 100,
-    apify_budget_usd: float = 1.0,
+    apify_budget_usd: float = 0.25,
 ) -> tuple[DiscoveryRequest, ...]:
     """Build the complete bounded M2 discovery plan."""
 ```
@@ -210,9 +205,10 @@ industrial pipe and flow control supplier
 ```
 
 The default Exa-only plan is ten requests × 10 rows. The default combined plan is ten
-Exa requests × 7 rows plus U.S. and Canada Apify requests × 15 rows, capped at `$0.50`
-per Actor run. Small candidate totals use the same allocation rules rather than special
-cases.
+Exa requests × 7 rows plus U.S. and Canada Apify requests × 15 rows, capped at `$0.125`
+per Actor run (`$0.25` aggregate). Small candidate totals use the same allocation rules
+rather than special cases. A caller may explicitly supply a larger budget up to the
+`$1.00` absolute maximum; adapters never increase it.
 
 ## Provider behavior
 
@@ -403,8 +399,10 @@ evidence must cover:
 
 Tests use `httpx.MockTransport`, injected clock/sleep, and the bundled public-suffix
 snapshot. Normal tests and CI never call Exa, Apify, DNS, or public-suffix endpoints.
-Any live smoke request requires explicit user approval, real credentials, and a minimal
-result/spend cap; it is not acceptance evidence by itself.
+Any live smoke request requires explicit user approval and real credentials. Exa is
+limited to one result; Apify is limited to one item and `maxTotalChargeUsd <= $0.05`.
+If the Actor rejects that cap as below its minimum, skip the smoke rather than increase
+it. A smoke is not acceptance evidence by itself.
 
 Run the full repository gate:
 
