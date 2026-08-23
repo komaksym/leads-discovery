@@ -16,7 +16,7 @@ Build the PVF company-discovery pipeline in small reviewable milestones. Each mi
 - [ ] **M2 — Discovery and deduplication**
   - query generation
   - Exa discovery adapter
-  - optional Apify adapter boundary
+  - optional live Apify Google Maps adapter
   - domain/name+location deduplication with provenance merge
 - [ ] **M3 — Research and structured extraction**
   - Exa evidence collection
@@ -51,7 +51,20 @@ main
                 └── M1.5 milestone metadata
 ```
 
-Rules:
+M2 is an explicit exception to milestone decomposition. Per product-owner direction,
+query generation, Exa discovery, optional live Apify discovery, and deduplication are
+implemented and reviewed together as one atomic pull request:
+
+```text
+main
+└── M2 discovery and deduplication
+```
+
+The implementation contract is
+`docs/superpowers/specs/2026-08-23-m2-discovery-deduplication-design.md`. M2 must not be
+split into sub-milestones, stack layers, or separately approved implementation sections.
+
+Rules, except where a milestone-specific exception above says otherwise:
 
 1. Split a milestone into the smallest coherent dependent PRs that make review easier; each layer should have one clear purpose.
 2. Submit all layers of a milestone together once the milestone implementation is ready, so reviewers can navigate and review the whole stack without waiting for each layer to merge first.
