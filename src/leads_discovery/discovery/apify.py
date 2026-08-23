@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import time
 from collections.abc import Callable
 from typing import Any, cast
@@ -111,7 +112,14 @@ class ApifyDiscoveryProvider:
             validate_common_request(request, "apify")
             if len(request.queries) != 3:
                 raise ValueError("Apify Maps discovery requires exactly three queries")
-            if request.max_cost_usd is None or not 0 < request.max_cost_usd <= 1:
+            cap = request.max_cost_usd
+            if (
+                cap is None
+                or isinstance(cap, bool)
+                or not isinstance(cap, (int, float))
+                or not math.isfinite(cap)
+                or not 0 < cap <= 1
+            ):
                 raise ValueError("Apify max_cost_usd must be in (0, 1]")
         except ValueError as exc:
             raise validation_error(
@@ -214,12 +222,13 @@ class ApifyDiscoveryProvider:
             if status == "SUCCEEDED":
                 break
             if status in _TERMINAL_ERROR:
+                kind = "budget_exhausted" if _is_credit_exhausted(data) else "permanent"
                 raise provider_error(
                     provider="apify",
                     request_id=request.request_id,
                     operation="google_maps_search",
                     request_count=request_count,
-                    kind="permanent",
+                    kind=kind,
                     retryable=False,
                     metadata={"request_id": request.request_id, "run_id": run_id, "status": status},
                 ) from None
@@ -385,6 +394,25 @@ class ApifyDiscoveryProvider:
         )
 
 
+def _is_credit_exhausted(data: dict[str, Any]) -> bool:
+    """Detect an explicit safe Actor credit/balance exhaustion message without retaining it."""
+    message = data.get("statusMessage")
+    if not isinstance(message, str):
+        return False
+    normalized = message.casefold()
+    return any(
+        marker in normalized
+        for marker in (
+            "insufficient credit",
+            "insufficient balance",
+            "not enough credit",
+            "not enough balance",
+            "credit exhausted",
+            "credits exhausted",
+        )
+    )
+
+
 def _required_str(value: Any, request: DiscoveryRequest, request_count: int) -> str:
     """Return a required provider string or raise a sanitized invalid response."""
     if not isinstance(value, str) or not value:
@@ -414,7 +442,12 @@ def _run_cost(
     value = data.get("usageTotalUsd")
     if value is None:
         return None
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+        or value < 0
+    ):
         raise provider_error(
             provider="apify",
             request_id=request.request_id,

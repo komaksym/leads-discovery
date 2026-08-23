@@ -5,12 +5,12 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
-from typing import Any, Literal, TypeAlias, cast
+from typing import Any, Literal, cast
 
-ProviderName: TypeAlias = Literal["exa", "apify", "deepseek"]
-DiscoveryProviderName: TypeAlias = Literal["exa", "apify"]
-CountryCode: TypeAlias = Literal["US", "CA"]
-ErrorKind: TypeAlias = Literal[
+ProviderName = Literal["exa", "apify", "deepseek"]
+DiscoveryProviderName = Literal["exa", "apify"]
+CountryCode = Literal["US", "CA"]
+ErrorKind = Literal[
     "authentication",
     "budget_exhausted",
     "rate_limited",
@@ -19,7 +19,7 @@ ErrorKind: TypeAlias = Literal[
     "transient",
     "permanent",
 ]
-FactValue: TypeAlias = bool | int | float | str | list[str] | None
+FactValue = bool | int | float | str | list[str] | None
 
 
 def _utc_now() -> str:
@@ -196,7 +196,11 @@ class DiscoveryRequest:
             queries=tuple(str(query) for query in data["queries"]),
             max_results_per_query=int(data["max_results_per_query"]),
             max_results_total=int(data["max_results_total"]),
-            max_cost_usd=(None if data.get("max_cost_usd") is None else float(data["max_cost_usd"])),
+            max_cost_usd=(
+                None
+                if data.get("max_cost_usd") is None
+                else float(data["max_cost_usd"])
+            ),
         )
 
 

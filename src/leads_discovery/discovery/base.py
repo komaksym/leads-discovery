@@ -12,7 +12,6 @@ import httpx
 from leads_discovery.models import (
     DiscoveryBatch,
     DiscoveryProviderName,
-    DiscoveryRecord,
     DiscoveryRequest,
     ErrorKind,
     UsageEvent,
