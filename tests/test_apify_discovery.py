@@ -314,6 +314,35 @@ def test_rejected_cap_is_not_raised_or_retried() -> None:
     assert TOKEN not in str(caught.value)
 
 
+def test_authenticated_apify_usage_above_authorized_cap_is_invalid_response() -> None:
+    """PRV-07 fails closed if provider-reported spend exceeds the exact authorized run cap."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            return httpx.Response(
+                201,
+                json={
+                    "data": {
+                        "id": "over-cap-run",
+                        "status": "SUCCEEDED",
+                        "defaultDatasetId": "over-cap-dataset",
+                        "usageTotalUsd": 0.126,
+                    }
+                },
+            )
+        if request.url.path == "/v2/datasets/over-cap-dataset/items":
+            return httpx.Response(200, json=[])
+        raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        provider = ApifyDiscoveryProvider(api_token=TOKEN, client=client)
+        with pytest.raises(DiscoveryProviderError) as caught:
+            provider.search(_request(max_cost_usd=0.125))
+
+    assert caught.value.kind == "invalid_response"
+    assert caught.value.retryable is False
+
+
 @pytest.mark.parametrize("status", ["FAILED", "TIMED-OUT", "ABORTED"])
 def test_terminal_actor_failure_is_permanent(status: str) -> None:
     """Failed, timed-out, and aborted Actor runs are terminal permanent errors."""
