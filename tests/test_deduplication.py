@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import socket
 from itertools import permutations
-from typing import Any
+from typing import Any, Literal
 
 import pytest
 
@@ -36,7 +36,7 @@ DENIED_DOMAINS = (
 def _record(
     record_id: str,
     *,
-    provider: str = "exa",
+    provider: Literal["exa", "apify"] = "exa",
     name: str | None = "Acme Valve",
     website_url: str | None = None,
     source_url: str | None = None,
