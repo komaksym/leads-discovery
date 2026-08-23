@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 from datetime import datetime
+from typing import Any
 
 import httpx
 import pytest
@@ -209,8 +210,9 @@ def test_exa_research_exact_payload_call_order_raw_preservation_ids_and_usage() 
     assert len({item.retrieved_at for item in bundle.items}) == 1
     retrieved = datetime.fromisoformat(bundle.items[0].retrieved_at)
     assert retrieved.tzinfo is not None
-    assert retrieved.utcoffset() is not None
-    assert retrieved.utcoffset().total_seconds() == 0
+    offset = retrieved.utcoffset()
+    assert offset is not None
+    assert offset.total_seconds() == 0
     assert len(bundle.raw_records) == 3
     assert bundle.raw_records[0]["opaque"] == {"full": [0, "preserve"]}
     assert bundle.raw_records[1]["id"] == "result-1"
@@ -393,7 +395,9 @@ def test_bundle_caps_each_excerpt_and_total_excerpt_characters() -> None:
 def test_bundle_preserves_full_raw_rows_and_defensively_copies_inputs() -> None:
     """Bounded prompt items never destroy full research rows or retain caller-owned mutables."""
     company = _company("cmp_acme")
-    raw_records = [{"id": "raw-1", "nested": {"values": [1, 2]}}]
+    raw_records: list[dict[str, Any]] = [
+        {"id": "raw-1", "nested": {"values": [1, 2]}}
+    ]
     usage = UsageEvent(provider="exa", operation="company_research", metadata={"nested": [1]})
     items = [_evidence(1)]
 
