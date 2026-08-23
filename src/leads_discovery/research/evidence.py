@@ -181,16 +181,33 @@ class ExaEvidenceResearcher:
         *,
         on_progress: Callable[[EvidenceBundle], None] | None = None,
     ) -> EvidenceBundle:
-        """Execute three searches and optionally report each successful call before the next."""
+        """Execute all three searches and optionally report each successful call before the next."""
+        return self._research_from(company, start_index=0, on_progress=on_progress)
+
+    def _research_from(
+        self,
+        company: CompanyRecord,
+        *,
+        start_index: int,
+        on_progress: Callable[[EvidenceBundle], None] | None,
+    ) -> EvidenceBundle:
+        """Execute unfinished searches from a validated zero-based catalog position."""
         requests = build_research_requests(company)
+        if (
+            isinstance(start_index, bool)
+            or not isinstance(start_index, int)
+            or not 0 <= start_index <= len(requests)
+        ):
+            raise ValueError("start_index must identify a bounded research request position")
         retrieved_at = utc_timestamp()
         raw_records: list[dict[str, Any]] = []
         items: list[EvidenceItem] = []
         costs: list[float | None] = []
         result_counts: list[int] = []
         attempted = 0
-        for request in requests:
+        for request in requests[start_index:]:
             attempted += 1
+            attempted_position = start_index + attempted
             delta_request_count = 1 if on_progress is not None else attempted
             response = safe_transport_call(
                 lambda request=request: self._client.post(
@@ -218,7 +235,10 @@ class ExaEvidenceResearcher:
                     kind=kind,
                     retryable=retryable,
                     status_code=response.status_code,
-                    metadata={"company_id": company.company_id, "attempted_requests": attempted},
+                    metadata={
+                        "company_id": company.company_id,
+                        "attempted_requests": attempted_position,
+                    },
                 ) from None
             try:
                 payload_raw = response.json()
@@ -231,7 +251,10 @@ class ExaEvidenceResearcher:
                     kind="invalid_response",
                     retryable=False,
                     status_code=response.status_code,
-                    metadata={"company_id": company.company_id, "attempted_requests": attempted},
+                    metadata={
+                        "company_id": company.company_id,
+                        "attempted_requests": attempted_position,
+                    },
                 ) from None
             if not isinstance(payload_raw, dict) or not isinstance(
                 payload_raw.get("results"), list
@@ -244,7 +267,10 @@ class ExaEvidenceResearcher:
                     kind="invalid_response",
                     retryable=False,
                     status_code=response.status_code,
-                    metadata={"company_id": company.company_id, "attempted_requests": attempted},
+                    metadata={
+                        "company_id": company.company_id,
+                        "attempted_requests": attempted_position,
+                    },
                 ) from None
             payload = cast(dict[str, Any], payload_raw)
             results = cast(list[Any], payload["results"])
@@ -257,7 +283,10 @@ class ExaEvidenceResearcher:
                     kind="invalid_response",
                     retryable=False,
                     status_code=response.status_code,
-                    metadata={"company_id": company.company_id, "attempted_requests": attempted},
+                    metadata={
+                        "company_id": company.company_id,
+                        "attempted_requests": attempted_position,
+                    },
                 ) from None
             bounded_results = results[: request.max_results]
             call_raw_records = [cast(dict[str, Any], raw) for raw in bounded_results]
@@ -270,7 +299,7 @@ class ExaEvidenceResearcher:
                 payload,
                 company.company_id,
                 delta_request_count,
-                attempted,
+                attempted_position,
             )
             raw_records.extend(call_raw_records)
             items.extend(call_items)
