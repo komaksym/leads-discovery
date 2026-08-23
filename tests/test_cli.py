@@ -6,7 +6,7 @@ import json
 import os
 from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import httpx
 import pytest
@@ -50,12 +50,12 @@ def _block_credential_reads(monkeypatch: pytest.MonkeyPatch) -> None:
     def guarded_get(env: Any, key: str, default: str | None = None) -> str | None:
         if key in _PROVIDER_KEYS:
             raise AssertionError(f"credential read forbidden: {key}")
-        return cast(str | None, original_get(env, key, default))
+        return original_get(env, key, default)
 
     def guarded_getitem(env: Any, key: str) -> str:
         if key in _PROVIDER_KEYS:
             raise AssertionError(f"credential read forbidden: {key}")
-        return cast(str, original_getitem(env, key))
+        return original_getitem(env, key)
 
     monkeypatch.setattr(env_type, "get", guarded_get)
     monkeypatch.setattr(env_type, "__getitem__", guarded_getitem)
