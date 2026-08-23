@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any, cast
 
 import httpx
@@ -112,8 +113,7 @@ class ExaDiscoveryProvider:
                     retryable=False,
                     status_code=response.status_code,
                 ) from None
-            row = cast(dict[str, Any], raw)
-            records.append(self._parse_record(request, row, retrieved_at))
+            records.append(self._parse_record(request, raw, retrieved_at))
 
         estimated_cost = self._parse_cost(payload, request.request_id)
         usage = UsageEvent(
@@ -138,11 +138,7 @@ class ExaDiscoveryProvider:
         """Map one Exa result while preserving the complete provider row."""
         entity = _first_company_entity(raw)
         properties_raw = entity.get("properties")
-        properties = (
-            cast(dict[str, Any], properties_raw)
-            if isinstance(properties_raw, dict)
-            else entity
-        )
+        properties = cast(dict[str, Any], properties_raw) if isinstance(properties_raw, dict) else entity
         headquarters = properties.get("headquarters")
         hq = cast(dict[str, Any], headquarters) if isinstance(headquarters, dict) else {}
         provider_result_id = (
@@ -161,14 +157,19 @@ class ExaDiscoveryProvider:
             else []
         )
         snippet = "\n".join(snippets)[:2000] or None
-        parsed_identity = {
+        city = _optional_str(hq.get("city"))
+        postal_code = _optional_str(hq.get("postalCode")) or _optional_str(hq.get("postal_code"))
+        country_code = (
+            _optional_str(hq.get("countryCode"))
+            or _optional_str(hq.get("country_code"))
+            or _optional_str(hq.get("country"))
+        )
+        parsed_identity: dict[str, Any] = {
             "name": name,
             "url": source_url,
-            "city": _optional_str(hq.get("city")),
-            "postal_code": _optional_str(hq.get("postalCode"))
-            or _optional_str(hq.get("postal_code")),
-            "country_code": _optional_str(hq.get("countryCode"))
-            or _optional_str(hq.get("country_code")),
+            "city": city,
+            "postal_code": postal_code,
+            "country_code": country_code,
         }
         record_id = stable_raw_record_id(
             provider="exa",
@@ -187,10 +188,10 @@ class ExaDiscoveryProvider:
             name=name,
             source_url=source_url,
             website_url=website_url,
-            city=parsed_identity["city"],
+            city=city,
             region=None,
-            postal_code=parsed_identity["postal_code"],
-            country_code=parsed_identity["country_code"],
+            postal_code=postal_code,
+            country_code=country_code,
             title=title,
             snippet=snippet,
             raw_metadata=raw,
@@ -199,7 +200,7 @@ class ExaDiscoveryProvider:
 
     @staticmethod
     def _parse_cost(payload: dict[str, Any], request_id: str) -> float | None:
-        """Read nonnegative authenticated Exa cost metadata when present."""
+        """Read finite nonnegative authenticated Exa cost metadata when present."""
         cost_dollars = payload.get("costDollars")
         if cost_dollars is None:
             return None
@@ -215,7 +216,12 @@ class ExaDiscoveryProvider:
         total = cost_dollars.get("total")
         if total is None:
             return None
-        if isinstance(total, bool) or not isinstance(total, (int, float)) or total < 0:
+        if (
+            isinstance(total, bool)
+            or not isinstance(total, (int, float))
+            or not math.isfinite(total)
+            or total < 0
+        ):
             raise provider_error(
                 provider="exa",
                 request_id=request_id,
