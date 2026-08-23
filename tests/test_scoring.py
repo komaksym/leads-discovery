@@ -7,6 +7,7 @@ from dataclasses import FrozenInstanceError
 from typing import Any
 
 import pytest
+from m3_factories import accepted_facts, build_company, exact_threshold_facts
 
 from leads_discovery.models import CompanyRecord, DecisionReason
 from leads_discovery.scoring import (
@@ -15,7 +16,6 @@ from leads_discovery.scoring import (
     evaluate_companies,
     evaluate_company,
 )
-from m3_factories import accepted_facts, build_company, exact_threshold_facts
 
 
 @pytest.mark.parametrize(
@@ -112,6 +112,7 @@ def test_revenue_boundaries(value: float, score: float) -> None:
     ("value", "score"),
     [(0, 0), (1, 25), (4, 25), (5, 50), (9, 50), (10, 75), (19, 75), (20, 100),
      ("none", 0), ("NARROW", 25), ("Moderate", 60), ("broad", 100),
+     (["", "  "], 0),
      (["A", " a ", "", "B", "b", "C", "D", "E"], 50)],
 )
 def test_manufacturer_breadth(value: object, score: float) -> None:
@@ -202,7 +203,6 @@ def test_decision_uses_unrounded_score() -> None:
         ("revenue_if_reliably_available", float("inf")),
         ("manufacturer_count_or_breadth", -1),
         ("manufacturer_count_or_breadth", "wide"),
-        ("manufacturer_count_or_breadth", ["", "  "]),
     ],
 )
 def test_unsupported_values_stay_unknown(fact: str, bad: object) -> None:
@@ -265,7 +265,7 @@ def test_exact_output_keys_and_default_policy() -> None:
         "workload", "economic_fit", "low_incumbent_exposure", "direct_pain", "overall"
     }
     assert set(result.score_components) == {"economic_fit"}
-    assert DEFAULT_POLICY == ScoringPolicy(
+    assert ScoringPolicy(
         version="m3-v1",
         minimum_fact_confidence=.60,
         critical_relevance_confidence=.75,
@@ -274,7 +274,7 @@ def test_exact_output_keys_and_default_policy() -> None:
         minimum_overall_coverage=.70,
         minimum_workload_coverage=.60,
         minimum_economic_coverage=.50,
-    )
+    ) == DEFAULT_POLICY
     with pytest.raises(FrozenInstanceError):
         DEFAULT_POLICY.acceptance_score = 1.0  # type: ignore[misc]
 
