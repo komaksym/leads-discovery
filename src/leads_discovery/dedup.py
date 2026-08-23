@@ -374,7 +374,7 @@ def _build_company(
     if any(row.country is not None and row.country not in {"US", "CA"} for row in rows):
         review.add("OUTSIDE_GEOGRAPHY")
     locations = sorted({location for row in rows if (location := _location(row)) is not None})
-    providers = sorted({row.record.provider for row in rows})
+    providers: list[str] = sorted({str(row.record.provider) for row in rows})
     queries = sorted({row.record.query for row in rows if row.record.query is not None})
     created = min(row.retrieved for row in rows).isoformat()
     updated = max(row.retrieved for row in rows).isoformat()
