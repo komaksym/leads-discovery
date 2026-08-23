@@ -5,17 +5,17 @@ from __future__ import annotations
 from copy import deepcopy
 
 import pytest
-from m3_factories import accepted_facts, build_company, low_score_facts
+from m3_factories import FactInput, accepted_facts, build_company, low_score_facts
 
 from leads_discovery.scoring import evaluate_company
 
 
-def _without(*keys: str) -> dict[str, tuple[object, float]]:
+def _without(*keys: str) -> dict[str, FactInput]:
     """Return accepted facts without selected keys."""
     facts = accepted_facts()
     for key in keys:
         facts.pop(key)
-    return facts  # type: ignore[return-value]
+    return facts
 
 
 def test_each_acceptance_gate_independently_forces_uncertain() -> None:
@@ -42,7 +42,7 @@ def test_each_acceptance_gate_independently_forces_uncertain() -> None:
         "known_quote_automation_or_order_automation_relationship",
     )
 
-    low_overall = {
+    low_overall: dict[str, FactInput] = {
         "pvf_relevant": (True, .90),
         "rfq_or_quote_workflow_evidence": (True, .90),
         "inside_sales_or_estimating_presence": (True, .90),
@@ -52,7 +52,7 @@ def test_each_acceptance_gate_independently_forces_uncertain() -> None:
         "known_current_direct_competitor_customer": (False, .90),
         "direct_quotation_pain_evidence": (True, .90),
     }
-    cases = [
+    cases: list[tuple[dict[str, FactInput], str]] = [
         (relevance, "pvf_relevance_unresolved"),
         (low_score_facts(), "score_below_acceptance"),
         (low_overall, "low_overall_coverage"),
@@ -158,7 +158,7 @@ def test_current_competitor_rejects_only_at_exact_threshold(confidence: float) -
 
 def test_too_small_rule_requires_all_four_exact_high_confidence_facts() -> None:
     """The composite too-small rejection has no partial or low-confidence shortcut."""
-    full = {
+    full: dict[str, FactInput] = {
         "employee_count": (9, .85),
         "branch_count": (1, .85),
         "inside_sales_or_estimating_presence": (False, .85),
