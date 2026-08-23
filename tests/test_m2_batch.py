@@ -738,3 +738,43 @@ def test_unknown_in_flight_deepseek_is_not_automatically_repeated(tmp_path: Path
     )
     assert resumed.status == "paused_unknown"
     assert crashing.calls == 1
+
+
+def test_exa_budget_is_rechecked_between_paid_research_queries(tmp_path: Path) -> None:
+    """Required Exa stops before the next research call once its local ceiling is reached."""
+    calls = 0
+    first_row = {
+        "id": "budget-research-1",
+        "url": "https://budget-research.com/about",
+        "title": "Budget research",
+        "highlights": ["Industrial valves and fittings"],
+    }
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx.Response(
+                200,
+                json={"results": [first_row], "costDollars": {"total": 0.01}},
+            )
+        raise AssertionError("Exa budget must be rechecked before the next paid research call")
+
+    run_dir = tmp_path / "exa-research-budget"
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        checkpoint = run_m2_batch(
+            _config(tmp_path, "exa-research-budget", exa_budget_usd=0.01),
+            discovery={"exa": FakeDiscovery()},
+            researcher=ExaEvidenceResearcher(api_key="test-key", client=client),
+            extractor=FakeExtractor(),
+        )
+
+    assert calls == 1
+    assert checkpoint.status == "paused_budget"
+    usage_rows = [
+        json.loads(line)
+        for line in (run_dir / "usage_events.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    research_usage = [row for row in usage_rows if row["operation"] == "company_research"]
+    assert len(research_usage) == 1
+    assert research_usage[0]["estimated_cost_usd"] == pytest.approx(0.01)
