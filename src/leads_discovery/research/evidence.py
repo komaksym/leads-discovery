@@ -181,7 +181,7 @@ class ExaEvidenceResearcher:
         *,
         on_progress: Callable[[EvidenceBundle], None] | None = None,
     ) -> EvidenceBundle:
-        """Execute three searches, optionally reporting each durable-success delta before the next."""
+        """Execute three searches and optionally report each successful call before the next."""
         requests = build_research_requests(company)
         retrieved_at = utc_timestamp()
         raw_records: list[dict[str, Any]] = []
@@ -233,7 +233,9 @@ class ExaEvidenceResearcher:
                     status_code=response.status_code,
                     metadata={"company_id": company.company_id, "attempted_requests": attempted},
                 ) from None
-            if not isinstance(payload_raw, dict) or not isinstance(payload_raw.get("results"), list):
+            if not isinstance(payload_raw, dict) or not isinstance(
+                payload_raw.get("results"), list
+            ):
                 raise provider_error(
                     provider="exa",
                     request_id=request.request_id,
