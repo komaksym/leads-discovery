@@ -334,10 +334,29 @@ def _enrich_dry(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
 
 
 def _enrich_live(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
-    """Compose M4 live providers only after explicit authorization and credential validation."""
+    """Preflight durable state before constructing any explicitly authorized live provider."""
     _validate_enrich_inputs(args)
     if args.exa_people_budget_usd is None:
         raise ValueError("live enrichment requires an explicit Exa People budget")
+
+    from leads_discovery.pipeline.contact_enrichment import (
+        ContactEnrichmentConfig,
+        run_contact_enrichment,
+        validate_contact_enrichment_state,
+    )
+
+    config = ContactEnrichmentConfig(
+        run_id=args.run_id,
+        data_root=args.data_root,
+        max_contacts_per_company=args.max_contacts_per_company,
+        max_paid_contacts_per_company=args.max_paid_contacts_per_company,
+        exa_people_budget_usd=args.exa_people_budget_usd,
+        clay_max_contacts=args.clay_max_contacts,
+        apollo_credit_cap=args.apollo_credit_cap,
+        instantly_verification_call_cap=args.instantly_verification_call_cap,
+        execute_live=True,
+    )
+    validate_contact_enrichment_state(config)
 
     import os
 
@@ -348,10 +367,6 @@ def _enrich_live(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
         ClayContactProvider,
         ExaPeopleProvider,
         InstantlyVerificationProvider,
-    )
-    from leads_discovery.pipeline.contact_enrichment import (
-        ContactEnrichmentConfig,
-        run_contact_enrichment,
     )
 
     names = (
@@ -372,17 +387,6 @@ def _enrich_live(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
             },
             1,
         )
-    config = ContactEnrichmentConfig(
-        run_id=args.run_id,
-        data_root=args.data_root,
-        max_contacts_per_company=args.max_contacts_per_company,
-        max_paid_contacts_per_company=args.max_paid_contacts_per_company,
-        exa_people_budget_usd=args.exa_people_budget_usd,
-        clay_max_contacts=args.clay_max_contacts,
-        apollo_credit_cap=args.apollo_credit_cap,
-        instantly_verification_call_cap=args.instantly_verification_call_cap,
-        execute_live=True,
-    )
     with httpx.Client() as client:
         summary = run_contact_enrichment(
             config,
