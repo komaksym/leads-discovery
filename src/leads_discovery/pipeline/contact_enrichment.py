@@ -763,15 +763,15 @@ def run_contact_enrichment(
         operations[key] = {"state": "in_flight"}
         _save_checkpoint(paths.checkpoint, checkpoint, "running", None)
         try:
-            result = exa.search(company)
+            exa_result = exa.search(company)
         except ContactProviderError as error:
             _record_event(paths.usage_events, error.usage_event)
             status = "paused_budget" if error.kind == "budget_exhausted" else "paused_unknown"
             return _pause(config, paths, checkpoint, contacts, status, key)
-        _record_event(paths.usage_events, result.usage_event)
-        tracker.record(result.usage_event)
+        _record_event(paths.usage_events, exa_result.usage_event)
+        tracker.record(exa_result.usage_event)
         selected = select_contacts(
-            company, result.results, limit=config.max_contacts_per_company
+            company, exa_result.results, limit=config.max_contacts_per_company
         )
         for contact in selected:
             contacts[contact.contact_id] = contact
@@ -809,7 +809,7 @@ def run_contact_enrichment(
                 )
             run_id = cast(str, clay_state["routine_run_id"])
             try:
-                result = clay.results(run_id)
+                clay_result = clay.results(run_id)
             except ContactProviderError as error:
                 _record_event(paths.usage_events, error.usage_event)
                 status = (
@@ -823,8 +823,8 @@ def run_contact_enrichment(
                     status,
                     "clay_pending",
                 )
-            _record_event(paths.usage_events, result.usage_event)
-            if result.status == "pending":
+            _record_event(paths.usage_events, clay_result.usage_event)
+            if clay_result.status == "pending":
                 return _pause(
                     config,
                     paths,
@@ -835,7 +835,7 @@ def run_contact_enrichment(
                 )
             by_id = {
                 str(item.get("id")): item
-                for item in result.items
+                for item in clay_result.items
                 if item.get("id") is not None
             }
             for contact_id in expected:
@@ -858,22 +858,24 @@ def run_contact_enrichment(
         elif clay_state_name != "completed":
             raise AssertionError("validated Clay state is unreachable")
     else:
-        pending = [item for item in paid if not _has_attempt(item, "clay", "completed")]
-        pending = pending[: config.clay_max_contacts]
-        if pending:
+        clay_pending = [
+            item for item in paid if not _has_attempt(item, "clay", "completed")
+        ]
+        clay_pending = clay_pending[: config.clay_max_contacts]
+        if clay_pending:
             current_ids = _accepted_ids(paths.evaluated)
-            pending = [item for item in pending if item.company_id in current_ids]
-        if pending:
+            clay_pending = [item for item in clay_pending if item.company_id in current_ids]
+        if clay_pending:
             operations["clay:batch"] = {
                 "state": "in_flight",
-                "contact_ids": [item.contact_id for item in pending],
+                "contact_ids": [item.contact_id for item in clay_pending],
             }
-            for contact in pending:
+            for contact in clay_pending:
                 _attempt(contact, "clay", "work_email_routine", "in_flight")
             _publish_contacts(paths, contacts)
             _save_checkpoint(paths.checkpoint, checkpoint, "running", None)
             try:
-                started = clay.start(pending)
+                started = clay.start(clay_pending)
             except ContactProviderError as error:
                 _record_event(paths.usage_events, error.usage_event)
                 status = (
@@ -891,7 +893,7 @@ def run_contact_enrichment(
             operations["clay:batch"] = {
                 "state": "pending",
                 "routine_run_id": started.routine_run_id,
-                "contact_ids": [item.contact_id for item in pending],
+                "contact_ids": [item.contact_id for item in clay_pending],
             }
             return _pause(
                 config,
@@ -935,7 +937,7 @@ def run_contact_enrichment(
         _publish_contacts(paths, contacts)
         _save_checkpoint(paths.checkpoint, checkpoint, "running", None)
         try:
-            result = apollo.enrich(contact)
+            apollo_result = apollo.enrich(contact)
         except ContactProviderError as error:
             event = error.usage_event
             event.metadata["credits_reserved"] = 1.0
@@ -944,15 +946,15 @@ def run_contact_enrichment(
             return _pause(config, paths, checkpoint, contacts, status, key)
         used = _finite_nonnegative(
             "apollo credits",
-            result.credits_used if result.credits_used is not None else 1.0,
+            apollo_result.credits_used if apollo_result.credits_used is not None else 1.0,
         )
-        result.usage_event.metadata["credits_used"] = used
-        if result.credits_used is None:
-            result.usage_event.metadata["credits_reserved"] = 1.0
-        _record_event(paths.usage_events, result.usage_event)
+        apollo_result.usage_event.metadata["credits_used"] = used
+        if apollo_result.credits_used is None:
+            apollo_result.usage_event.metadata["credits_reserved"] = 1.0
+        _record_event(paths.usage_events, apollo_result.usage_event)
         apollo_used += used
-        if result.work_email is not None:
-            contact.work_email = result.work_email
+        if apollo_result.work_email is not None:
+            contact.work_email = apollo_result.work_email
             contact.email_source = "apollo"
         _attempt(contact, "apollo", "people_enrichment", "completed")
         operations[key] = {"state": "completed", "credits_used": used}
@@ -988,32 +990,33 @@ def run_contact_enrichment(
                 "instantly_call_cap",
             )
         email = contact.work_email
-        pending = state is not None and cast(str, state["state"]) == "pending"
+        is_pending = state is not None and cast(str, state["state"]) == "pending"
         try:
-            if pending:
-                persisted_email = cast(str, state["email"])
+            if is_pending:
+                persisted_state = cast(dict[str, Any], state)
+                persisted_email = cast(str, persisted_state["email"])
                 if persisted_email != email:
                     raise ValueError("pending Instantly email does not match contact email")
-                result = instantly.get(email)
+                verification = instantly.get(email)
             else:
                 operations[key] = {"state": "in_flight", "email": email}
                 _attempt(contact, "instantly", "email_verification", "in_flight")
                 _publish_contacts(paths, contacts)
                 _save_checkpoint(paths.checkpoint, checkpoint, "running", None)
-                result = instantly.create(email)
+                verification = instantly.create(email)
         except ContactProviderError as error:
             _record_event(paths.usage_events, error.usage_event)
             if error.kind == "budget_exhausted":
                 status = "paused_budget"
-            elif pending:
+            elif is_pending:
                 status = "paused_pending"
             else:
                 status = "paused_unknown"
             return _pause(config, paths, checkpoint, contacts, status, key)
-        _record_event(paths.usage_events, result.usage_event)
-        instantly_calls += result.usage_event.request_count
-        contact.email_verification_status = result.status
-        if result.status == "pending":
+        _record_event(paths.usage_events, verification.usage_event)
+        instantly_calls += verification.usage_event.request_count
+        contact.email_verification_status = verification.status
+        if verification.status == "pending":
             operations[key] = {"state": "pending", "email": email}
             _attempt(contact, "instantly", "email_verification", "pending")
             return _pause(
@@ -1024,13 +1027,17 @@ def run_contact_enrichment(
                 "paused_pending",
                 key,
             )
-        operations[key] = {"state": "completed", "email": email, "status": result.status}
+        operations[key] = {
+            "state": "completed",
+            "email": email,
+            "status": verification.status,
+        }
         _attempt(
             contact,
             "instantly",
             "email_verification",
             "completed",
-            status=result.status,
+            status=verification.status,
         )
         _publish_contacts(paths, contacts)
         _publish_usage(paths)
