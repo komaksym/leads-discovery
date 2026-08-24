@@ -360,6 +360,94 @@ def _validate_operation_references(
                 raise ValueError(f"malformed contact checkpoint operation: {operation}")
 
 
+def _require_operation_state(
+    operations: dict[str, Any], operation: str, allowed: frozenset[str]
+) -> None:
+    """Require pause evidence to reference one durable operation in an allowed replay state."""
+    value = operations.get(operation)
+    if not isinstance(value, dict) or value.get("state") not in allowed:
+        raise ValueError("contact checkpoint pause evidence is missing or inconsistent")
+
+
+def _validate_checkpoint_consistency(
+    checkpoint: RunCheckpoint,
+    operations: dict[str, Any],
+    events: list[UsageEvent],
+) -> None:
+    """Require top-level M4 status and pause metadata to agree with durable replay evidence."""
+    if checkpoint.pending_company_id is not None or checkpoint.pending_stage is not None:
+        raise ValueError("M4 checkpoint must not use M2 pending company/stage fields")
+
+    reason = checkpoint.pause_reason
+    if checkpoint.status in {"running", "completed"}:
+        if reason is not None:
+            raise ValueError("active/completed M4 checkpoint must not have a pause reason")
+        if checkpoint.status == "completed" and any(
+            cast(str, value["state"]) in {"in_flight", "pending"}
+            for value in operations.values()
+        ):
+            raise ValueError("completed M4 checkpoint contains unfinished provider work")
+        if checkpoint.status == "running" and any(
+            cast(str, value["state"]) == "pending" for value in operations.values()
+        ):
+            raise ValueError("running M4 checkpoint contains pending async provider work")
+        return
+
+    if not isinstance(reason, str) or not reason.strip():
+        raise ValueError("paused M4 checkpoint requires a nonblank pause reason")
+
+    if checkpoint.status == "paused_unknown":
+        if reason == "exa_usage_unknown":
+            if CostTracker(events).provider_estimated_spend("exa") is not None:
+                raise ValueError("Exa usage-unknown pause lacks incomplete Exa usage evidence")
+            return
+        if reason in {"clay_start", "clay_start_unknown"}:
+            _require_operation_state(operations, "clay:batch", frozenset({"in_flight"}))
+            return
+        if reason == "clay_authorization_changed":
+            _require_operation_state(operations, "clay:batch", frozenset({"pending"}))
+            return
+        if reason.startswith(("exa:", "apollo:", "instantly:")):
+            _require_operation_state(operations, reason, frozenset({"in_flight"}))
+            return
+        raise ValueError("paused_unknown M4 checkpoint has unsupported pause evidence")
+
+    if checkpoint.status == "paused_pending":
+        if reason == "clay_pending":
+            _require_operation_state(operations, "clay:batch", frozenset({"pending"}))
+            return
+        if reason.startswith("instantly:"):
+            _require_operation_state(operations, reason, frozenset({"pending"}))
+            return
+        raise ValueError("paused_pending M4 checkpoint has unsupported pause evidence")
+
+    if checkpoint.status == "paused_budget":
+        if reason in {
+            "exa_people_budget",
+            "clay_max_contacts",
+            "apollo_credit_cap",
+            "instantly_call_cap",
+        }:
+            return
+        if reason == "clay_start":
+            _require_operation_state(operations, "clay:batch", frozenset({"in_flight"}))
+            return
+        if reason == "clay_pending":
+            _require_operation_state(operations, "clay:batch", frozenset({"pending"}))
+            return
+        if reason.startswith(("exa:", "apollo:")):
+            _require_operation_state(operations, reason, frozenset({"in_flight"}))
+            return
+        if reason.startswith("instantly:"):
+            _require_operation_state(
+                operations, reason, frozenset({"in_flight", "pending"})
+            )
+            return
+        raise ValueError("paused_budget M4 checkpoint has unsupported pause evidence")
+
+    raise AssertionError("validated M4 checkpoint status is unreachable")
+
+
 def _save_checkpoint(path: Path, checkpoint: RunCheckpoint, status: str, reason: str | None) -> None:
     """Persist one M4 checkpoint transition with a fresh timestamp."""
     checkpoint.status = status
@@ -560,6 +648,7 @@ def _load_runtime_state(
     contacts = _load_contacts(paths.contacts)
     _validate_operation_references(operations, contacts)
     events = load_usage_events(paths.usage_events)
+    _validate_checkpoint_consistency(checkpoint, operations, events)
     return paths, accepted, checkpoint, operations, contacts, events
 
 
