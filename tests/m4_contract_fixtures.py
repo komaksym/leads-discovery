@@ -17,10 +17,12 @@ from leads_discovery.models import CompanyRecord
 from leads_discovery.pipeline.evaluation import EvaluationConfig, evaluate_run
 
 Responder = Callable[[httpx.Request], httpx.Response]
+ClayResultFactory = Callable[[httpx.Request, str], list[dict[str, Any]]]
 
 _M4_PROVIDER_KEYS = {
     "EXA_API_KEY": "exa-contract-key",
-    "CLAY_API_KEY": "clay-contract-key",
+    "CLAY_PUBLIC_API_KEY": "clay-contract-key",
+    "CLAY_CONTACT_ROUTINE_ID": "clay-contact-routine-contract",
     "APOLLO_API_KEY": "apollo-contract-key",
     "INSTANTLY_API_KEY": "instantly-contract-key",
 }
@@ -29,6 +31,27 @@ _M4_PROVIDER_KEYS = {
 def call_cli(argv: Sequence[str]) -> int:
     """Invoke the public CLI exactly as an in-process command."""
     return cli.main(argv)
+
+
+def call_enrich_live(
+    data_root: Path,
+    run_id: str,
+    *,
+    exa_budget_usd: float = 1.0,
+) -> int:
+    """Invoke M4 through its explicit live surface while HTTP remains in-memory."""
+    return call_cli(
+        [
+            "enrich",
+            "--run-id",
+            run_id,
+            "--data-root",
+            str(data_root),
+            "--exa-budget-usd",
+            str(exa_budget_usd),
+            "--execute-live",
+        ]
+    )
 
 
 def prepare_evaluated_run(
@@ -95,7 +118,7 @@ def person_result(
     current: bool = True,
     person_id: str | None = None,
 ) -> dict[str, Any]:
-    """Return a redundant People Search row usable by thin provider adapters."""
+    """Return an Exa People row with canonical current-employment history."""
     pid = person_id or name.casefold().replace(" ", "-")
     current_company = company if current else "Former Employer LLC"
     employment = {
@@ -105,6 +128,11 @@ def person_result(
         "current": current,
         "is_current": current,
         "end_date": None if current else "2025-01-01",
+    }
+    work_history = {
+        "company": {"name": company, "domain": domain},
+        "title": title,
+        "dates": {"to": None if current else "2025-01-01"},
     }
     properties: dict[str, Any] = {
         "name": name,
@@ -117,6 +145,7 @@ def person_result(
         "current_company": {"name": current_company, "domain": domain},
         "employment": [employment],
         "workExperience": [employment],
+        "workHistory": [work_history],
         "profileUrl": profile_url,
         "linkedinUrl": profile_url,
     }
@@ -139,6 +168,67 @@ def person_result(
         ],
         **properties,
     }
+
+
+class ClayRoutineScript:
+    """Model Clay's asynchronous POST-start then later GET-results lifecycle."""
+
+    def __init__(self, results: ClayResultFactory | list[dict[str, Any]]) -> None:
+        """Store deterministic completed results for each started routine run."""
+        self._results = results
+        self._started: dict[str, list[dict[str, Any]]] = {}
+        self._released: set[str] = set()
+        self.posts: list[httpx.Request] = []
+        self.gets: list[httpx.Request] = []
+
+    @property
+    def latest_run_id(self) -> str | None:
+        """Return the most recently started routine run identifier."""
+        if not self._started:
+            return None
+        return next(reversed(self._started))
+
+    def release_started(self) -> None:
+        """Allow later invocations to retrieve every currently started routine."""
+        self._released.update(self._started)
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        """Start routines by POST and expose results only through the canonical GET path."""
+        if request.method == "POST":
+            run_id = f"routine-contract-{len(self.posts) + 1}"
+            rows = (
+                self._results(request, run_id)
+                if callable(self._results)
+                else [dict(row) for row in self._results]
+            )
+            self.posts.append(request)
+            self._started[run_id] = rows
+            return httpx.Response(
+                202,
+                json={"routine_run_id": run_id, "status": "pending"},
+            )
+
+        assert request.method == "GET"
+        self.gets.append(request)
+        run_id = request.url.path.split("/")[-2]
+        assert request.url.path == f"/public/v0/routines/run/{run_id}/results"
+        assert run_id in self._started
+        if run_id not in self._released:
+            return httpx.Response(
+                202,
+                json={"routine_run_id": run_id, "status": "pending"},
+            )
+        rows = self._started[run_id]
+        return httpx.Response(
+            200,
+            json={
+                "routine_run_id": run_id,
+                "status": "completed",
+                "credits_used": 1,
+                "results": rows,
+                "data": {"results": rows, "credits_used": 1},
+            },
+        )
 
 
 class WireStub:
@@ -175,7 +265,7 @@ class WireStub:
 
 
 def install_mock_http(monkeypatch: pytest.MonkeyPatch, stub: WireStub) -> None:
-    """Route normal httpx clients and convenience calls through MockTransport."""
+    """Route explicit live HTTP clients through MockTransport without weakening network guards."""
     sync_client = httpx.Client
     async_client = httpx.AsyncClient
     transport = httpx.MockTransport(stub)
