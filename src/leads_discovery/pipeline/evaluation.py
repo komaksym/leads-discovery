@@ -58,6 +58,25 @@ _M3_ARTIFACT_NAMES: Final[tuple[str, ...]] = (
     "companies_calibrated.csv",
     "run_summary.json",
 )
+_USAGE_SUMMARY_KEYS: Final[frozenset[str]] = frozenset({"providers", "total"})
+_USAGE_TOTAL_KEYS: Final[frozenset[str]] = frozenset(
+    {
+        "request_count",
+        "input_tokens",
+        "output_tokens",
+        "estimated_cost_usd",
+        "exact_cost_usd",
+    }
+)
+_USAGE_COUNTER_KEYS: Final[tuple[str, ...]] = (
+    "request_count",
+    "input_tokens",
+    "output_tokens",
+)
+_USAGE_COST_KEYS: Final[tuple[str, ...]] = (
+    "estimated_cost_usd",
+    "exact_cost_usd",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -337,11 +356,40 @@ def _empty_usage_summary() -> dict[str, Any]:
     return {"providers": {}, "total": totals}
 
 
+def _validate_usage_totals(payload: Any, *, context: str) -> None:
+    """Validate one exact CostTracker usage-totals object."""
+    if not isinstance(payload, dict) or set(payload) != _USAGE_TOTAL_KEYS:
+        raise ValueError(f"{context} must contain the exact usage total keys")
+    for key in _USAGE_COUNTER_KEYS:
+        value = payload[key]
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError(f"{context}.{key} must be a nonnegative integer")
+    for key in _USAGE_COST_KEYS:
+        value = payload[key]
+        if value is not None and (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+            or value < 0
+        ):
+            raise ValueError(f"{context}.{key} must be a finite nonnegative number or null")
+
+
 def _load_usage_summary(path: Path) -> dict[str, Any]:
-    """Read existing M2 usage without altering ledgers or fabricating costs."""
+    """Strictly validate existing M2 usage before any M3 artifact publication."""
     payload = read_json(path)
     if payload is None:
         return _empty_usage_summary()
+    if set(payload) != _USAGE_SUMMARY_KEYS:
+        raise ValueError("usage summary must contain exactly providers and total")
+    providers = payload["providers"]
+    if not isinstance(providers, dict):
+        raise ValueError("usage summary providers must be an object")
+    for provider, totals in providers.items():
+        if not isinstance(provider, str):
+            raise ValueError("usage summary provider names must be strings")
+        _validate_usage_totals(totals, context=f"usage.providers.{provider}")
+    _validate_usage_totals(payload["total"], context="usage.total")
     return payload
 
 
