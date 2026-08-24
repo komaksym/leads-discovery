@@ -34,6 +34,7 @@ M4_ARTIFACTS = {
 }
 EMAIL = "pat.owner@acmevalve.com"
 PROFILE = "https://www.linkedin.com/in/pat-owner"
+PROVIDERS = ("exa", "clay", "apollo", "instantly")
 
 
 def _exa_one(_request: httpx.Request) -> httpx.Response:
@@ -69,6 +70,26 @@ def _replace_first_operation_state(value: Any, replacement: str) -> bool:
     if isinstance(value, list):
         return any(_replace_first_operation_state(nested, replacement) for nested in value)
     return False
+
+
+def _checkpoint_operations(checkpoint: dict[str, Any]) -> dict[str, Any]:
+    """Return operations from the public persisted M4 provider-state container."""
+    provider_state = checkpoint.get("provider_state")
+    assert isinstance(provider_state, dict)
+    operations = provider_state.get("operations")
+    assert isinstance(operations, dict)
+    return operations
+
+
+def _operation_key_for_provider(operations: dict[str, Any], provider: str) -> str:
+    """Locate one provider operation from observable persisted checkpoint text."""
+    matches: list[str] = []
+    for key, operation in operations.items():
+        text = f"{key}\n{json.dumps(operation, sort_keys=True, default=str)}".casefold()
+        if provider.casefold() in text:
+            matches.append(key)
+    assert len(matches) == 1, f"expected one {provider} operation, found {matches}"
+    return matches[0]
 
 
 def _resume_clay_until_complete(
@@ -448,42 +469,87 @@ def test_unknown_checkpoint_operation_state_fails_closed_without_network(
     assert len(stub.requests) == request_count
 
 
+@pytest.mark.parametrize("later_provider", ["clay", "apollo", "instantly"])
 @pytest.mark.parametrize("evidence", ["missing", "torn"])
 def test_paused_unknown_without_complete_operation_evidence_blocks_dispatch(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    later_provider: str,
     evidence: str,
 ) -> None:
-    """A top-level paused_unknown checkpoint without complete operation evidence never replays."""
-    run_id = f"paused-unknown-{evidence}"
+    """Later-provider unknown state cannot replay when earlier Exa evidence is incomplete."""
+    run_id = f"paused-unknown-{later_provider}-{evidence}"
     run_dir = prepare_evaluated_run(
         tmp_path,
         run_id,
         [build_company(facts=accepted_facts(), name="Acme Valve", domain="acmevalve.com")],
     )
-    clay = ClayRoutineScript([])
-    stub = WireStub({"exa": _exa_one, "clay": clay})
+
+    def clay_unknown(request: httpx.Request) -> httpx.Response:
+        """Make the Clay paid POST outcome unknowable."""
+        raise httpx.ReadTimeout("unknown Clay outcome", request=request)
+
+    def apollo_unknown(request: httpx.Request) -> httpx.Response:
+        """Make the Apollo paid POST outcome unknowable."""
+        raise httpx.ReadTimeout("unknown Apollo outcome", request=request)
+
+    def instantly_unknown(request: httpx.Request) -> httpx.Response:
+        """Make the Instantly verification POST outcome unknowable."""
+        raise httpx.ReadTimeout("unknown Instantly outcome", request=request)
+
+    clay: ClayRoutineScript | None = None
+    if later_provider == "clay":
+        stub = WireStub({"exa": _exa_one, "clay": clay_unknown})
+    elif later_provider == "apollo":
+        clay = ClayRoutineScript([])
+        stub = WireStub({"exa": _exa_one, "clay": clay, "apollo": apollo_unknown})
+    else:
+        clay = ClayRoutineScript(
+            [{"profile_url": PROFILE, "work_email": EMAIL, "email": EMAIL}]
+        )
+        stub = WireStub({"exa": _exa_one, "clay": clay, "instantly": instantly_unknown})
+
     install_mock_http(monkeypatch, stub)
     set_m4_credentials(monkeypatch)
 
     assert call_enrich_live(tmp_path, run_id) != 0
-    assert len(clay.posts) == 1
+    if clay is not None:
+        routine_run_id = clay.latest_run_id
+        assert routine_run_id is not None
+        checkpoint_path = run_dir / "contact_checkpoint.json"
+        assert routine_run_id in checkpoint_path.read_text(encoding="utf-8")
+        clay.release_started()
+        assert call_enrich_live(tmp_path, run_id) != 0
+
     checkpoint_path = run_dir / "contact_checkpoint.json"
     checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
     assert isinstance(checkpoint, dict)
-    checkpoint["state"] = "paused_unknown"
+    assert checkpoint.get("status") == "paused_unknown"
+    operations = _checkpoint_operations(checkpoint)
+    exa_key = _operation_key_for_provider(operations, "exa")
+    later_key = _operation_key_for_provider(operations, later_provider)
+    assert later_key != exa_key
+    later_before = json.dumps(operations[later_key], sort_keys=True, default=str)
+
     if evidence == "missing":
-        checkpoint.pop("operations", None)
+        del operations[exa_key]
     else:
-        checkpoint["operations"] = {"torn": {}}
+        operations[exa_key] = {}
+
+    assert checkpoint.get("status") == "paused_unknown"
+    assert json.dumps(operations[later_key], sort_keys=True, default=str) == later_before
     checkpoint_path.write_text(
         json.dumps(checkpoint, sort_keys=True, allow_nan=False) + "\n",
         encoding="utf-8",
     )
-    request_count = len(stub.requests)
+    before = {provider: len(stub.for_provider(provider)) for provider in PROVIDERS}
 
     assert call_enrich_live(tmp_path, run_id) != 0
-    assert len(stub.requests) == request_count
+
+    after = {provider: len(stub.for_provider(provider)) for provider in PROVIDERS}
+    assert after == before
+    for provider in PROVIDERS:
+        assert len(stub.for_provider(provider)) - before[provider] == 0
 
 
 def test_corrupted_derived_usage_summary_is_rebuilt_from_authoritative_events(
