@@ -6,10 +6,10 @@ import csv
 import json
 from pathlib import Path
 
+from leads_discovery.pipeline.evaluation import EvaluationConfig, evaluate_run
 from m3_factories import accepted_facts, build_company, exact_threshold_facts, low_score_facts
 
 from leads_discovery.models import CompanyRecord
-from leads_discovery.pipeline.evaluation import EvaluationConfig, evaluate_run
 
 RANKED_COLUMNS = [
     "company_id", "name", "domain", "country", "policy_version",

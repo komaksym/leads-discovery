@@ -16,9 +16,11 @@ def test_dns_resolution_is_blocked() -> None:
 
 def test_socket_connect_is_blocked() -> None:
     """The global guard rejects direct socket connections."""
-    with socket.socket() as sock:
-        with pytest.raises(AssertionError, match="network access is forbidden"):
-            sock.connect(("93.184.216.34", 443))
+    with (
+        socket.socket() as sock,
+        pytest.raises(AssertionError, match="network access is forbidden"),
+    ):
+        sock.connect(("93.184.216.34", 443))
 
 
 def test_default_httpx_network_request_is_blocked() -> None:

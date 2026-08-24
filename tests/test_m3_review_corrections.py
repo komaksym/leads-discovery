@@ -5,7 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-
 from leads_discovery.pipeline.evaluation import EvaluationConfig, evaluate_run
 from m3_factories import accepted_facts, build_company, write_run_inputs
 
