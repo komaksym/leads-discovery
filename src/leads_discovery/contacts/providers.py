@@ -6,7 +6,7 @@ import math
 import re
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Any, Literal, Protocol, cast
+from typing import Any, Literal, Never, Protocol, cast
 from urllib.parse import quote
 
 import httpx
@@ -210,7 +210,7 @@ def _raise(
     retryable: bool,
     status_code: int | None = None,
     metadata: dict[str, Any] | None = None,
-) -> None:
+) -> Never:
     """Raise a sanitized provider error with one attempted-call usage event."""
     raise ContactProviderError(
         provider=provider,
