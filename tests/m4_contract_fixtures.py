@@ -37,7 +37,7 @@ def call_enrich_live(
     data_root: Path,
     run_id: str,
     *,
-    exa_budget_usd: float = 1.0,
+    exa_people_budget_usd: float = 1.0,
 ) -> int:
     """Invoke M4 through its explicit live surface while HTTP remains in-memory."""
     return call_cli(
@@ -47,8 +47,8 @@ def call_enrich_live(
             run_id,
             "--data-root",
             str(data_root),
-            "--exa-budget-usd",
-            str(exa_budget_usd),
+            "--exa-people-budget-usd",
+            str(exa_people_budget_usd),
             "--execute-live",
         ]
     )
@@ -170,6 +170,28 @@ def person_result(
     }
 
 
+def _submitted_item_ids(request: httpx.Request) -> list[str]:
+    """Extract stable item IDs from list-shaped Clay POST payload sections."""
+    payload = json.loads(request.content or b"{}")
+    found: list[str] = []
+
+    def visit(value: Any) -> None:
+        """Collect IDs only from dictionary items carried inside submitted lists."""
+        if isinstance(value, list):
+            for item in value:
+                if isinstance(item, dict):
+                    item_id = item.get("id")
+                    if isinstance(item_id, str) and item_id:
+                        found.append(item_id)
+                visit(item)
+        elif isinstance(value, dict):
+            for nested in value.values():
+                visit(nested)
+
+    visit(payload)
+    return found
+
+
 class ClayRoutineScript:
     """Model Clay's asynchronous POST-start then later GET-results lifecycle."""
 
@@ -196,11 +218,19 @@ class ClayRoutineScript:
         """Start routines by POST and expose results only through the canonical GET path."""
         if request.method == "POST":
             run_id = f"routine-contract-{len(self.posts) + 1}"
-            rows = (
+            generated = (
                 self._results(request, run_id)
                 if callable(self._results)
-                else [dict(row) for row in self._results]
+                else self._results
             )
+            rows = [dict(row) for row in generated]
+            submitted_ids = _submitted_item_ids(request)
+            if rows:
+                assert len(submitted_ids) >= len(rows), (
+                    "Clay POST must carry one stable item id for each returned result row"
+                )
+                for row, item_id in zip(rows, submitted_ids, strict=False):
+                    row.setdefault("id", item_id)
             self.posts.append(request)
             self._started[run_id] = rows
             return httpx.Response(
@@ -225,8 +255,7 @@ class ClayRoutineScript:
                 "routine_run_id": run_id,
                 "status": "completed",
                 "credits_used": 1,
-                "results": rows,
-                "data": {"results": rows, "credits_used": 1},
+                "data": rows,
             },
         )
 
