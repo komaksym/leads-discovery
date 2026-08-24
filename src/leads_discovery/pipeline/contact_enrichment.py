@@ -487,7 +487,9 @@ def _validate_checkpoint_consistency(
     raise AssertionError("validated M4 checkpoint status is unreachable")
 
 
-def _save_checkpoint(path: Path, checkpoint: RunCheckpoint, status: str, reason: str | None) -> None:
+def _save_checkpoint(
+    path: Path, checkpoint: RunCheckpoint, status: str, reason: str | None
+) -> None:
     """Persist one M4 checkpoint transition with a fresh timestamp."""
     checkpoint.status = status
     checkpoint.pause_reason = reason
@@ -625,7 +627,9 @@ def _has_attempt(contact: ContactRecord, provider: str, state: str) -> bool:
     )
 
 
-def _attempt(contact: ContactRecord, provider: str, operation: str, state: str, **extra: Any) -> None:
+def _attempt(
+    contact: ContactRecord, provider: str, operation: str, state: str, **extra: Any
+) -> None:
     """Append one safe provider-attempt state transition to a contact snapshot."""
     contact.provider_attempts.append(
         {"provider": provider, "operation": operation, "state": state, **extra}
