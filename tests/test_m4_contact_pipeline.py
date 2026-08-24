@@ -10,6 +10,7 @@ import httpx
 import pytest
 from m3_factories import accepted_facts, build_company, low_score_facts
 from m4_contract_fixtures import (
+    Responder,
     WireStub,
     call_cli,
     install_mock_http,
@@ -22,7 +23,7 @@ from m4_contract_fixtures import (
 )
 
 
-def _exa_results(results: list[dict[str, Any]]) -> Any:
+def _exa_results(results: list[dict[str, Any]]) -> Responder:
     """Return one Exa responder serving a fixed bounded People Search result list."""
 
     def responder(request: httpx.Request) -> httpx.Response:
@@ -37,7 +38,7 @@ def _exa_results(results: list[dict[str, Any]]) -> Any:
 
 
 def _clay_with_ranked_emails(request: httpx.Request) -> httpx.Response:
-    """Return completed work-email enrichment for the first two ranked contacts."""
+    """Return work-email enrichment for the first two ranked contacts."""
     assert request.method in {"POST", "GET"}
     results = [
         {
@@ -68,7 +69,7 @@ def _clay_with_ranked_emails(request: httpx.Request) -> httpx.Response:
 
 
 def _instantly_verified(request: httpx.Request) -> httpx.Response:
-    """Return a successful verification result for whichever email was submitted."""
+    """Return a successful verification result for the submitted email."""
     body = json_body(request) if request.method == "POST" else {}
     email = str(body.get("email") or request.url.path.rsplit("/", 1)[-1])
     return httpx.Response(
@@ -83,7 +84,7 @@ def _instantly_verified(request: httpx.Request) -> httpx.Response:
 
 
 def _paid_miss(request: httpx.Request) -> httpx.Response:
-    """Return a completed provider miss while preserving one-credit accounting metadata."""
+    """Return a completed provider miss with explicit one-credit metadata."""
     host = request.url.host.casefold()
     if "clay" in host:
         return httpx.Response(
@@ -111,11 +112,11 @@ def _paid_miss(request: httpx.Request) -> httpx.Response:
     raise AssertionError(f"unexpected paid provider: {request.url}")
 
 
-def test_only_m3_accepted_companies_reach_people_search_and_m3_is_untouched(
+def test_only_m3_accepted_companies_reach_people_search(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Uncertain/rejected companies cause zero M4 calls while accepted gets one Exa request."""
+    """Uncertain/rejected companies cause zero M4 calls; accepted gets one Exa request."""
     rejected = deepcopy(accepted_facts())
     rejected["pvf_relevant"] = (False, 0.99)
     run_dir = prepare_evaluated_run(
@@ -169,15 +170,21 @@ def test_only_m3_accepted_companies_reach_people_search_and_m3_is_untouched(
         assert (run_dir / name).read_bytes() == payload
 
 
-def test_decision_proximity_ranking_caps_candidates_contacts_and_paid_enrichment(
+def test_decision_proximity_caps_candidates_contacts_and_paid_enrichment(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Relevant buyers beat generic seniority; only top three survive and only top two are paid."""
+    """Relevant buyers beat generic seniority; top three survive and only top two are paid."""
     run_dir = prepare_evaluated_run(
         tmp_path,
         "ranking",
-        [build_company(facts=accepted_facts(), name="Acme Valve", domain="acmevalve.com")],
+        [
+            build_company(
+                facts=accepted_facts(),
+                name="Acme Valve",
+                domain="acmevalve.com",
+            )
+        ],
     )
     candidates = [
         person_result(
@@ -269,7 +276,9 @@ def test_decision_proximity_ranking_caps_candidates_contacts_and_paid_enrichment
     install_mock_http(monkeypatch, stub)
     set_m4_credentials(monkeypatch)
 
-    assert call_cli(["enrich", "--run-id", "ranking", "--data-root", str(tmp_path)]) == 0
+    assert call_cli(
+        ["enrich", "--run-id", "ranking", "--data-root", str(tmp_path)]
+    ) == 0
 
     contacts = read_jsonl(run_dir / "contacts.jsonl")
     assert len(contacts) <= 3
@@ -284,18 +293,22 @@ def test_decision_proximity_ranking_caps_candidates_contacts_and_paid_enrichment
 
     clay = stub.for_provider("clay")
     assert 1 <= len(clay) <= 2
-    paid_payload = "\n".join(request.content.decode("utf-8").casefold() for request in clay)
+    paid_payload = "\n".join(
+        request.content.decode("utf-8").casefold() for request in clay
+    )
     assert "erin-estimator" not in paid_payload
     assert "erin estimator" not in paid_payload
     assert "phone" not in paid_payload
     assert "personal" not in paid_payload
     assert "email" in paid_payload
+    assert "work" in paid_payload
     assert stub.for_provider("apollo") == []
 
     instant = stub.for_provider("instantly")
     assert len(instant) <= 2
     instant_payload = "\n".join(
-        (request.content.decode("utf-8") + str(request.url)).casefold() for request in instant
+        (request.content.decode("utf-8") + str(request.url)).casefold()
+        for request in instant
     )
     assert "erin-estimator" not in instant_payload
     assert "erin estimator" not in instant_payload
@@ -309,7 +322,13 @@ def test_profile_url_and_name_domain_dedup_are_conservative(
     run_dir = prepare_evaluated_run(
         tmp_path,
         "dedup",
-        [build_company(facts=accepted_facts(), name="Acme Valve", domain="acmevalve.com")],
+        [
+            build_company(
+                facts=accepted_facts(),
+                name="Acme Valve",
+                domain="acmevalve.com",
+            )
+        ],
     )
     results = [
         person_result(
@@ -325,7 +344,9 @@ def test_profile_url_and_name_domain_dedup_are_conservative(
             title="Owner",
             company="Acme Valve",
             domain="acmevalve.com",
-            profile_url="https://www.linkedin.com/in/jane-owner?trk=public#about",
+            profile_url=(
+                "https://www.linkedin.com/in/jane-owner?trk=public#about"
+            ),
             person_id="jane-b",
         ),
         person_result(
@@ -363,17 +384,21 @@ def test_profile_url_and_name_domain_dedup_are_conservative(
     install_mock_http(monkeypatch, stub)
     set_m4_credentials(monkeypatch)
 
-    assert call_cli(["enrich", "--run-id", "dedup", "--data-root", str(tmp_path)]) == 0
+    assert call_cli(
+        ["enrich", "--run-id", "dedup", "--data-root", str(tmp_path)]
+    ) == 0
 
     contacts = read_jsonl(run_dir / "contacts.jsonl")
     assert len(contacts) == 3
     text = [row_text(row).casefold() for row in contacts]
     assert sum("jane owner" in item for item in text) == 1
     assert sum("alex manager jr" in item for item in text) == 1
-    assert sum("alex manager" in item and "jr" not in item for item in text) == 1
+    assert sum(
+        "alex manager" in item and "jr" not in item for item in text
+    ) == 1
 
 
-def test_same_name_at_different_company_domains_is_not_cross_company_deduplicated(
+def test_same_name_at_different_company_domains_is_not_merged(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -398,14 +423,16 @@ def test_same_name_at_different_company_domains_is_not_cross_company_deduplicate
     )
 
     def exa(request: httpx.Request) -> httpx.Response:
-        """Return the same person name but different company identity per query."""
+        """Return the same name but different company identity per query."""
         query = str(json_body(request).get("query", "")).casefold()
         if "alpha" in query:
             company, domain = "Alpha Valve", "alpha.example"
         elif "beta" in query:
             company, domain = "Beta Valve", "beta.example"
         else:
-            raise AssertionError(f"company identity missing from People Search query: {query}")
+            raise AssertionError(
+                f"company identity missing from People Search query: {query}"
+            )
         result = person_result(
             name="Jordan Lee",
             title="General Manager",
@@ -413,7 +440,10 @@ def test_same_name_at_different_company_domains_is_not_cross_company_deduplicate
             domain=domain,
             profile_url=None,
         )
-        return httpx.Response(200, json={"results": [result], "costDollars": {"total": 0.001}})
+        return httpx.Response(
+            200,
+            json={"results": [result], "costDollars": {"total": 0.001}},
+        )
 
     stub = WireStub({"exa": exa, "clay": _paid_miss, "apollo": _paid_miss})
     install_mock_http(monkeypatch, stub)
