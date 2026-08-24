@@ -360,6 +360,45 @@ def _validate_operation_references(
                 raise ValueError(f"malformed contact checkpoint operation: {operation}")
 
 
+def _require_completed_exa(
+    operations: dict[str, Any], contacts: dict[str, ContactRecord], contact_ids: list[str]
+) -> None:
+    """Require later-provider contacts to retain their completed Exa selection provenance."""
+    for contact_id in contact_ids:
+        contact = contacts[contact_id]
+        operation = f"exa:{contact.company_id}"
+        value = operations.get(operation)
+        if not isinstance(value, dict) or value.get("state") != "completed":
+            raise ValueError("later M4 provider state lacks completed Exa prerequisite")
+        selected = _contact_ids(operation, value.get("contact_ids"))
+        if contact_id not in selected:
+            raise ValueError("later M4 provider state is inconsistent with Exa selection")
+
+
+def _require_completed_clay(operations: dict[str, Any], contact_ids: list[str]) -> None:
+    """Require Apollo or Instantly state to retain the completed Clay batch prerequisite."""
+    value = operations.get("clay:batch")
+    if not isinstance(value, dict) or value.get("state") != "completed":
+        raise ValueError("later M4 provider state lacks completed Clay prerequisite")
+    submitted = _contact_ids("clay:batch", value.get("contact_ids"))
+    if any(contact_id not in submitted for contact_id in contact_ids):
+        raise ValueError("later M4 provider state is inconsistent with Clay batch history")
+
+
+def _validate_provider_prerequisites(
+    operations: dict[str, Any], contacts: dict[str, ContactRecord]
+) -> None:
+    """Require durable later-stage state to retain the earlier paid-work history it proves."""
+    for operation, value in operations.items():
+        if operation == "clay:batch":
+            ids = _contact_ids(operation, value["contact_ids"])
+            _require_completed_exa(operations, contacts, ids)
+        elif operation.startswith(("apollo:", "instantly:")):
+            contact_id = operation.split(":", 1)[1]
+            _require_completed_exa(operations, contacts, [contact_id])
+            _require_completed_clay(operations, [contact_id])
+
+
 def _require_operation_state(
     operations: dict[str, Any], operation: str, allowed: frozenset[str]
 ) -> None:
@@ -647,6 +686,7 @@ def _load_runtime_state(
     operations = _operations(checkpoint)
     contacts = _load_contacts(paths.contacts)
     _validate_operation_references(operations, contacts)
+    _validate_provider_prerequisites(operations, contacts)
     events = load_usage_events(paths.usage_events)
     _validate_checkpoint_consistency(checkpoint, operations, events)
     return paths, accepted, checkpoint, operations, contacts, events
@@ -679,6 +719,8 @@ def run_contact_enrichment(
     if not config.execute_live:
         raise ValueError("run_contact_enrichment requires explicit live execution")
     paths, accepted, checkpoint, operations, contacts, events = _load_runtime_state(config)
+    if checkpoint.status == "paused_unknown":
+        return _summary(config, paths, "paused_unknown", contacts)
 
     tracker = CostTracker(events)
     for company in accepted:
