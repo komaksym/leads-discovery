@@ -8,10 +8,11 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from m3_factories import FactInput, accepted_facts, build_company, low_score_facts, write_run_inputs
+
 from leads_discovery.calibration import CalibrationSummary, calibrate_run
 from leads_discovery.pipeline.evaluation import EvaluationConfig, evaluate_run
 from leads_discovery.scoring import DEFAULT_POLICY
-from m3_factories import FactInput, accepted_facts, build_company, low_score_facts, write_run_inputs
 
 
 def _prepare(tmp_path: Path, run_id: str, companies: list[Any]) -> Path:

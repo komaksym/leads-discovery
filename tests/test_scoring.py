@@ -7,15 +7,15 @@ from dataclasses import FrozenInstanceError
 from typing import Any
 
 import pytest
+from m3_factories import accepted_facts, build_company, exact_threshold_facts
+
+from leads_discovery.models import CompanyRecord, DecisionReason, FactValue
 from leads_discovery.scoring import (
     DEFAULT_POLICY,
     ScoringPolicy,
     evaluate_companies,
     evaluate_company,
 )
-from m3_factories import accepted_facts, build_company, exact_threshold_facts
-
-from leads_discovery.models import CompanyRecord, DecisionReason, FactValue
 
 
 @pytest.mark.parametrize(

@@ -6,7 +6,6 @@ import json
 from pathlib import Path
 
 import pytest
-from leads_discovery.pipeline.evaluation import EvaluationConfig, EvaluationSummary, evaluate_run
 from m3_factories import (
     accepted_facts,
     build_company,
@@ -14,6 +13,8 @@ from m3_factories import (
     read_jsonl,
     write_run_inputs,
 )
+
+from leads_discovery.pipeline.evaluation import EvaluationConfig, EvaluationSummary, evaluate_run
 
 
 def _evaluate(root: Path, run_id: str, max_evaluated: int = 20) -> EvaluationSummary:
@@ -95,12 +96,12 @@ def test_atomic_recomputation_replaces_m3_and_never_mutates_m2(tmp_path: Path) -
     """Rerun replaces stale derived snapshots while every M2 artifact remains byte-identical."""
     first = build_company(facts=accepted_facts(), company_id="cmp_atomic")
     run_dir = write_run_inputs(tmp_path, "atomic", [first])
-    for name, file_content in {
+    for name, content in {
         "companies_raw.jsonl": '{"raw":1}\n',
         "companies_deduped.jsonl": '{"dedup":1}\n',
         "research_raw.jsonl": '{"research":1}\n',
     }.items():
-        (run_dir / name).write_text(file_content, encoding="utf-8")
+        (run_dir / name).write_text(content, encoding="utf-8")
 
     _evaluate(tmp_path, "atomic")
     assert read_jsonl(run_dir / "companies_evaluated.jsonl")[0]["final_decision"] == "accepted"

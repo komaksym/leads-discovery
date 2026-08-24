@@ -9,10 +9,10 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-import leads_discovery.cli as cli
 import pytest
 from m3_factories import accepted_facts, build_company, write_run_inputs
 
+import leads_discovery.cli as cli
 import leads_discovery.discovery as discovery_module
 import leads_discovery.pipeline.m2_batch as m2_module
 import leads_discovery.research as research_module
