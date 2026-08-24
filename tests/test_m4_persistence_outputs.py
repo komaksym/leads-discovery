@@ -56,45 +56,18 @@ def _apollo_miss(_request: httpx.Request) -> httpx.Response:
     )
 
 
-def _first_exact_key(value: Any, target: str) -> bool:
-    """Return whether a nested JSON-like structure contains one exact key."""
-    if isinstance(value, dict):
-        if target in value:
-            return True
-        return any(_first_exact_key(nested, target) for nested in value.values())
-    if isinstance(value, list):
-        return any(_first_exact_key(nested, target) for nested in value)
-    return False
-
-
-def _replace_exact_key(value: Any, target: str, replacement: Any) -> int:
-    """Replace every occurrence of one exact nested key and return the mutation count."""
-    count = 0
-    if isinstance(value, dict):
-        for key in list(value):
-            if key == target:
-                value[key] = replacement
-                count += 1
-            else:
-                count += _replace_exact_key(value[key], target, replacement)
-    elif isinstance(value, list):
-        for nested in value:
-            count += _replace_exact_key(nested, target, replacement)
-    return count
-
-
-def _replace_first_operation_status(value: Any, replacement: str) -> bool:
-    """Replace one persisted provider operation status without assuming an operation identifier."""
+def _replace_first_operation_state(value: Any, replacement: str) -> bool:
+    """Replace one persisted provider operation state without assuming its identifier."""
     if isinstance(value, dict):
         operations = value.get("operations")
         if isinstance(operations, dict):
             for operation in operations.values():
-                if isinstance(operation, dict) and "status" in operation:
-                    operation["status"] = replacement
+                if isinstance(operation, dict) and "state" in operation:
+                    operation["state"] = replacement
                     return True
-        return any(_replace_first_operation_status(nested, replacement) for nested in value.values())
+        return any(_replace_first_operation_state(nested, replacement) for nested in value.values())
     if isinstance(value, list):
-        return any(_replace_first_operation_status(nested, replacement) for nested in value)
+        return any(_replace_first_operation_state(nested, replacement) for nested in value)
     return False
 
 
@@ -445,7 +418,7 @@ def test_run_score_and_calibrate_remain_m4_free(
     assert M4_ARTIFACTS.isdisjoint({path.name for path in run_dir.iterdir()})
 
 
-def test_unknown_checkpoint_operation_status_fails_closed_without_network(
+def test_unknown_checkpoint_operation_state_fails_closed_without_network(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -464,7 +437,7 @@ def test_unknown_checkpoint_operation_status_fails_closed_without_network(
     assert len(clay.posts) == 1
     checkpoint_path = run_dir / "contact_checkpoint.json"
     checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
-    assert _replace_first_operation_status(checkpoint, "mystery_state")
+    assert _replace_first_operation_state(checkpoint, "mystery_state")
     checkpoint_path.write_text(
         json.dumps(checkpoint, sort_keys=True, allow_nan=False) + "\n",
         encoding="utf-8",
@@ -475,14 +448,50 @@ def test_unknown_checkpoint_operation_status_fails_closed_without_network(
     assert len(stub.requests) == request_count
 
 
-@pytest.mark.parametrize("bad_usage", [-1, float("nan"), float("inf"), float("-inf"), "one"])
-def test_corrupted_persisted_m4_credits_used_is_rejected(
+@pytest.mark.parametrize("evidence", ["missing", "torn"])
+def test_paused_unknown_without_complete_operation_evidence_blocks_dispatch(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    bad_usage: Any,
+    evidence: str,
 ) -> None:
-    """Persisted credits_used is validated even after all contact work completed."""
-    run_id = "corrupt-usage"
+    """A top-level paused_unknown checkpoint without complete operation evidence never replays."""
+    run_id = f"paused-unknown-{evidence}"
+    run_dir = prepare_evaluated_run(
+        tmp_path,
+        run_id,
+        [build_company(facts=accepted_facts(), name="Acme Valve", domain="acmevalve.com")],
+    )
+    clay = ClayRoutineScript([])
+    stub = WireStub({"exa": _exa_one, "clay": clay})
+    install_mock_http(monkeypatch, stub)
+    set_m4_credentials(monkeypatch)
+
+    assert call_enrich_live(tmp_path, run_id) != 0
+    assert len(clay.posts) == 1
+    checkpoint_path = run_dir / "contact_checkpoint.json"
+    checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    assert isinstance(checkpoint, dict)
+    checkpoint["state"] = "paused_unknown"
+    if evidence == "missing":
+        checkpoint.pop("operations", None)
+    else:
+        checkpoint["operations"] = {"torn": {}}
+    checkpoint_path.write_text(
+        json.dumps(checkpoint, sort_keys=True, allow_nan=False) + "\n",
+        encoding="utf-8",
+    )
+    request_count = len(stub.requests)
+
+    assert call_enrich_live(tmp_path, run_id) != 0
+    assert len(stub.requests) == request_count
+
+
+def test_corrupted_derived_usage_summary_is_rebuilt_from_authoritative_events(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Corrupt derived quota summary regenerates from events without replaying providers."""
+    run_id = "corrupt-derived-usage"
     run_dir = prepare_evaluated_run(
         tmp_path,
         run_id,
@@ -515,18 +524,18 @@ def test_corrupted_persisted_m4_credits_used_is_rejected(
     )
 
     usage_path = run_dir / "contact_usage.json"
-    usage = json.loads(usage_path.read_text(encoding="utf-8"))
-    assert _first_exact_key(usage, "credits_used")
-    assert _replace_exact_key(usage, "credits_used", bad_usage) > 0
-    usage_path.write_text(
-        json.dumps(usage, sort_keys=True, allow_nan=True) + "\n",
-        encoding="utf-8",
-    )
+    events_path = run_dir / "contact_usage_events.jsonl"
+    events_before = events_path.read_bytes()
     contacts_before = (run_dir / "contacts.jsonl").read_bytes()
     leads_before = (run_dir / "leads.csv").read_bytes()
     request_count = len(stub.requests)
+    corrupt_summary = b'{"derived_quota":{"clay":"corrupt"}}\n'
+    usage_path.write_bytes(corrupt_summary)
 
-    assert call_enrich_live(tmp_path, run_id) != 0
+    assert call_enrich_live(tmp_path, run_id) == 0
     assert len(stub.requests) == request_count
+    assert events_path.read_bytes() == events_before
+    assert usage_path.read_bytes() != corrupt_summary
+    assert isinstance(json.loads(usage_path.read_text(encoding="utf-8")), dict)
     assert (run_dir / "contacts.jsonl").read_bytes() == contacts_before
     assert (run_dir / "leads.csv").read_bytes() == leads_before
