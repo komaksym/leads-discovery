@@ -62,9 +62,14 @@ def read_jsonl(path: Path) -> list[dict[str, Any]]:
 
 
 def read_csv(path: Path) -> list[dict[str, str]]:
-    """Read one UTF-8 CSV artifact with the standard library parser."""
+    """Read one UTF-8 CSV artifact and reject malformed missing cells."""
+    rows: list[dict[str, str]] = []
     with path.open(encoding="utf-8", newline="") as handle:
-        return list(csv.DictReader(handle))
+        for raw in csv.DictReader(handle):
+            if any(key is None or value is None for key, value in raw.items()):
+                raise AssertionError(f"malformed CSV row in {path.name}")
+            rows.append({str(key): str(value) for key, value in raw.items()})
+    return rows
 
 
 def json_body(request: httpx.Request) -> dict[str, Any]:
@@ -149,17 +154,24 @@ class WireStub:
         self.requests.append(request)
         host = request.url.host.casefold()
         for provider in ("exa", "clay", "apollo", "instantly"):
-            if provider in host:
-                responder = self._responders.get(provider)
-                if responder is None:
-                    raise AssertionError(f"unexpected {provider} request: {request.method} {request.url}")
-                return responder(request)
+            if provider not in host:
+                continue
+            responder = self._responders.get(provider)
+            if responder is None:
+                raise AssertionError(
+                    f"unexpected {provider} request: {request.method} {request.url}"
+                )
+            return responder(request)
         raise AssertionError(f"unexpected network target: {request.method} {request.url}")
 
     def for_provider(self, provider: str) -> list[httpx.Request]:
         """Return recorded requests whose hostname belongs to one provider."""
         needle = provider.casefold()
-        return [request for request in self.requests if needle in request.url.host.casefold()]
+        return [
+            request
+            for request in self.requests
+            if needle in request.url.host.casefold()
+        ]
 
 
 def install_mock_http(monkeypatch: pytest.MonkeyPatch, stub: WireStub) -> None:
