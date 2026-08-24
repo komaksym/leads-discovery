@@ -142,13 +142,16 @@ def test_one_malformed_fact_does_not_erase_successful_peer(tmp_path: Path) -> No
     assert "invalid_fact:employee_count" in rows["cmp_bad"]["review_reasons"]
 
 
-@pytest.mark.parametrize(("literal", "run_id"), [(b"NaN", "nan"), (b"Infinity", "inf")])
-def test_raw_nonfinite_persisted_fact_is_unknown(
+@pytest.mark.parametrize(
+    ("literal", "run_id"),
+    [(b"NaN", "nan"), (b"Infinity", "inf"), (b"-Infinity", "neg-inf")],
+)
+def test_raw_nonfinite_persisted_fact_is_rejected_before_m3_output_mutation(
     tmp_path: Path,
     literal: bytes,
     run_id: str,
 ) -> None:
-    """Non-standard persisted non-finite fact bytes never silently become a score."""
+    """Non-finite persisted fact numbers fail closed before derived artifacts are written."""
     company = build_company(facts={"employee_count": (50, .90)})
     run_dir = write_run_inputs(tmp_path, run_id, [company])
     path = run_dir / "companies_extracted.jsonl"
@@ -156,10 +159,18 @@ def test_raw_nonfinite_persisted_fact_is_unknown(
     assert b'"employee_count": 50' in raw
     path.write_bytes(raw.replace(b'"employee_count": 50', b'"employee_count": ' + literal, 1))
 
-    _evaluate(tmp_path, run_id)
-    row = read_jsonl(run_dir / "companies_evaluated.jsonl")[0]
-    assert row["final_score"] is None
-    assert "invalid_fact:employee_count" in row["review_reasons"]
+    with pytest.raises(ValueError):
+        _evaluate(tmp_path, run_id)
+
+    for name in (
+        "companies_evaluated.jsonl",
+        "companies_ranked.csv",
+        "companies_rejected.csv",
+        "companies_uncertain.csv",
+        "calibration_template.csv",
+        "run_summary.json",
+    ):
+        assert not (run_dir / name).exists()
 
 
 def test_torn_final_append_is_ignored_but_nonfinal_corruption_fails_atomically(
@@ -169,14 +180,14 @@ def test_torn_final_append_is_ignored_but_nonfinal_corruption_fails_atomically(
     company = build_company(facts=accepted_facts())
     run_dir = write_run_inputs(tmp_path, "torn", [company])
     _evaluate(tmp_path, "torn")
-    evaluated_before = (run_dir / "companies_evaluated.jsonl").read_bytes()
-    ranked_before = (run_dir / "companies_ranked.csv").read_bytes()
 
     extracted = run_dir / "companies_extracted.jsonl"
     with extracted.open("ab") as handle:
         handle.write(b'{"company_id":"torn"')
     _evaluate(tmp_path, "torn")
     assert read_jsonl(run_dir / "companies_evaluated.jsonl")[0]["company_id"] == "cmp_contract"
+    evaluated_before = (run_dir / "companies_evaluated.jsonl").read_bytes()
+    ranked_before = (run_dir / "companies_ranked.csv").read_bytes()
 
     extracted.write_bytes(
         json.dumps(company.to_dict(), sort_keys=True).encode()
