@@ -20,7 +20,11 @@ from leads_discovery.contacts.providers import (
     InstantlyVerificationClient,
     clay_item_email,
 )
-from leads_discovery.contacts.selection import normalize_contact_name, select_contacts
+from leads_discovery.contacts.selection import (
+    contact_decision_order_key,
+    normalize_contact_name,
+    select_contacts,
+)
 from leads_discovery.models import CompanyRecord, RunCheckpoint, UsageEvent
 from leads_discovery.pipeline.costs import CostTracker
 from leads_discovery.pipeline.state import (
@@ -599,13 +603,16 @@ def _paid_candidates(
 ) -> list[ContactRecord]:
     """Return paid candidates only for companies accepted in the latest canonical M3 state."""
     grouped: dict[str, list[ContactRecord]] = {}
-    for contact in _ordered_contacts(contacts):
+    for contact in contacts.values():
         if contact.company_id not in accepted_company_ids:
             continue
         grouped.setdefault(contact.company_id, []).append(contact)
     paid: list[ContactRecord] = []
     for company_id in sorted(grouped):
-        eligible = [item for item in grouped[company_id] if item.decision_rank in {1, 2}]
+        eligible = sorted(
+            (item for item in grouped[company_id] if item.decision_rank in {1, 2}),
+            key=contact_decision_order_key,
+        )
         paid.extend(eligible[: config.max_paid_contacts_per_company])
     return paid
 
@@ -724,6 +731,8 @@ def run_contact_enrichment(
     if not config.execute_live:
         raise ValueError("run_contact_enrichment requires explicit live execution")
     paths, accepted, checkpoint, operations, contacts, events = _load_runtime_state(config)
+    if checkpoint.status == "completed":
+        return _summary(config, paths, "completed", contacts)
     if checkpoint.status == "paused_unknown":
         return _summary(config, paths, "paused_unknown", contacts)
 
