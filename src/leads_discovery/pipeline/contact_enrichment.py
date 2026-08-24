@@ -91,7 +91,7 @@ class ContactEnrichmentSummary:
 
 @dataclass(frozen=True, slots=True)
 class _Paths:
-    """Resolve M3 inputs and separate M4 artifacts beneath one validated run directory."""
+    """Resolve M3 input and separate M4 artifacts below one validated run directory."""
 
     run_dir: Path
     evaluated: Path
@@ -119,7 +119,7 @@ def _finite_nonnegative(name: str, value: object) -> float:
 
 
 def _validate_config(config: ContactEnrichmentConfig) -> _Paths:
-    """Validate scalar controls, direct-child containment, inputs, and symlink boundaries."""
+    """Validate scalar controls, containment, M3 input, and symlink boundaries."""
     if not isinstance(config.run_id, str) or not _RUN_ID.fullmatch(config.run_id):
         raise ValueError("run_id must match [A-Za-z0-9][A-Za-z0-9._-]{0,63}")
     if (
@@ -206,7 +206,7 @@ def _load_contacts(path: Path) -> dict[str, ContactRecord]:
     return contacts
 
 
-def _checkpoint(paths: _Paths, run_id: str) -> RunCheckpoint:
+def _load_checkpoint(paths: _Paths, run_id: str) -> RunCheckpoint:
     """Load or initialize the dedicated M4 checkpoint without touching M2 state."""
     payload = read_json(paths.checkpoint)
     if payload is None:
@@ -214,8 +214,7 @@ def _checkpoint(paths: _Paths, run_id: str) -> RunCheckpoint:
     checkpoint = RunCheckpoint.from_dict(payload)
     if checkpoint.run_id != run_id:
         raise ValueError("contact checkpoint run_id mismatch")
-    operations = checkpoint.provider_state.get("operations", {})
-    if not isinstance(operations, dict):
+    if not isinstance(checkpoint.provider_state.get("operations", {}), dict):
         raise ValueError("contact checkpoint operations must be an object")
     return checkpoint
 
@@ -237,12 +236,12 @@ def _save_checkpoint(path: Path, checkpoint: RunCheckpoint, status: str, reason:
 
 
 def _record_event(path: Path, event: UsageEvent) -> None:
-    """Persist one provider usage event before any related operation is marked complete."""
+    """Persist one provider usage event before its operation can be marked complete."""
     append_usage_event(path, event)
 
 
 def _quota_totals(events: list[UsageEvent]) -> tuple[float, int, float]:
-    """Replay Apollo credits, Instantly calls, and Instantly credits from M4 usage metadata."""
+    """Replay Apollo credits plus Instantly calls and credits from M4 usage metadata."""
     apollo = 0.0
     instantly_calls = 0
     instantly_credits = 0.0
@@ -260,6 +259,19 @@ def _quota_totals(events: list[UsageEvent]) -> tuple[float, int, float]:
     return apollo, instantly_calls, instantly_credits
 
 
+def _clay_submitted(events: list[UsageEvent]) -> int:
+    """Replay the exact number of contacts submitted to Clay from validated M4 events."""
+    total = 0
+    for event in events:
+        if event.provider != "clay" or event.operation != "work_email_routine_start":
+            continue
+        raw = event.metadata.get("submitted_contacts")
+        if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
+            raise ValueError("Clay submitted_contacts usage must be a nonnegative integer")
+        total += raw
+    return total
+
+
 def _publish_usage(paths: _Paths) -> None:
     """Rebuild the M4 usage summary from its separate append-only usage ledger."""
     events = load_usage_events(paths.usage_events)
@@ -270,11 +282,7 @@ def _publish_usage(paths: _Paths) -> None:
         {
             **summary,
             "quotas": {
-                "clay_submitted_contacts": sum(
-                    int(event.metadata.get("submitted_contacts", 0))
-                    for event in events
-                    if event.provider == "clay" and event.operation == "work_email_routine_start"
-                ),
+                "clay_submitted_contacts": _clay_submitted(events),
                 "apollo_credits": round(apollo, 10),
                 "instantly_calls": instantly_calls,
                 "instantly_credits": round(instantly_credits, 10),
@@ -284,7 +292,7 @@ def _publish_usage(paths: _Paths) -> None:
 
 
 def _safe_csv(value: object) -> str:
-    """Render an externally sourced cell with the repository's formula-injection protection."""
+    """Render an external cell with the repository's formula-injection protection."""
     if value is None:
         return ""
     text = str(value)
@@ -317,8 +325,7 @@ def _publish_contacts(paths: _Paths, contacts: dict[str, ContactRecord]) -> None
     writer = csv.DictWriter(output, fieldnames=list(_CSV_COLUMNS), lineterminator="\n")
     writer.writeheader()
     for contact in ordered:
-        row = {name: _safe_csv(getattr(contact, name)) for name in _CSV_COLUMNS}
-        writer.writerow(row)
+        writer.writerow({name: _safe_csv(getattr(contact, name)) for name in _CSV_COLUMNS})
     write_text_atomic(paths.leads, output.getvalue())
 
 
@@ -336,6 +343,14 @@ def _paid_candidates(
     return paid
 
 
+def _has_attempt(contact: ContactRecord, provider: str, state: str) -> bool:
+    """Return whether one contact has a retained provider attempt in the requested state."""
+    return any(
+        attempt.get("provider") == provider and attempt.get("state") == state
+        for attempt in contact.provider_attempts
+    )
+
+
 def _attempt(contact: ContactRecord, provider: str, operation: str, state: str, **extra: Any) -> None:
     """Append one safe provider-attempt state transition to a contact snapshot."""
     contact.provider_attempts.append(
@@ -343,20 +358,7 @@ def _attempt(contact: ContactRecord, provider: str, operation: str, state: str, 
     )
 
 
-def _provider_failure(
-    *, paths: _Paths, checkpoint: RunCheckpoint, error: ContactProviderError
-) -> ContactEnrichmentSummary | None:
-    """Persist known provider usage and translate budget failures into durable partial pauses."""
-    _record_event(paths.usage_events, error.usage_event)
-    _publish_usage(paths)
-    if error.kind == "budget_exhausted":
-        _save_checkpoint(paths.checkpoint, checkpoint, "paused_budget", f"{error.provider}_budget")
-        return None
-    raise error
-
-
 def _summary(
-    *,
     config: ContactEnrichmentConfig,
     paths: _Paths,
     status: str,
@@ -378,6 +380,22 @@ def _summary(
     )
 
 
+def _pause(
+    config: ContactEnrichmentConfig,
+    paths: _Paths,
+    checkpoint: RunCheckpoint,
+    contacts: dict[str, ContactRecord],
+    accepted_count: int,
+    status: str,
+    reason: str,
+) -> ContactEnrichmentSummary:
+    """Publish all known M4 state and return one durable partial-run summary."""
+    _publish_contacts(paths, contacts)
+    _publish_usage(paths)
+    _save_checkpoint(paths.checkpoint, checkpoint, status, reason)
+    return _summary(config, paths, status, accepted_count, contacts)
+
+
 def run_contact_enrichment(
     config: ContactEnrichmentConfig,
     *,
@@ -391,12 +409,11 @@ def run_contact_enrichment(
         raise ValueError("run_contact_enrichment requires explicit live execution")
     paths = _validate_config(config)
     accepted = _load_accepted(paths.evaluated)
-    checkpoint = _checkpoint(paths, config.run_id)
+    checkpoint = _load_checkpoint(paths, config.run_id)
     operations = _operations(checkpoint)
     contacts = _load_contacts(paths.contacts)
     events = load_usage_events(paths.usage_events)
 
-    # Exa People discovery: accepted companies only, at most one request each.
     tracker = CostTracker(events)
     for company in accepted:
         key = f"exa:{company.company_id}"
@@ -404,30 +421,30 @@ def run_contact_enrichment(
         if isinstance(state, dict) and state.get("state") == "completed":
             continue
         if isinstance(state, dict) and state.get("state") == "in_flight":
-            _save_checkpoint(paths.checkpoint, checkpoint, "paused_unknown", key)
-            _publish_contacts(paths, contacts)
-            _publish_usage(paths)
-            return _summary(
-                config=config, paths=paths, status="paused_unknown",
-                accepted_count=len(accepted), contacts=contacts,
+            return _pause(
+                config, paths, checkpoint, contacts, len(accepted), "paused_unknown", key
             )
         if config.exa_people_budget_usd is not None:
             spend = tracker.provider_estimated_spend("exa")
             if spend is None:
-                _save_checkpoint(paths.checkpoint, checkpoint, "paused_unknown", "exa_usage_unknown")
-                _publish_contacts(paths, contacts)
-                _publish_usage(paths)
-                return _summary(
-                    config=config, paths=paths, status="paused_unknown",
-                    accepted_count=len(accepted), contacts=contacts,
+                return _pause(
+                    config,
+                    paths,
+                    checkpoint,
+                    contacts,
+                    len(accepted),
+                    "paused_unknown",
+                    "exa_usage_unknown",
                 )
             if spend >= config.exa_people_budget_usd:
-                _save_checkpoint(paths.checkpoint, checkpoint, "paused_budget", "exa_people_budget")
-                _publish_contacts(paths, contacts)
-                _publish_usage(paths)
-                return _summary(
-                    config=config, paths=paths, status="paused_budget",
-                    accepted_count=len(accepted), contacts=contacts,
+                return _pause(
+                    config,
+                    paths,
+                    checkpoint,
+                    contacts,
+                    len(accepted),
+                    "paused_budget",
+                    "exa_people_budget",
                 )
         operations[key] = {"state": "in_flight"}
         _save_checkpoint(paths.checkpoint, checkpoint, "running", None)
@@ -435,131 +452,166 @@ def run_contact_enrichment(
             result = exa.search(company)
         except ContactProviderError as error:
             _record_event(paths.usage_events, error.usage_event)
-            _publish_usage(paths)
-            if error.kind == "budget_exhausted":
-                _save_checkpoint(paths.checkpoint, checkpoint, "paused_budget", "exa_people_budget")
-                return _summary(
-                    config=config, paths=paths, status="paused_budget",
-                    accepted_count=len(accepted), contacts=contacts,
-                )
-            _save_checkpoint(paths.checkpoint, checkpoint, "paused_unknown", key)
-            raise
+            status = "paused_budget" if error.kind == "budget_exhausted" else "paused_unknown"
+            return _pause(
+                config, paths, checkpoint, contacts, len(accepted), status, key
+            )
         _record_event(paths.usage_events, result.usage_event)
         tracker.record(result.usage_event)
-        selected = select_contacts(company, result.results, limit=config.max_contacts_per_company)
+        selected = select_contacts(
+            company, result.results, limit=config.max_contacts_per_company
+        )
         for contact in selected:
             contacts[contact.contact_id] = contact
         _publish_contacts(paths, contacts)
         _publish_usage(paths)
-        operations[key] = {"state": "completed", "contact_ids": [item.contact_id for item in selected]}
+        operations[key] = {
+            "state": "completed",
+            "contact_ids": [item.contact_id for item in selected],
+        }
         _save_checkpoint(paths.checkpoint, checkpoint, "running", None)
 
     paid = _paid_candidates(contacts, config)
-
-    # Clay: one bounded async batch, then exact-run polling on resume.
     clay_state = operations.get("clay:batch")
     if not isinstance(clay_state, dict) or clay_state.get("state") != "completed":
-        pending = [item for item in paid if not any(
-            attempt.get("provider") == "clay" and attempt.get("state") == "completed"
-            for attempt in item.provider_attempts
-        )]
+        pending = [item for item in paid if not _has_attempt(item, "clay", "completed")]
         pending = pending[: config.clay_max_contacts]
         if pending:
-            if isinstance(clay_state, dict) and clay_state.get("state") == "in_flight" and not clay_state.get("routine_run_id"):
-                _save_checkpoint(paths.checkpoint, checkpoint, "paused_unknown", "clay_start_unknown")
-                _publish_contacts(paths, contacts)
-                _publish_usage(paths)
-                return _summary(
-                    config=config, paths=paths, status="paused_unknown",
-                    accepted_count=len(accepted), contacts=contacts,
+            if (
+                isinstance(clay_state, dict)
+                and clay_state.get("state") == "in_flight"
+                and not clay_state.get("routine_run_id")
+            ):
+                return _pause(
+                    config,
+                    paths,
+                    checkpoint,
+                    contacts,
+                    len(accepted),
+                    "paused_unknown",
+                    "clay_start_unknown",
                 )
             run_id = clay_state.get("routine_run_id") if isinstance(clay_state, dict) else None
             if not isinstance(run_id, str) or not run_id:
                 operations["clay:batch"] = {
-                    "state": "in_flight", "contact_ids": [item.contact_id for item in pending]
+                    "state": "in_flight",
+                    "contact_ids": [item.contact_id for item in pending],
                 }
-                _save_checkpoint(paths.checkpoint, checkpoint, "running", None)
                 for contact in pending:
                     _attempt(contact, "clay", "work_email_routine", "in_flight")
                 _publish_contacts(paths, contacts)
+                _save_checkpoint(paths.checkpoint, checkpoint, "running", None)
                 try:
                     started = clay.start(pending)
                 except ContactProviderError as error:
                     _record_event(paths.usage_events, error.usage_event)
-                    _publish_usage(paths)
-                    if error.kind == "budget_exhausted":
-                        _save_checkpoint(paths.checkpoint, checkpoint, "paused_budget", "clay_budget")
-                        return _summary(
-                            config=config, paths=paths, status="paused_budget",
-                            accepted_count=len(accepted), contacts=contacts,
-                        )
-                    _save_checkpoint(paths.checkpoint, checkpoint, "paused_unknown", "clay_start_unknown")
-                    raise
+                    status = (
+                        "paused_budget"
+                        if error.kind == "budget_exhausted"
+                        else "paused_unknown"
+                    )
+                    return _pause(
+                        config,
+                        paths,
+                        checkpoint,
+                        contacts,
+                        len(accepted),
+                        status,
+                        "clay_start",
+                    )
                 _record_event(paths.usage_events, started.usage_event)
                 operations["clay:batch"] = {
                     "state": "pending",
                     "routine_run_id": started.routine_run_id,
                     "contact_ids": [item.contact_id for item in pending],
                 }
-                _save_checkpoint(paths.checkpoint, checkpoint, "paused_pending", "clay_pending")
-                _publish_usage(paths)
-                return _summary(
-                    config=config, paths=paths, status="paused_pending",
-                    accepted_count=len(accepted), contacts=contacts,
+                return _pause(
+                    config,
+                    paths,
+                    checkpoint,
+                    contacts,
+                    len(accepted),
+                    "paused_pending",
+                    "clay_pending",
                 )
             try:
                 result = clay.results(run_id)
             except ContactProviderError as error:
                 _record_event(paths.usage_events, error.usage_event)
-                _publish_usage(paths)
-                raise
+                status = (
+                    "paused_budget" if error.kind == "budget_exhausted" else "paused_pending"
+                )
+                return _pause(
+                    config,
+                    paths,
+                    checkpoint,
+                    contacts,
+                    len(accepted),
+                    status,
+                    "clay_pending",
+                )
             _record_event(paths.usage_events, result.usage_event)
-            _publish_usage(paths)
             if result.status == "pending":
-                _save_checkpoint(paths.checkpoint, checkpoint, "paused_pending", "clay_pending")
-                return _summary(
-                    config=config, paths=paths, status="paused_pending",
-                    accepted_count=len(accepted), contacts=contacts,
+                return _pause(
+                    config,
+                    paths,
+                    checkpoint,
+                    contacts,
+                    len(accepted),
+                    "paused_pending",
+                    "clay_pending",
                 )
             expected = cast(list[str], clay_state.get("contact_ids", []))
-            by_id = {str(item.get("id")): item for item in result.items if item.get("id") is not None}
+            by_id = {
+                str(item.get("id")): item
+                for item in result.items
+                if item.get("id") is not None
+            }
             for contact_id in expected:
                 contact = contacts.get(contact_id)
                 if contact is None:
                     raise ValueError("Clay result references an unknown contact")
-                item = by_id.get(contact_id, {})
-                email = clay_item_email(item)
+                email = clay_item_email(by_id.get(contact_id, {}))
                 if email is not None:
                     contact.work_email = email
                     contact.email_source = "clay"
-                _attempt(contact, "clay", "work_email_routine", "completed", routine_run_id=run_id)
-            _publish_contacts(paths, contacts)
+                _attempt(
+                    contact,
+                    "clay",
+                    "work_email_routine",
+                    "completed",
+                    routine_run_id=run_id,
+                )
             operations["clay:batch"] = {**clay_state, "state": "completed"}
+            _publish_contacts(paths, contacts)
+            _publish_usage(paths)
             _save_checkpoint(paths.checkpoint, checkpoint, "running", None)
 
-    # Apollo fallback: synchronous, one attempt per contact, reserve one credit before dispatch.
+    paid = _paid_candidates(contacts, config)
+    clay_cap_exhausted = any(not _has_attempt(item, "clay", "completed") for item in paid)
+
     events = load_usage_events(paths.usage_events)
     apollo_used, _, _ = _quota_totals(events)
-    for contact in _paid_candidates(contacts, config):
-        if contact.work_email is not None:
+    for contact in paid:
+        if contact.work_email is not None or not _has_attempt(contact, "clay", "completed"):
             continue
         key = f"apollo:{contact.contact_id}"
         state = operations.get(key)
         if isinstance(state, dict) and state.get("state") == "completed":
             continue
         if isinstance(state, dict) and state.get("state") == "in_flight":
-            _save_checkpoint(paths.checkpoint, checkpoint, "paused_unknown", key)
-            return _summary(
-                config=config, paths=paths, status="paused_unknown",
-                accepted_count=len(accepted), contacts=contacts,
+            return _pause(
+                config, paths, checkpoint, contacts, len(accepted), "paused_unknown", key
             )
         if apollo_used + 1.0 > config.apollo_credit_cap:
-            _save_checkpoint(paths.checkpoint, checkpoint, "paused_budget", "apollo_credit_cap")
-            _publish_contacts(paths, contacts)
-            _publish_usage(paths)
-            return _summary(
-                config=config, paths=paths, status="paused_budget",
-                accepted_count=len(accepted), contacts=contacts,
+            return _pause(
+                config,
+                paths,
+                checkpoint,
+                contacts,
+                len(accepted),
+                "paused_budget",
+                "apollo_credit_cap",
             )
         operations[key] = {"state": "in_flight", "credits_reserved": 1.0}
         _attempt(contact, "apollo", "people_enrichment", "in_flight")
@@ -571,11 +623,14 @@ def run_contact_enrichment(
             event = error.usage_event
             event.metadata["credits_reserved"] = 1.0
             _record_event(paths.usage_events, event)
-            _publish_usage(paths)
-            _save_checkpoint(paths.checkpoint, checkpoint, "paused_unknown", key)
-            raise
-        used = result.credits_used if result.credits_used is not None else 1.0
-        used = _finite_nonnegative("apollo credits", used)
+            status = "paused_budget" if error.kind == "budget_exhausted" else "paused_unknown"
+            return _pause(
+                config, paths, checkpoint, contacts, len(accepted), status, key
+            )
+        used = _finite_nonnegative(
+            "apollo credits",
+            result.credits_used if result.credits_used is not None else 1.0,
+        )
         result.usage_event.metadata["credits_used"] = used
         if result.credits_used is None:
             result.usage_event.metadata["credits_reserved"] = 1.0
@@ -590,10 +645,9 @@ def run_contact_enrichment(
         _publish_usage(paths)
         _save_checkpoint(paths.checkpoint, checkpoint, "running", None)
 
-    # Instantly: POST once, then GET only for persisted pending verification.
     events = load_usage_events(paths.usage_events)
     _, instantly_calls, _ = _quota_totals(events)
-    for contact in _paid_candidates(contacts, config):
+    for contact in paid:
         if contact.work_email is None:
             continue
         key = f"instantly:{contact.contact_id}"
@@ -602,60 +656,85 @@ def run_contact_enrichment(
             continue
         pending = isinstance(state, dict) and state.get("state") == "pending"
         if isinstance(state, dict) and state.get("state") == "in_flight":
-            _save_checkpoint(paths.checkpoint, checkpoint, "paused_unknown", key)
-            return _summary(
-                config=config, paths=paths, status="paused_unknown",
-                accepted_count=len(accepted), contacts=contacts,
+            return _pause(
+                config, paths, checkpoint, contacts, len(accepted), "paused_unknown", key
             )
         if instantly_calls >= config.instantly_verification_call_cap:
-            _save_checkpoint(paths.checkpoint, checkpoint, "paused_budget", "instantly_call_cap")
-            _publish_contacts(paths, contacts)
-            _publish_usage(paths)
-            return _summary(
-                config=config, paths=paths, status="paused_budget",
-                accepted_count=len(accepted), contacts=contacts,
+            return _pause(
+                config,
+                paths,
+                checkpoint,
+                contacts,
+                len(accepted),
+                "paused_budget",
+                "instantly_call_cap",
             )
         email = contact.work_email
-        if pending:
-            persisted_email = state.get("email") if isinstance(state, dict) else None
-            if persisted_email != email:
-                raise ValueError("pending Instantly email does not match contact email")
-            result = instantly.get(email)
-        else:
-            operations[key] = {"state": "in_flight", "email": email}
-            _attempt(contact, "instantly", "email_verification", "in_flight")
-            _publish_contacts(paths, contacts)
-            _save_checkpoint(paths.checkpoint, checkpoint, "running", None)
-            result = instantly.create(email)
+        try:
+            if pending:
+                persisted_email = state.get("email") if isinstance(state, dict) else None
+                if persisted_email != email:
+                    raise ValueError("pending Instantly email does not match contact email")
+                result = instantly.get(email)
+            else:
+                operations[key] = {"state": "in_flight", "email": email}
+                _attempt(contact, "instantly", "email_verification", "in_flight")
+                _publish_contacts(paths, contacts)
+                _save_checkpoint(paths.checkpoint, checkpoint, "running", None)
+                result = instantly.create(email)
+        except ContactProviderError as error:
+            _record_event(paths.usage_events, error.usage_event)
+            if error.kind == "budget_exhausted":
+                status = "paused_budget"
+            elif pending:
+                status = "paused_pending"
+            else:
+                status = "paused_unknown"
+            return _pause(
+                config, paths, checkpoint, contacts, len(accepted), status, key
+            )
         _record_event(paths.usage_events, result.usage_event)
         instantly_calls += result.usage_event.request_count
         contact.email_verification_status = result.status
         if result.status == "pending":
             operations[key] = {"state": "pending", "email": email}
             _attempt(contact, "instantly", "email_verification", "pending")
-            _publish_contacts(paths, contacts)
-            _publish_usage(paths)
-            _save_checkpoint(paths.checkpoint, checkpoint, "paused_pending", key)
-            return _summary(
-                config=config, paths=paths, status="paused_pending",
-                accepted_count=len(accepted), contacts=contacts,
+            return _pause(
+                config,
+                paths,
+                checkpoint,
+                contacts,
+                len(accepted),
+                "paused_pending",
+                key,
             )
         operations[key] = {"state": "completed", "email": email, "status": result.status}
-        _attempt(contact, "instantly", "email_verification", "completed", status=result.status)
+        _attempt(
+            contact,
+            "instantly",
+            "email_verification",
+            "completed",
+            status=result.status,
+        )
         _publish_contacts(paths, contacts)
         _publish_usage(paths)
         _save_checkpoint(paths.checkpoint, checkpoint, "running", None)
 
+    if clay_cap_exhausted:
+        return _pause(
+            config,
+            paths,
+            checkpoint,
+            contacts,
+            len(accepted),
+            "paused_budget",
+            "clay_max_contacts",
+        )
+
     _publish_contacts(paths, contacts)
     _publish_usage(paths)
     _save_checkpoint(paths.checkpoint, checkpoint, "completed", None)
-    return _summary(
-        config=config,
-        paths=paths,
-        status="completed",
-        accepted_count=len(accepted),
-        contacts=contacts,
-    )
+    return _summary(config, paths, "completed", len(accepted), contacts)
 
 
 __all__ = [
