@@ -35,27 +35,16 @@ _DEPUTY_FUNCTIONS: tuple[tuple[str, re.Pattern[str]], ...] = _CORE_FUNCTIONS + (
     ("branch", re.compile(r"\bbranch\b")),
     ("regional", re.compile(r"\bregional\b")),
 )
-_DECISION_RELEVANCE: dict[tuple[int, str], int] = {
-    (1, "direct_decision_maker:owner"): 0,
-    (1, "direct_decision_maker:president"): 1,
-    (1, "direct_decision_maker:ceo"): 2,
-    (1, "direct_decision_maker:coo"): 3,
-    (1, "direct_decision_maker:managing_partner"): 4,
-    (1, "direct_decision_maker:general_manager"): 5,
-    (2, "functional_decision_maker:sales"): 0,
-    (2, "functional_decision_maker:operations"): 1,
-    (2, "functional_decision_maker:commercial"): 2,
-    (2, "functional_decision_maker:estimating"): 3,
-    (2, "functional_decision_maker:inside_sales"): 4,
-    (3, "operational_deputy:branch"): 0,
-    (3, "operational_deputy:regional"): 1,
-    (3, "operational_deputy:sales"): 2,
-    (3, "operational_deputy:operations"): 3,
-    (3, "operational_deputy:estimating"): 4,
-    (3, "operational_deputy:inside_sales"): 5,
-    (3, "operational_deputy:commercial"): 6,
+_FUNCTION_RELEVANCE: dict[str, int] = {
+    "estimating": 0,
+    "inside_sales": 1,
+    "operations": 2,
+    "sales": 3,
+    "commercial": 4,
+    "branch": 5,
+    "regional": 6,
 }
-_UNKNOWN_RELEVANCE = max(_DECISION_RELEVANCE.values()) + 1
+_UNKNOWN_RELEVANCE = max(_FUNCTION_RELEVANCE.values()) + 1
 
 
 def normalize_contact_name(value: str) -> str:
@@ -124,16 +113,19 @@ def rank_title(title: str) -> tuple[int, str] | None:
     return None
 
 
-def _decision_relevance(decision_rank: int, decision_reason: str) -> int:
-    """Return the written within-rank relevance priority for one classified decision role."""
-    return _DECISION_RELEVANCE.get((decision_rank, decision_reason), _UNKNOWN_RELEVANCE)
+def _decision_relevance(decision_reason: str) -> int:
+    """Return within-rank function relevance without inventing precedence for direct roles."""
+    _, separator, function = decision_reason.partition(":")
+    if not separator:
+        return _UNKNOWN_RELEVANCE
+    return _FUNCTION_RELEVANCE.get(function, _UNKNOWN_RELEVANCE)
 
 
 def contact_decision_order_key(contact: ContactRecord) -> tuple[int, int, str, str]:
     """Order contacts by rank, within-rank relevance, normalized name, then stable identity."""
     return (
         contact.decision_rank,
-        _decision_relevance(contact.decision_rank, contact.decision_reason),
+        _decision_relevance(contact.decision_reason),
         normalize_contact_name(contact.full_name),
         contact.contact_id,
     )
@@ -222,7 +214,7 @@ def _candidate_from_result(
             ranked_roles.append(
                 (
                     rank,
-                    _decision_relevance(rank, reason),
+                    _decision_relevance(reason),
                     normalize_contact_name(title),
                     reason,
                     work_row,
