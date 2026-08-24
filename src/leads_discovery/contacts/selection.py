@@ -35,6 +35,27 @@ _DEPUTY_FUNCTIONS: tuple[tuple[str, re.Pattern[str]], ...] = _CORE_FUNCTIONS + (
     ("branch", re.compile(r"\bbranch\b")),
     ("regional", re.compile(r"\bregional\b")),
 )
+_DECISION_RELEVANCE: dict[tuple[int, str], int] = {
+    (1, "direct_decision_maker:owner"): 0,
+    (1, "direct_decision_maker:president"): 1,
+    (1, "direct_decision_maker:ceo"): 2,
+    (1, "direct_decision_maker:coo"): 3,
+    (1, "direct_decision_maker:managing_partner"): 4,
+    (1, "direct_decision_maker:general_manager"): 5,
+    (2, "functional_decision_maker:sales"): 0,
+    (2, "functional_decision_maker:operations"): 1,
+    (2, "functional_decision_maker:commercial"): 2,
+    (2, "functional_decision_maker:estimating"): 3,
+    (2, "functional_decision_maker:inside_sales"): 4,
+    (3, "operational_deputy:branch"): 0,
+    (3, "operational_deputy:regional"): 1,
+    (3, "operational_deputy:sales"): 2,
+    (3, "operational_deputy:operations"): 3,
+    (3, "operational_deputy:estimating"): 4,
+    (3, "operational_deputy:inside_sales"): 5,
+    (3, "operational_deputy:commercial"): 6,
+}
+_UNKNOWN_RELEVANCE = max(_DECISION_RELEVANCE.values()) + 1
 
 
 def normalize_contact_name(value: str) -> str:
@@ -101,6 +122,21 @@ def rank_title(title: str) -> tuple[int, str] | None:
     if deputy is not None and _MANAGER_PATTERN.search(normalized):
         return 3, f"operational_deputy:{deputy}"
     return None
+
+
+def _decision_relevance(decision_rank: int, decision_reason: str) -> int:
+    """Return the written within-rank relevance priority for one classified decision role."""
+    return _DECISION_RELEVANCE.get((decision_rank, decision_reason), _UNKNOWN_RELEVANCE)
+
+
+def contact_decision_order_key(contact: ContactRecord) -> tuple[int, int, str, str]:
+    """Order contacts by rank, within-rank relevance, normalized name, then stable identity."""
+    return (
+        contact.decision_rank,
+        _decision_relevance(contact.decision_rank, contact.decision_reason),
+        normalize_contact_name(contact.full_name),
+        contact.contact_id,
+    )
 
 
 def _person_properties(raw: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
@@ -178,16 +214,24 @@ def _candidate_from_result(
     if not isinstance(full_name, str) or not full_name.strip():
         return None
 
-    ranked_roles: list[tuple[int, str, str, dict[str, Any]]] = []
+    ranked_roles: list[tuple[int, int, str, str, dict[str, Any]]] = []
     for title, work_row in _current_roles(properties, company):
         ranking = rank_title(title)
         if ranking is not None:
             rank, reason = ranking
-            ranked_roles.append((rank, normalize_contact_name(title), reason, work_row))
+            ranked_roles.append(
+                (
+                    rank,
+                    _decision_relevance(rank, reason),
+                    normalize_contact_name(title),
+                    reason,
+                    work_row,
+                )
+            )
     if not ranked_roles:
         return None
-    ranked_roles.sort(key=lambda item: (item[0], item[1], item[2]))
-    rank, _, reason, work_row = ranked_roles[0]
+    ranked_roles.sort(key=lambda item: (item[0], item[1], item[2], item[3]))
+    rank, _, _, reason, work_row = ranked_roles[0]
     title = cast(str, work_row["title"]).strip()
 
     source_url = raw.get("url") if isinstance(raw.get("url"), str) else None
@@ -242,13 +286,7 @@ def select_contacts(
         candidate = _candidate_from_result(company, raw)
         if candidate is not None:
             candidates.append(candidate)
-    candidates.sort(
-        key=lambda item: (
-            item[0].decision_rank,
-            normalize_contact_name(item[0].full_name),
-            item[0].contact_id,
-        )
-    )
+    candidates.sort(key=lambda item: contact_decision_order_key(item[0]))
     selected: list[ContactRecord] = []
     seen: set[str] = set()
     for contact, key in candidates:
