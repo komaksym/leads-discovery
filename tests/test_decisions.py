@@ -5,7 +5,6 @@ from __future__ import annotations
 from copy import deepcopy
 
 import pytest
-
 from leads_discovery.scoring import evaluate_company
 from m3_factories import FactInput, accepted_facts, build_company, low_score_facts
 
