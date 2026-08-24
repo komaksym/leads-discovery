@@ -9,15 +9,12 @@ from typing import Any
 
 import httpx
 import pytest
-from m3_factories import (
-    accepted_facts,
-    build_company,
-    exact_threshold_facts,
-    write_run_inputs,
-)
+from m3_factories import accepted_facts, build_company, exact_threshold_facts, write_run_inputs
 from m4_contract_fixtures import (
+    ClayRoutineScript,
     WireStub,
     call_cli,
+    call_enrich_live,
     install_mock_http,
     json_body,
     person_result,
@@ -48,37 +45,14 @@ def _exa_one(_request: httpx.Request) -> httpx.Response:
         domain="acmevalve.com",
         profile_url=PROFILE,
     )
-    return httpx.Response(
-        200,
-        json={"results": [result], "costDollars": {"total": 0.001}},
-    )
-
-
-def _clay_miss(_request: httpx.Request) -> httpx.Response:
-    """Complete Clay with no work email."""
-    return httpx.Response(
-        200,
-        json={
-            "id": "clay-miss",
-            "run_id": "clay-miss",
-            "routine_run_id": "clay-miss",
-            "status": "completed",
-            "credits_used": 1,
-            "results": [],
-            "data": {"results": [], "credits_used": 1},
-        },
-    )
+    return httpx.Response(200, json={"results": [result], "costDollars": {"total": 0.001}})
 
 
 def _apollo_miss(_request: httpx.Request) -> httpx.Response:
     """Complete one paid Apollo attempt without finding an email."""
     return httpx.Response(
         200,
-        json={
-            "status": "completed",
-            "credits_used": 1,
-            "person": {"email": None},
-        },
+        json={"status": "completed", "credits_used": 1, "person": {"email": None}},
     )
 
 
@@ -109,6 +83,46 @@ def _replace_exact_key(value: Any, target: str, replacement: Any) -> int:
     return count
 
 
+def _replace_first_operation_status(value: Any, replacement: str) -> bool:
+    """Replace one persisted provider operation status without assuming an operation identifier."""
+    if isinstance(value, dict):
+        operations = value.get("operations")
+        if isinstance(operations, dict):
+            for operation in operations.values():
+                if isinstance(operation, dict) and "status" in operation:
+                    operation["status"] = replacement
+                    return True
+        return any(_replace_first_operation_status(nested, replacement) for nested in value.values())
+    if isinstance(value, list):
+        return any(_replace_first_operation_status(nested, replacement) for nested in value)
+    return False
+
+
+def _resume_clay_until_complete(
+    *,
+    data_root: Path,
+    run_dir: Path,
+    run_id: str,
+    clay: ClayRoutineScript,
+    max_invocations: int = 10,
+) -> None:
+    """Drive each started Clay routine through durable state and a later GET."""
+    code = call_enrich_live(data_root, run_id)
+    assert code != 0
+    for _ in range(max_invocations):
+        latest = clay.latest_run_id
+        assert latest is not None
+        checkpoint = run_dir / "contact_checkpoint.json"
+        assert checkpoint.exists()
+        assert latest in checkpoint.read_text(encoding="utf-8")
+        clay.release_started()
+        code = call_enrich_live(data_root, run_id)
+        if code == 0:
+            assert len(clay.posts) == len(clay.gets)
+            return
+    raise AssertionError("Clay lifecycle did not complete within bounded resume attempts")
+
+
 def test_m4_artifacts_are_separate_and_completed_rerun_is_idempotent(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -117,28 +131,20 @@ def test_m4_artifacts_are_separate_and_completed_rerun_is_idempotent(
     run_dir = prepare_evaluated_run(
         tmp_path,
         "partial",
-        [
-            build_company(
-                facts=accepted_facts(),
-                name="Acme Valve",
-                domain="acmevalve.com",
-            )
-        ],
+        [build_company(facts=accepted_facts(), name="Acme Valve", domain="acmevalve.com")],
     )
-    m123_before = {
-        path.name: path.read_bytes()
-        for path in run_dir.iterdir()
-        if path.is_file()
-    }
-    stub = WireStub(
-        {"exa": _exa_one, "clay": _clay_miss, "apollo": _apollo_miss}
-    )
+    m123_before = {path.name: path.read_bytes() for path in run_dir.iterdir() if path.is_file()}
+    clay = ClayRoutineScript([])
+    stub = WireStub({"exa": _exa_one, "clay": clay, "apollo": _apollo_miss})
     install_mock_http(monkeypatch, stub)
     set_m4_credentials(monkeypatch)
 
-    assert call_cli(
-        ["enrich", "--run-id", "partial", "--data-root", str(tmp_path)]
-    ) == 0
+    _resume_clay_until_complete(
+        data_root=tmp_path,
+        run_dir=run_dir,
+        run_id="partial",
+        clay=clay,
+    )
 
     names = {path.name for path in run_dir.iterdir() if path.is_file()}
     assert M4_ARTIFACTS <= names
@@ -149,56 +155,68 @@ def test_m4_artifacts_are_separate_and_completed_rerun_is_idempotent(
     for name, payload in m123_before.items():
         assert (run_dir / name).read_bytes() == payload
 
-    durable_before = {
-        name: (run_dir / name).read_bytes()
-        for name in M4_ARTIFACTS
-    }
+    durable_before = {name: (run_dir / name).read_bytes() for name in M4_ARTIFACTS}
     request_count = len(stub.requests)
-    assert call_cli(
-        ["enrich", "--run-id", "partial", "--data-root", str(tmp_path)]
-    ) == 0
+    assert call_enrich_live(tmp_path, "partial") == 0
     assert len(stub.requests) == request_count
     for name, payload in durable_before.items():
         assert (run_dir / name).read_bytes() == payload
     assert len(read_jsonl(run_dir / "contacts.jsonl")) == 1
 
 
-def test_provider_budget_exhaustion_keeps_partial_contact(
+def test_provider_budget_exhaustion_keeps_partial_contact_and_stops_downstream_spend(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A paid-provider budget stop preserves discovery and blocks downstream spend."""
+    """A Clay budget stop preserves discovery and cannot consume Apollo or Instantly credits."""
     run_dir = prepare_evaluated_run(
         tmp_path,
         "budget-stop",
-        [
-            build_company(
-                facts=accepted_facts(),
-                name="Acme Valve",
-                domain="acmevalve.com",
-            )
-        ],
+        [build_company(facts=accepted_facts(), name="Acme Valve", domain="acmevalve.com")],
     )
 
     def clay_budget(_request: httpx.Request) -> httpx.Response:
         """Simulate an explicit Clay budget exhaustion response."""
-        return httpx.Response(
-            402,
-            json={"error": "budget exhausted", "credits_used": 0},
-        )
+        return httpx.Response(402, json={"error": "budget exhausted", "credits_used": 0})
 
     stub = WireStub({"exa": _exa_one, "clay": clay_budget})
     install_mock_http(monkeypatch, stub)
     set_m4_credentials(monkeypatch)
 
-    assert call_cli(
-        ["enrich", "--run-id", "budget-stop", "--data-root", str(tmp_path)]
-    ) != 0
+    assert call_enrich_live(tmp_path, "budget-stop") != 0
     contacts = read_jsonl(run_dir / "contacts.jsonl")
     assert len(contacts) == 1
     assert "pat owner" in row_text(contacts[0]).casefold()
     assert stub.for_provider("apollo") == []
     assert stub.for_provider("instantly") == []
+
+
+def test_provider_usage_is_separated_for_independent_caps(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """M4 persists provider-specific accounting instead of pooling Exa, Clay, and Apollo usage."""
+    run_dir = prepare_evaluated_run(
+        tmp_path,
+        "provider-ledgers",
+        [build_company(facts=accepted_facts(), name="Acme Valve", domain="acmevalve.com")],
+    )
+    clay = ClayRoutineScript([])
+    stub = WireStub({"exa": _exa_one, "clay": clay, "apollo": _apollo_miss})
+    install_mock_http(monkeypatch, stub)
+    set_m4_credentials(monkeypatch)
+    _resume_clay_until_complete(
+        data_root=tmp_path,
+        run_dir=run_dir,
+        run_id="provider-ledgers",
+        clay=clay,
+    )
+
+    usage_text = (run_dir / "contact_usage.json").read_text(encoding="utf-8").casefold()
+    assert "exa" in usage_text
+    assert "clay" in usage_text
+    assert "apollo" in usage_text
+    assert (run_dir / "contact_usage_events.jsonl").exists()
 
 
 def test_leads_csv_is_deterministic_formula_safe_and_score_ordered(
@@ -258,34 +276,21 @@ def test_leads_csv_is_deterministic_formula_safe_and_score_ordered(
             )
         raise AssertionError(f"unknown company query: {query}")
 
-    def clay(request: httpx.Request) -> httpx.Response:
+    def clay_rows(request: httpx.Request, _run_id: str) -> list[dict[str, Any]]:
         """Return the work email corresponding to the submitted contact."""
         body = request.content.decode("utf-8").casefold()
-        results: list[dict[str, str]] = []
+        rows: list[dict[str, Any]] = []
         for needle, (name, _domain, email) in identities.items():
             if needle in body:
-                results.append(
+                rows.append(
                     {
                         "name": name,
-                        "profile_url": (
-                            f"https://www.linkedin.com/in/{needle}-owner"
-                        ),
+                        "profile_url": f"https://www.linkedin.com/in/{needle}-owner",
                         "work_email": email,
                         "email": email,
                     }
                 )
-        return httpx.Response(
-            200,
-            json={
-                "id": "clay-csv",
-                "run_id": "clay-csv",
-                "routine_run_id": "clay-csv",
-                "status": "completed",
-                "credits_used": 1,
-                "results": results,
-                "data": {"results": results, "credits_used": 1},
-            },
-        )
+        return rows
 
     def instantly(request: httpx.Request) -> httpx.Response:
         """Verify the existing work email without creating outreach state."""
@@ -293,16 +298,24 @@ def test_leads_csv_is_deterministic_formula_safe_and_score_ordered(
         email = str(body.get("email") or request.url.path.rsplit("/", 1)[-1])
         return httpx.Response(
             200,
-            json={"email": email, "status": "verified", "credits_used": 1},
+            json={
+                "email": email,
+                "status": "completed",
+                "verification_status": "verified",
+                "credits_used": 1,
+            },
         )
 
+    clay = ClayRoutineScript(clay_rows)
     stub = WireStub({"exa": exa, "clay": clay, "instantly": instantly})
     install_mock_http(monkeypatch, stub)
     set_m4_credentials(monkeypatch)
-
-    assert call_cli(
-        ["enrich", "--run-id", "csv-output", "--data-root", str(tmp_path)]
-    ) == 0
+    _resume_clay_until_complete(
+        data_root=tmp_path,
+        run_dir=run_dir,
+        run_id="csv-output",
+        clay=clay,
+    )
 
     first_bytes = (run_dir / "leads.csv").read_bytes()
     rows = read_csv(run_dir / "leads.csv")
@@ -320,9 +333,9 @@ def test_leads_csv_is_deterministic_formula_safe_and_score_ordered(
     assert '""Zee""' in raw
     assert malicious in raw
 
-    assert call_cli(
-        ["enrich", "--run-id", "csv-output", "--data-root", str(tmp_path)]
-    ) == 0
+    request_count = len(stub.requests)
+    assert call_enrich_live(tmp_path, "csv-output") == 0
+    assert len(stub.requests) == request_count
     assert (run_dir / "leads.csv").read_bytes() == first_bytes
 
 
@@ -340,9 +353,7 @@ def test_enrich_rejects_traversal_run_ids_before_network(
     install_mock_http(monkeypatch, stub)
     set_m4_credentials(monkeypatch)
 
-    assert call_cli(
-        ["enrich", "--run-id", run_id, "--data-root", str(tmp_path)]
-    ) == 1
+    assert call_enrich_live(tmp_path, run_id) == 1
     assert stub.requests == []
 
 
@@ -354,13 +365,7 @@ def test_symlinked_m4_output_is_rejected_without_spend(
     run_dir = prepare_evaluated_run(
         tmp_path,
         "symlink",
-        [
-            build_company(
-                facts=accepted_facts(),
-                name="Acme Valve",
-                domain="acmevalve.com",
-            )
-        ],
+        [build_company(facts=accepted_facts(), name="Acme Valve", domain="acmevalve.com")],
     )
     target = tmp_path / "outside-contacts.jsonl"
     target.write_text("sentinel\n", encoding="utf-8")
@@ -369,9 +374,7 @@ def test_symlinked_m4_output_is_rejected_without_spend(
     install_mock_http(monkeypatch, stub)
     set_m4_credentials(monkeypatch)
 
-    assert call_cli(
-        ["enrich", "--run-id", "symlink", "--data-root", str(tmp_path)]
-    ) != 0
+    assert call_enrich_live(tmp_path, "symlink") != 0
     assert target.read_text(encoding="utf-8") == "sentinel\n"
     assert stub.requests == []
 
@@ -384,20 +387,21 @@ def test_run_score_and_calibrate_remain_m4_free(
     env_type = type(os.environ)
     original_get = env_type.get
     original_getitem = env_type.__getitem__
-    forbidden = {"CLAY_API_KEY", "APOLLO_API_KEY", "INSTANTLY_API_KEY"}
+    forbidden = {
+        "CLAY_PUBLIC_API_KEY",
+        "CLAY_CONTACT_ROUTINE_ID",
+        "APOLLO_API_KEY",
+        "INSTANTLY_API_KEY",
+    }
 
-    def guarded_get(
-        env: Any,
-        key: str,
-        default: str | None = None,
-    ) -> str | None:
-        """Reject one M4 credential read from an existing command."""
+    def guarded_get(env: Any, key: str, default: str | None = None) -> str | None:
+        """Reject one M4 credential/config read from an existing command."""
         if key in forbidden:
             raise AssertionError(f"M4 credential read forbidden: {key}")
         return original_get(env, key, default)
 
     def guarded_getitem(env: Any, key: str) -> str:
-        """Reject one indexed M4 credential read from an existing command."""
+        """Reject one indexed M4 credential/config read from an existing command."""
         if key in forbidden:
             raise AssertionError(f"M4 credential read forbidden: {key}")
         return original_getitem(env, key)
@@ -423,14 +427,9 @@ def test_run_score_and_calibrate_remain_m4_free(
         "local-m4-free",
         [build_company(facts=accepted_facts())],
     )
-    assert call_cli(
-        ["score", "--run-id", "local-m4-free", "--data-root", str(tmp_path)]
-    ) == 0
+    assert call_cli(["score", "--run-id", "local-m4-free", "--data-root", str(tmp_path)]) == 0
     labels = tmp_path / "labels.csv"
-    labels.write_text(
-        "company_id,manual_label\ncmp_contract,A\n",
-        encoding="utf-8",
-    )
+    labels.write_text("company_id,manual_label\ncmp_contract,A\n", encoding="utf-8")
     assert call_cli(
         [
             "calibrate",
@@ -446,10 +445,37 @@ def test_run_score_and_calibrate_remain_m4_free(
     assert M4_ARTIFACTS.isdisjoint({path.name for path in run_dir.iterdir()})
 
 
-@pytest.mark.parametrize(
-    "bad_usage",
-    [-1, float("nan"), float("inf"), float("-inf"), "one"],
-)
+def test_unknown_checkpoint_operation_status_fails_closed_without_network(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Malformed persisted operation state cannot authorize replay or provider spend."""
+    run_dir = prepare_evaluated_run(
+        tmp_path,
+        "bad-operation-state",
+        [build_company(facts=accepted_facts(), name="Acme Valve", domain="acmevalve.com")],
+    )
+    clay = ClayRoutineScript([])
+    stub = WireStub({"exa": _exa_one, "clay": clay})
+    install_mock_http(monkeypatch, stub)
+    set_m4_credentials(monkeypatch)
+
+    assert call_enrich_live(tmp_path, "bad-operation-state") != 0
+    assert len(clay.posts) == 1
+    checkpoint_path = run_dir / "contact_checkpoint.json"
+    checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    assert _replace_first_operation_status(checkpoint, "mystery_state")
+    checkpoint_path.write_text(
+        json.dumps(checkpoint, sort_keys=True, allow_nan=False) + "\n",
+        encoding="utf-8",
+    )
+    request_count = len(stub.requests)
+
+    assert call_enrich_live(tmp_path, "bad-operation-state") != 0
+    assert len(stub.requests) == request_count
+
+
+@pytest.mark.parametrize("bad_usage", [-1, float("nan"), float("inf"), float("-inf"), "one"])
 def test_corrupted_persisted_m4_credits_used_is_rejected(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -460,44 +486,33 @@ def test_corrupted_persisted_m4_credits_used_is_rejected(
     run_dir = prepare_evaluated_run(
         tmp_path,
         run_id,
-        [
-            build_company(
-                facts=accepted_facts(),
-                name="Acme Valve",
-                domain="acmevalve.com",
-            )
-        ],
+        [build_company(facts=accepted_facts(), name="Acme Valve", domain="acmevalve.com")],
     )
-
-    def clay(_request: httpx.Request) -> httpx.Response:
-        """Return one work email with explicit one-credit usage."""
-        result = {"profile_url": PROFILE, "work_email": EMAIL, "email": EMAIL}
-        return httpx.Response(
-            200,
-            json={
-                "id": "clay-corrupt",
-                "run_id": "clay-corrupt",
-                "routine_run_id": "clay-corrupt",
-                "status": "completed",
-                "credits_used": 1,
-                "results": [result],
-                "data": {"results": [result], "credits_used": 1},
-            },
-        )
+    clay = ClayRoutineScript(
+        [{"profile_url": PROFILE, "work_email": EMAIL, "email": EMAIL}]
+    )
 
     def instantly(_request: httpx.Request) -> httpx.Response:
         """Return one terminal verification with explicit one-credit usage."""
         return httpx.Response(
             200,
-            json={"email": EMAIL, "status": "verified", "credits_used": 1},
+            json={
+                "email": EMAIL,
+                "status": "completed",
+                "verification_status": "verified",
+                "credits_used": 1,
+            },
         )
 
     stub = WireStub({"exa": _exa_one, "clay": clay, "instantly": instantly})
     install_mock_http(monkeypatch, stub)
     set_m4_credentials(monkeypatch)
-    assert call_cli(
-        ["enrich", "--run-id", run_id, "--data-root", str(tmp_path)]
-    ) == 0
+    _resume_clay_until_complete(
+        data_root=tmp_path,
+        run_dir=run_dir,
+        run_id=run_id,
+        clay=clay,
+    )
 
     usage_path = run_dir / "contact_usage.json"
     usage = json.loads(usage_path.read_text(encoding="utf-8"))
@@ -511,9 +526,7 @@ def test_corrupted_persisted_m4_credits_used_is_rejected(
     leads_before = (run_dir / "leads.csv").read_bytes()
     request_count = len(stub.requests)
 
-    assert call_cli(
-        ["enrich", "--run-id", run_id, "--data-root", str(tmp_path)]
-    ) != 0
+    assert call_enrich_live(tmp_path, run_id) != 0
     assert len(stub.requests) == request_count
     assert (run_dir / "contacts.jsonl").read_bytes() == contacts_before
     assert (run_dir / "leads.csv").read_bytes() == leads_before
