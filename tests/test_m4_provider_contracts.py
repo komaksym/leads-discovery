@@ -99,20 +99,26 @@ def _values_for_key(value: Any, target: str) -> list[Any]:
     return found
 
 
-def test_clay_persists_routine_run_id_and_resume_get_does_not_post_again(
+def test_clay_persists_run_id_and_resume_get_does_not_post_again(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An interrupted asynchronous Clay routine resumes by GET against the same durable run."""
+    """Interrupted asynchronous Clay work resumes by GET against the same durable run."""
     run_dir = prepare_evaluated_run(
         tmp_path,
         "clay-resume",
-        [build_company(facts=accepted_facts(), name="Acme Valve", domain="acmevalve.com")],
+        [
+            build_company(
+                facts=accepted_facts(),
+                name="Acme Valve",
+                domain="acmevalve.com",
+            )
+        ],
     )
     state = {"resume": False}
 
     def clay(request: httpx.Request) -> httpx.Response:
-        """Start pending on POST; fail first-process polling; complete after simulated restart."""
+        """Start pending, simulate interruption, then complete after restart."""
         if request.method == "POST":
             return httpx.Response(
                 202,
@@ -126,7 +132,10 @@ def test_clay_persists_routine_run_id_and_resume_get_does_not_post_again(
             )
         assert request.method == "GET"
         if not state["resume"]:
-            raise httpx.ReadTimeout("simulated process interruption", request=request)
+            raise httpx.ReadTimeout(
+                "simulated process interruption",
+                request=request,
+            )
         return httpx.Response(
             200,
             json={
@@ -141,7 +150,7 @@ def test_clay_persists_routine_run_id_and_resume_get_does_not_post_again(
             },
         )
 
-    def instantly(request: httpx.Request) -> httpx.Response:
+    def instantly(_request: httpx.Request) -> httpx.Response:
         """Verify the resumed Clay email."""
         return httpx.Response(
             200,
@@ -152,7 +161,9 @@ def test_clay_persists_routine_run_id_and_resume_get_does_not_post_again(
     install_mock_http(monkeypatch, stub)
     set_m4_credentials(monkeypatch)
 
-    first = call_cli(["enrich", "--run-id", "clay-resume", "--data-root", str(tmp_path)])
+    first = call_cli(
+        ["enrich", "--run-id", "clay-resume", "--data-root", str(tmp_path)]
+    )
     assert first != 0
     checkpoint = run_dir / "contact_checkpoint.json"
     assert checkpoint.exists()
@@ -164,22 +175,29 @@ def test_clay_persists_routine_run_id_and_resume_get_does_not_post_again(
     ) == 0
 
     clay_requests = stub.for_provider("clay")
-    assert len([request for request in clay_requests if request.method == "POST"]) == 1
+    posts = [request for request in clay_requests if request.method == "POST"]
     gets = [request for request in clay_requests if request.method == "GET"]
+    assert len(posts) == 1
     assert gets
     assert "routine-123" in str(gets[-1].url)
     assert len(stub.for_provider("exa")) == 1
 
 
-def test_apollo_runs_only_after_clay_miss_with_all_privacy_flags_false_and_no_webhook(
+def test_apollo_fallback_has_all_privacy_flags_false_and_no_webhook(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Apollo fallback is bounded to work email and disables personal/phone/waterfall features."""
+    """Apollo runs after Clay miss and disables personal/phone/waterfall features."""
     run_dir = prepare_evaluated_run(
         tmp_path,
         "apollo-fallback",
-        [build_company(facts=accepted_facts(), name="Acme Valve", domain="acmevalve.com")],
+        [
+            build_company(
+                facts=accepted_facts(),
+                name="Acme Valve",
+                domain="acmevalve.com",
+            )
+        ],
     )
 
     def apollo(request: httpx.Request) -> httpx.Response:
@@ -195,7 +213,7 @@ def test_apollo_runs_only_after_clay_miss_with_all_privacy_flags_false_and_no_we
             },
         )
 
-    def instantly(request: httpx.Request) -> httpx.Response:
+    def instantly(_request: httpx.Request) -> httpx.Response:
         """Verify Apollo's existing email only."""
         return httpx.Response(
             200,
@@ -217,10 +235,19 @@ def test_apollo_runs_only_after_clay_miss_with_all_privacy_flags_false_and_no_we
         ["enrich", "--run-id", "apollo-fallback", "--data-root", str(tmp_path)]
     ) == 0
 
-    clay_indexes = [i for i, request in enumerate(stub.requests) if "clay" in request.url.host]
-    apollo_indexes = [i for i, request in enumerate(stub.requests) if "apollo" in request.url.host]
+    clay_indexes = [
+        i
+        for i, request in enumerate(stub.requests)
+        if "clay" in request.url.host
+    ]
+    apollo_indexes = [
+        i
+        for i, request in enumerate(stub.requests)
+        if "apollo" in request.url.host
+    ]
     assert clay_indexes and apollo_indexes
     assert min(apollo_indexes) > min(clay_indexes)
+
     apollo_requests = stub.for_provider("apollo")
     assert len(apollo_requests) == 1
     payload = json_body(apollo_requests[0])
@@ -230,11 +257,12 @@ def test_apollo_runs_only_after_clay_miss_with_all_privacy_flags_false_and_no_we
         "run_waterfall_email",
         "run_waterfall_phone",
     ):
-        values = _values_for_key(payload, flag)
-        assert values == [False]
+        assert _values_for_key(payload, flag) == [False]
     assert "webhook" not in json.dumps(payload, sort_keys=True).casefold()
 
-    contacts = "\n".join(row_text(row) for row in read_jsonl(run_dir / "contacts.jsonl"))
+    contacts = "\n".join(
+        row_text(row) for row in read_jsonl(run_dir / "contacts.jsonl")
+    )
     assert EMAIL in contacts
 
 
@@ -242,16 +270,22 @@ def test_unknown_inflight_apollo_outcome_is_accounted_and_never_replayed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A timeout after paid Apollo dispatch fails closed instead of risking a duplicate charge."""
+    """A timeout after Apollo dispatch fails closed instead of risking a second charge."""
     run_dir = prepare_evaluated_run(
         tmp_path,
         "apollo-unknown",
-        [build_company(facts=accepted_facts(), name="Acme Valve", domain="acmevalve.com")],
+        [
+            build_company(
+                facts=accepted_facts(),
+                name="Acme Valve",
+                domain="acmevalve.com",
+            )
+        ],
     )
     state = {"resume": False}
 
     def apollo(request: httpx.Request) -> httpx.Response:
-        """Make the first paid outcome unknowable; a replay would succeed and expose the bug."""
+        """Make the first paid outcome unknowable; replay would expose the bug."""
         if not state["resume"]:
             raise httpx.ReadTimeout("unknown paid outcome", request=request)
         return httpx.Response(
@@ -285,16 +319,22 @@ def test_unknown_inflight_apollo_outcome_is_accounted_and_never_replayed(
 
 
 @pytest.mark.parametrize("status", ["verified", "invalid"])
-def test_instantly_uses_only_verification_post_and_persists_terminal_status(
+def test_instantly_verification_post_persists_terminal_status(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     status: str,
 ) -> None:
-    """Terminal verification statuses use only the allowed POST endpoint and persist exactly."""
+    """Terminal verification uses only the allowed POST endpoint and persists its state."""
     run_dir = prepare_evaluated_run(
         tmp_path,
         f"instantly-{status}",
-        [build_company(facts=accepted_facts(), name="Acme Valve", domain="acmevalve.com")],
+        [
+            build_company(
+                facts=accepted_facts(),
+                name="Acme Valve",
+                domain="acmevalve.com",
+            )
+        ],
     )
 
     def instantly(request: httpx.Request) -> httpx.Response:
@@ -308,36 +348,53 @@ def test_instantly_uses_only_verification_post_and_persists_terminal_status(
             json={"email": EMAIL, "status": status, "credits_used": 1},
         )
 
-    stub = WireStub({"exa": _exa_one, "clay": _clay_email, "instantly": instantly})
+    stub = WireStub(
+        {"exa": _exa_one, "clay": _clay_email, "instantly": instantly}
+    )
     install_mock_http(monkeypatch, stub)
     set_m4_credentials(monkeypatch)
 
     assert call_cli(
-        ["enrich", "--run-id", f"instantly-{status}", "--data-root", str(tmp_path)]
+        [
+            "enrich",
+            "--run-id",
+            f"instantly-{status}",
+            "--data-root",
+            str(tmp_path),
+        ]
     ) == 0
 
     instant = stub.for_provider("instantly")
     assert len(instant) == 1
     assert instant[0].method == "POST"
     assert instant[0].url.path == "/api/v2/email-verification"
-    persisted = "\n".join(row_text(row).casefold() for row in read_jsonl(run_dir / "contacts.jsonl"))
+    persisted = "\n".join(
+        row_text(row).casefold()
+        for row in read_jsonl(run_dir / "contacts.jsonl")
+    )
     assert status in persisted
 
 
-def test_persisted_pending_instantly_verification_resumes_get_without_second_post(
+def test_pending_instantly_verification_resumes_get_without_second_post(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Pending verification is durable and resumes with the exact email-specific GET endpoint."""
+    """Pending verification is durable and resumes with the exact email-specific GET."""
     run_dir = prepare_evaluated_run(
         tmp_path,
         "instantly-pending",
-        [build_company(facts=accepted_facts(), name="Acme Valve", domain="acmevalve.com")],
+        [
+            build_company(
+                facts=accepted_facts(),
+                name="Acme Valve",
+                domain="acmevalve.com",
+            )
+        ],
     )
     state = {"resume": False}
 
     def instantly(request: httpx.Request) -> httpx.Response:
-        """Return pending before restart and verified from the persisted GET afterwards."""
+        """Return pending before restart and verified from the persisted GET later."""
         if request.method == "POST":
             assert request.url.path == "/api/v2/email-verification"
             return httpx.Response(
@@ -347,13 +404,18 @@ def test_persisted_pending_instantly_verification_resumes_get_without_second_pos
         assert request.method == "GET"
         assert request.url.path == f"/api/v2/email-verification/{EMAIL}"
         if not state["resume"]:
-            raise httpx.ReadTimeout("simulated interruption", request=request)
+            raise httpx.ReadTimeout(
+                "simulated interruption",
+                request=request,
+            )
         return httpx.Response(
             200,
             json={"email": EMAIL, "status": "verified", "credits_used": 0},
         )
 
-    stub = WireStub({"exa": _exa_one, "clay": _clay_email, "instantly": instantly})
+    stub = WireStub(
+        {"exa": _exa_one, "clay": _clay_email, "instantly": instantly}
+    )
     install_mock_http(monkeypatch, stub)
     set_m4_credentials(monkeypatch)
 
@@ -388,10 +450,12 @@ def test_persisted_pending_instantly_verification_resumes_get_without_second_pos
         ("apollo", -1),
         ("apollo", float("nan")),
         ("apollo", float("inf")),
+        ("apollo", float("-inf")),
         ("apollo", "one"),
         ("instantly", -1),
         ("instantly", float("nan")),
         ("instantly", float("inf")),
+        ("instantly", float("-inf")),
         ("instantly", "one"),
     ],
 )
@@ -401,26 +465,37 @@ def test_malformed_apollo_and_instantly_credit_usage_fails_closed(
     provider: str,
     bad_usage: Any,
 ) -> None:
-    """Negative, non-finite, and nonnumeric provider credit usage is never persisted as valid."""
-    run_id = f"bad-{provider}-{str(bad_usage).replace('.', '-') }"
+    """Negative, non-finite, and nonnumeric provider credit usage fails closed."""
+    suffix = str(bad_usage).replace(".", "-")
+    run_id = f"bad-{provider}-{suffix}"
     prepare_evaluated_run(
         tmp_path,
         run_id,
-        [build_company(facts=accepted_facts(), name="Acme Valve", domain="acmevalve.com")],
+        [
+            build_company(
+                facts=accepted_facts(),
+                name="Acme Valve",
+                domain="acmevalve.com",
+            )
+        ],
     )
 
-    def apollo(request: httpx.Request) -> httpx.Response:
+    def apollo(_request: httpx.Request) -> httpx.Response:
         """Return malformed Apollo usage after a normal Clay miss."""
         return httpx.Response(
             200,
             json={"credits_used": bad_usage, "person": {"email": EMAIL}},
         )
 
-    def instantly(request: httpx.Request) -> httpx.Response:
+    def instantly(_request: httpx.Request) -> httpx.Response:
         """Return malformed Instantly usage for a normal Clay email."""
         return httpx.Response(
             200,
-            json={"email": EMAIL, "status": "verified", "credits_used": bad_usage},
+            json={
+                "email": EMAIL,
+                "status": "verified",
+                "credits_used": bad_usage,
+            },
         )
 
     responders: dict[str, Any] = {"exa": _exa_one}
@@ -432,4 +507,6 @@ def test_malformed_apollo_and_instantly_credit_usage_fails_closed(
     install_mock_http(monkeypatch, stub)
     set_m4_credentials(monkeypatch)
 
-    assert call_cli(["enrich", "--run-id", run_id, "--data-root", str(tmp_path)]) != 0
+    assert call_cli(
+        ["enrich", "--run-id", run_id, "--data-root", str(tmp_path)]
+    ) != 0
