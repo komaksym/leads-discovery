@@ -686,9 +686,10 @@ def _load_runtime_state(
     operations = _operations(checkpoint)
     contacts = _load_contacts(paths.contacts)
     _validate_operation_references(operations, contacts)
-    _validate_provider_prerequisites(operations, contacts)
     events = load_usage_events(paths.usage_events)
     _validate_checkpoint_consistency(checkpoint, operations, events)
+    if checkpoint.status != "paused_unknown":
+        _validate_provider_prerequisites(operations, contacts)
     return paths, accepted, checkpoint, operations, contacts, events
 
 
