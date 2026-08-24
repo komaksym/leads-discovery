@@ -1,0 +1,73 @@
+name: Generate lead contacts
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: Existing M3 run ID
+        required: true
+        type: string
+      exa_people_budget_usd:
+        description: Exa People Search USD ceiling
+        required: true
+        default: "1.00"
+        type: string
+      clay_max_contacts:
+        description: Maximum Clay contacts
+        required: true
+        default: "10"
+        type: string
+      apollo_credit_cap:
+        description: Apollo credit ceiling
+        required: true
+        default: "5"
+        type: string
+      instantly_verification_call_cap:
+        description: Instantly verification API-call ceiling
+        required: true
+        default: "5"
+        type: string
+
+jobs:
+  enrich:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install package
+        run: python -m pip install -e .
+      - name: Run explicit live M4 enrichment
+        env:
+          EXA_API_KEY: ${{ secrets.EXA_API_KEY }}
+          CLAY_PUBLIC_API_KEY: ${{ secrets.CLAY_PUBLIC_API_KEY }}
+          CLAY_CONTACT_ROUTINE_ID: ${{ secrets.CLAY_CONTACT_ROUTINE_ID }}
+          APOLLO_API_KEY: ${{ secrets.APOLLO_API_KEY }}
+          INSTANTLY_API_KEY: ${{ secrets.INSTANTLY_API_KEY }}
+        run: |
+          python -m leads_discovery enrich \
+            --run-id "${{ inputs.run_id }}" \
+            --exa-people-budget-usd "${{ inputs.exa_people_budget_usd }}" \
+            --clay-max-contacts "${{ inputs.clay_max_contacts }}" \
+            --apollo-credit-cap "${{ inputs.apollo_credit_cap }}" \
+            --instantly-verification-call-cap "${{ inputs.instantly_verification_call_cap }}" \
+            --execute-live
+      - name: Upload private M4 review artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lead-contacts-${{ inputs.run_id }}
+          retention-days: 3
+          if-no-files-found: warn
+          path: |
+            data/${{ inputs.run_id }}/contacts.jsonl
+            data/${{ inputs.run_id }}/leads.csv
+            data/${{ inputs.run_id }}/contact_usage_events.jsonl
+            data/${{ inputs.run_id }}/contact_usage.json
+            data/${{ inputs.run_id }}/contact_checkpoint.json
