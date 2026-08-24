@@ -538,23 +538,34 @@ def _clay_submitted(events: list[UsageEvent]) -> int:
     return total
 
 
+def _usage_payload(events: list[UsageEvent]) -> dict[str, Any]:
+    """Build the deterministic derived M4 usage summary from authoritative events."""
+    apollo, instantly_calls, instantly_credits = _quota_totals(events)
+    return {
+        **CostTracker(events).summary(),
+        "quotas": {
+            "clay_submitted_contacts": _clay_submitted(events),
+            "apollo_credits": round(apollo, 10),
+            "instantly_calls": instantly_calls,
+            "instantly_credits": round(instantly_credits, 10),
+        },
+    }
+
+
 def _publish_usage(paths: _Paths) -> None:
     """Rebuild the M4 usage summary from its separate append-only usage ledger."""
-    events = load_usage_events(paths.usage_events)
-    apollo, instantly_calls, instantly_credits = _quota_totals(events)
-    summary = CostTracker(events).summary()
-    write_json_atomic(
-        paths.usage,
-        {
-            **summary,
-            "quotas": {
-                "clay_submitted_contacts": _clay_submitted(events),
-                "apollo_credits": round(apollo, 10),
-                "instantly_calls": instantly_calls,
-                "instantly_credits": round(instantly_credits, 10),
-            },
-        },
-    )
+    write_json_atomic(paths.usage, _usage_payload(load_usage_events(paths.usage_events)))
+
+
+def _repair_usage_summary(paths: _Paths, events: list[UsageEvent]) -> None:
+    """Repair only a missing or corrupted derived usage summary on completed reruns."""
+    expected = _usage_payload(events)
+    try:
+        current = read_json(paths.usage)
+    except ValueError:
+        current = None
+    if current != expected:
+        write_json_atomic(paths.usage, expected)
 
 
 def _safe_csv(value: object) -> str:
@@ -732,6 +743,7 @@ def run_contact_enrichment(
         raise ValueError("run_contact_enrichment requires explicit live execution")
     paths, accepted, checkpoint, operations, contacts, events = _load_runtime_state(config)
     if checkpoint.status == "completed":
+        _repair_usage_summary(paths, events)
         return _summary(config, paths, "completed", contacts)
     if checkpoint.status == "paused_unknown":
         return _summary(config, paths, "paused_unknown", contacts)
