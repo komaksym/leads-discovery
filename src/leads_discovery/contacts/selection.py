@@ -63,8 +63,11 @@ def normalize_profile_url(value: str | None) -> str | None:
 
 
 def _normalized_title(value: str) -> str:
-    """Normalize a title for exact keyword classification without changing persisted text."""
+    """Canonicalize title punctuation and spacing before deterministic keyword matching."""
     text = unicodedata.normalize("NFKC", value).casefold().replace("&", " and ")
+    text = text.replace(".", "")
+    text = re.sub(r"[-‐‑‒–—_/,:;|()\[\]{}]+", " ", text)
+    text = re.sub(r"[^\w\s]+", " ", text)
     return " ".join(text.split())
 
 
