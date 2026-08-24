@@ -6,6 +6,7 @@ import json
 import math
 import os
 import tempfile
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any, cast
 
@@ -134,6 +135,49 @@ def _validate_usage_event(event: UsageEvent) -> None:
         raise ValueError("usage metadata must be an object")
     if not isinstance(event.recorded_at, str) or not event.recorded_at:
         raise ValueError("usage recorded_at must be a nonempty string")
+
+
+def write_text_atomic(path: Path, text: str) -> None:
+    """Atomically replace one UTF-8 text artifact without following symlinks."""
+    _ensure_write_target(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            newline="",
+            dir=path.parent,
+            prefix=f"{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temp_path = Path(handle.name)
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        _ensure_write_target(path)
+        os.replace(temp_path, path)
+        _fsync_directory(path.parent)
+    finally:
+        if temp_path is not None and temp_path.exists():
+            temp_path.unlink()
+
+
+def write_jsonl_atomic(path: Path, payloads: Iterable[dict[str, Any]]) -> None:
+    """Atomically replace one complete JSONL artifact without following symlinks."""
+    lines = [
+        json.dumps(
+            payload,
+            sort_keys=True,
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+        )
+        for payload in payloads
+    ]
+    text = "" if not lines else "\n".join(lines) + "\n"
+    write_text_atomic(path, text)
 
 
 def write_json_atomic(path: Path, payload: dict[str, Any]) -> None:

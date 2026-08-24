@@ -20,6 +20,7 @@ ErrorKind = Literal[
     "permanent",
 ]
 FactValue = bool | int | float | str | list[str] | None
+DecisionKind = Literal["review", "rejection"]
 
 
 def _utc_now() -> str:
@@ -55,6 +56,39 @@ class EvidenceItem:
 
 
 @dataclass(slots=True)
+class DecisionReason:
+    """Explain one review or rejection decision with retained citations."""
+
+    code: str
+    kind: DecisionKind
+    explanation: str
+    confidence: float | None = None
+    evidence_ids: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        """Detach retained evidence identifiers from caller-owned collections."""
+        self.evidence_ids = deepcopy(self.evidence_ids)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert the decision reason to a defensive JSON-safe dictionary."""
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> DecisionReason:
+        """Rebuild one decision reason without aliasing persisted nested values."""
+        data = deepcopy(payload)
+        return cls(
+            code=str(data["code"]),
+            kind=cast(DecisionKind, data["kind"]),
+            explanation=str(data["explanation"]),
+            confidence=(
+                None if data.get("confidence") is None else float(data["confidence"])
+            ),
+            evidence_ids=[str(item) for item in data.get("evidence_ids", [])],
+        )
+
+
+@dataclass(slots=True)
 class CompanyRecord:
     """Store one canonical company plus provenance, evidence, and pipeline state."""
 
@@ -78,6 +112,8 @@ class CompanyRecord:
     final_decision: str | None = None
     review_reasons: list[str] = field(default_factory=list)
     rejection_reasons: list[str] = field(default_factory=list)
+    decision_reasons: list[DecisionReason] = field(default_factory=list)
+    evaluation_policy_version: str | None = None
     stage_status: dict[str, str] = field(default_factory=dict)
     created_at: str = field(default_factory=_utc_now)
     updated_at: str = field(default_factory=_utc_now)
@@ -95,6 +131,9 @@ class CompanyRecord:
         self.score_components = deepcopy(self.score_components)
         self.review_reasons = deepcopy(self.review_reasons)
         self.rejection_reasons = deepcopy(self.rejection_reasons)
+        self.decision_reasons = [
+            DecisionReason.from_dict(reason.to_dict()) for reason in self.decision_reasons
+        ]
         self.stage_status = deepcopy(self.stage_status)
 
     def to_dict(self) -> dict[str, Any]:
@@ -109,6 +148,11 @@ class CompanyRecord:
         data["evidence"] = [
             item if isinstance(item, EvidenceItem) else EvidenceItem.from_dict(item)
             for item in raw_evidence
+        ]
+        raw_reasons = data.get("decision_reasons", [])
+        data["decision_reasons"] = [
+            item if isinstance(item, DecisionReason) else DecisionReason.from_dict(item)
+            for item in raw_reasons
         ]
         return cls(**data)
 

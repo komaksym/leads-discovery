@@ -71,6 +71,18 @@ split into sub-milestones, stack layers, or separately approved implementation s
 M3 consumes persisted M2 facts and finishes all original scoring, decision, full-runner,
 output, and calibration scope; no original M1–M5 capability is dropped.
 
+M3 is also delivered as one atomic implementation because it is the final integrated module:
+
+```text
+main
+└── M3 evaluation and calibration
+```
+
+Its implementation contract is
+`docs/superpowers/specs/2026-08-23-m3-evaluation-calibration-design.md`. Internal files retain
+clear scoring, orchestration, export, and calibration boundaries, but M3 is not split into
+separately approved sub-milestones or stacked product PRs.
+
 Rules, except where a milestone-specific exception above says otherwise:
 
 1. Split a milestone into the smallest coherent dependent PRs that make review easier; each layer should have one clear purpose.
