@@ -6,11 +6,11 @@ import json
 from collections.abc import Iterable, Mapping
 from copy import deepcopy
 from pathlib import Path
-from typing import Any, TypeAlias
+from typing import Any
 
 from leads_discovery.models import CompanyRecord, EvidenceItem, FactValue, RunCheckpoint
 
-FactInput: TypeAlias = tuple[FactValue, float]
+type FactInput = tuple[FactValue, float]
 
 _FIXED_TIME = "2026-08-23T12:00:00+00:00"
 

@@ -8,11 +8,11 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from m3_factories import FactInput, accepted_facts, build_company, low_score_facts, write_run_inputs
 
-from leads_discovery.calibration import calibrate_run
+from leads_discovery.calibration import CalibrationSummary, calibrate_run
 from leads_discovery.pipeline.evaluation import EvaluationConfig, evaluate_run
 from leads_discovery.scoring import DEFAULT_POLICY
-from m3_factories import accepted_facts, build_company, low_score_facts, write_run_inputs
 
 
 def _prepare(tmp_path: Path, run_id: str, companies: list[Any]) -> Path:
@@ -31,7 +31,7 @@ def _labels(path: Path, rows: list[list[str]], header: list[str] | None = None) 
     return path
 
 
-def _calibrate(tmp_path: Path, run_id: str, labels: Path):
+def _calibrate(tmp_path: Path, run_id: str, labels: Path) -> CalibrationSummary:
     """Run the frozen local calibration API."""
     return calibrate_run(
         EvaluationConfig(run_id=run_id, data_root=tmp_path),
@@ -39,13 +39,13 @@ def _calibrate(tmp_path: Path, run_id: str, labels: Path):
     )
 
 
-def _decision_facts(decision: str) -> dict[str, tuple[object, float]]:
+def _decision_facts(decision: str) -> dict[str, FactInput]:
     """Build a fact set for accepted or uncertain matrix fixtures."""
     if decision == "accepted":
-        return accepted_facts()  # type: ignore[return-value]
+        return accepted_facts()
     facts = accepted_facts()
     facts["pvf_relevant"] = (True, .70)
-    return facts  # type: ignore[return-value]
+    return facts
 
 
 def _find_matrix(value: object) -> dict[str, Any]:
