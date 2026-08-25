@@ -1,4 +1,4 @@
-"""Top-level M3 CLI composing paid M2 work with zero-cost local operations."""
+"""Top-level CLI for M2/M3 company evaluation and explicit M4 contact enrichment."""
 
 from __future__ import annotations
 
@@ -33,7 +33,7 @@ class _ArgumentParser(argparse.ArgumentParser):
 
 
 def _parser() -> argparse.ArgumentParser:
-    """Build the exact run, score, and calibrate command surface."""
+    """Build the run, score, calibrate, and explicit enrich command surface."""
     parser = _ArgumentParser(prog="python -m leads_discovery")
     commands = parser.add_subparsers(dest="command", required=True)
 
@@ -57,6 +57,17 @@ def _parser() -> argparse.ArgumentParser:
     calibrate.add_argument("--run-id", required=True)
     calibrate.add_argument("--labels", type=Path, required=True)
     calibrate.add_argument("--data-root", type=Path, default=Path("data"))
+
+    enrich = commands.add_parser("enrich")
+    enrich.add_argument("--run-id", required=True)
+    enrich.add_argument("--data-root", type=Path, default=Path("data"))
+    enrich.add_argument("--max-contacts-per-company", type=int, default=3)
+    enrich.add_argument("--max-paid-contacts-per-company", type=int, default=2)
+    enrich.add_argument("--exa-people-budget-usd", type=float)
+    enrich.add_argument("--clay-max-contacts", type=int, default=10)
+    enrich.add_argument("--apollo-credit-cap", type=float, default=5.0)
+    enrich.add_argument("--instantly-verification-call-cap", type=int, default=5)
+    enrich.add_argument("--execute-live", action="store_true")
     return parser
 
 
@@ -79,10 +90,16 @@ def _validate_number(name: str, value: object, *, maximum: float | None = None) 
     return float(value)
 
 
-def _validate_run_inputs(args: argparse.Namespace) -> None:
-    """Validate dry/live run controls without importing provider modules or reading credentials."""
-    if not isinstance(args.run_id, str) or not _RUN_ID.fullmatch(args.run_id):
+def _validate_run_id(run_id: object) -> str:
+    """Validate and return one safe run identifier."""
+    if not isinstance(run_id, str) or not _RUN_ID.fullmatch(run_id):
         raise ValueError("run_id must match [A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+    return run_id
+
+
+def _validate_run_inputs(args: argparse.Namespace) -> None:
+    """Validate dry/live M2/M3 run controls without provider imports or credentials."""
+    _validate_run_id(args.run_id)
     if (
         isinstance(args.max_candidates, bool)
         or not isinstance(args.max_candidates, int)
@@ -99,6 +116,39 @@ def _validate_run_inputs(args: argparse.Namespace) -> None:
     _validate_number("deepseek_budget_usd", args.deepseek_budget_usd)
     if args.exa_budget_usd is not None:
         _validate_number("exa_budget_usd", args.exa_budget_usd)
+
+
+def _validate_enrich_inputs(args: argparse.Namespace) -> None:
+    """Validate M4 scalar controls without filesystem, environment, or provider access."""
+    _validate_run_id(args.run_id)
+    if (
+        isinstance(args.max_contacts_per_company, bool)
+        or not isinstance(args.max_contacts_per_company, int)
+        or not 1 <= args.max_contacts_per_company <= 3
+    ):
+        raise ValueError("max_contacts_per_company must be an integer in 1..3")
+    if (
+        isinstance(args.max_paid_contacts_per_company, bool)
+        or not isinstance(args.max_paid_contacts_per_company, int)
+        or not 0 <= args.max_paid_contacts_per_company <= 2
+        or args.max_paid_contacts_per_company > args.max_contacts_per_company
+    ):
+        raise ValueError("max_paid_contacts_per_company must be in 0..2 and <= max contacts")
+    if (
+        isinstance(args.clay_max_contacts, bool)
+        or not isinstance(args.clay_max_contacts, int)
+        or args.clay_max_contacts < 0
+    ):
+        raise ValueError("clay_max_contacts must be a nonnegative integer")
+    if (
+        isinstance(args.instantly_verification_call_cap, bool)
+        or not isinstance(args.instantly_verification_call_cap, int)
+        or args.instantly_verification_call_cap < 0
+    ):
+        raise ValueError("instantly_verification_call_cap must be a nonnegative integer")
+    _validate_number("apollo_credit_cap", args.apollo_credit_cap)
+    if args.exa_people_budget_usd is not None:
+        _validate_number("exa_people_budget_usd", args.exa_people_budget_usd)
 
 
 def _evaluation_json(summary: EvaluationSummary) -> dict[str, Any]:
@@ -151,7 +201,7 @@ def _mark_m3_completed(path: Path, checkpoint: RunCheckpoint) -> RunCheckpoint:
 
 
 def _run_dry(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
-    """Return an authorized dry-run summary without filesystem, credentials, or provider imports."""
+    """Return an M2/M3 dry-run summary without filesystem, credentials, or provider imports."""
     _validate_run_inputs(args)
     return (
         {
@@ -264,6 +314,108 @@ def _run_live(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
     return payload, 0 if checkpoint.status == "completed" else 1
 
 
+def _enrich_dry(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
+    """Return an M4 dry-run summary without reading credentials or touching run artifacts."""
+    _validate_enrich_inputs(args)
+    return (
+        {
+            "command": "enrich",
+            "run_id": args.run_id,
+            "status": "dry_run",
+            "reason": "live_execution_not_authorized",
+            "max_contacts_per_company": args.max_contacts_per_company,
+            "max_paid_contacts_per_company": args.max_paid_contacts_per_company,
+            "clay_max_contacts": args.clay_max_contacts,
+            "apollo_credit_cap": args.apollo_credit_cap,
+            "instantly_verification_call_cap": args.instantly_verification_call_cap,
+        },
+        0,
+    )
+
+
+def _enrich_live(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
+    """Preflight durable state before constructing any explicitly authorized live provider."""
+    _validate_enrich_inputs(args)
+    if args.exa_people_budget_usd is None:
+        raise ValueError("live enrichment requires an explicit Exa People budget")
+
+    from leads_discovery.pipeline.contact_enrichment import (
+        ContactEnrichmentConfig,
+        run_contact_enrichment,
+        validate_contact_enrichment_state,
+    )
+
+    config = ContactEnrichmentConfig(
+        run_id=args.run_id,
+        data_root=args.data_root,
+        max_contacts_per_company=args.max_contacts_per_company,
+        max_paid_contacts_per_company=args.max_paid_contacts_per_company,
+        exa_people_budget_usd=args.exa_people_budget_usd,
+        clay_max_contacts=args.clay_max_contacts,
+        apollo_credit_cap=args.apollo_credit_cap,
+        instantly_verification_call_cap=args.instantly_verification_call_cap,
+        execute_live=True,
+    )
+    validate_contact_enrichment_state(config)
+
+    import os
+
+    import httpx
+
+    from leads_discovery.contacts.providers import (
+        ApolloContactProvider,
+        ClayContactProvider,
+        ExaPeopleProvider,
+        InstantlyVerificationProvider,
+    )
+
+    names = (
+        "EXA_API_KEY",
+        "CLAY_PUBLIC_API_KEY",
+        "CLAY_CONTACT_ROUTINE_ID",
+        "APOLLO_API_KEY",
+        "INSTANTLY_API_KEY",
+    )
+    credentials = {name: os.environ.get(name, "") for name in names}
+    if any(not credentials[name] for name in names):
+        return (
+            {
+                "command": "enrich",
+                "run_id": args.run_id,
+                "status": "failed",
+                "reason": "required_provider_credentials_missing",
+            },
+            1,
+        )
+    with httpx.Client() as client:
+        summary = run_contact_enrichment(
+            config,
+            exa=ExaPeopleProvider(api_key=credentials["EXA_API_KEY"], client=client),
+            clay=ClayContactProvider(
+                api_key=credentials["CLAY_PUBLIC_API_KEY"],
+                routine_id=credentials["CLAY_CONTACT_ROUTINE_ID"],
+                client=client,
+            ),
+            apollo=ApolloContactProvider(api_key=credentials["APOLLO_API_KEY"], client=client),
+            instantly=InstantlyVerificationProvider(
+                api_key=credentials["INSTANTLY_API_KEY"], client=client
+            ),
+        )
+    payload = {
+        "command": "enrich",
+        "run_id": summary.run_id,
+        "status": summary.status,
+        "accepted_company_count": summary.accepted_company_count,
+        "contact_count": summary.contact_count,
+        "paid_candidate_count": summary.paid_candidate_count,
+        "verified_email_count": summary.verified_email_count,
+        "artifacts": [path.name for path in summary.artifact_paths],
+    }
+    if summary.status in {"paused_budget", "paused_unknown", "paused_pending"}:
+        return payload, 2
+    return payload, 0 if summary.status == "completed" else 1
+
+
 def _score(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
     """Run local evaluation without importing provider composition code or reading credentials."""
     summary = evaluate_run(
@@ -286,11 +438,13 @@ def _calibrate(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Execute one M3 CLI command and print exactly one sanitized JSON result."""
+    """Execute one CLI command and print exactly one sanitized JSON result."""
     try:
         args = _parser().parse_args(argv)
         if args.command == "run":
             payload, code = _run_live(args) if args.execute_live else _run_dry(args)
+        elif args.command == "enrich":
+            payload, code = _enrich_live(args) if args.execute_live else _enrich_dry(args)
         elif args.command == "score":
             payload, code = _score(args)
         elif args.command == "calibrate":
