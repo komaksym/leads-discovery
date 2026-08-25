@@ -43,6 +43,7 @@ from leads_discovery.pipeline.state import (
     load_latest_company_records,
     load_usage_events,
     write_checkpoint,
+    write_json_atomic,
 )
 from leads_discovery.research import (
     DeepSeekExtractor,
@@ -112,7 +113,12 @@ class _ResearchBudgetPause(Exception):
 
 @dataclass(frozen=True, slots=True)
 class M2BatchConfig:
-    """Configure one bounded M2 run."""
+    """Configure one bounded M2 run.
+
+    ``exa_request_reservation_usd`` is the operator-supplied conservative upper bound on
+    the charge of one Exa HTTP request. Live execution requires both this reservation and
+    an explicit Exa budget so every Exa dispatch can be admitted before money is spent.
+    """
 
     run_id: str
     data_root: Path
@@ -128,20 +134,26 @@ class M2BatchConfig:
 
 @dataclass(frozen=True, slots=True)
 class M2RunPaths:
-    """Resolve the four authoritative M2 artifacts for one run."""
+    """Resolve the existing seven M2 artifacts beneath one validated run directory."""
 
     run_dir: Path
     companies_raw: Path
+    companies_deduped: Path
+    research_raw: Path
     companies_extracted: Path
     usage_events: Path
+    usage: Path
     checkpoint: Path
 
     def artifacts(self) -> tuple[Path, ...]:
-        """Return every writable M2 artifact."""
+        """Return every writable M2 artifact in deterministic order."""
         return (
             self.companies_raw,
+            self.companies_deduped,
+            self.research_raw,
             self.companies_extracted,
             self.usage_events,
+            self.usage,
             self.checkpoint,
         )
 
@@ -194,15 +206,13 @@ def resolve_m2_paths(config: M2BatchConfig) -> M2RunPaths:
     _finite_nonnegative("deepseek_budget_usd", config.deepseek_budget_usd)
     _finite_nonnegative("exa_budget_usd", config.exa_budget_usd)
     _finite_nonnegative("exa_request_reservation_usd", config.exa_request_reservation_usd)
-    if (
-        config.exa_request_reservation_usd is not None
-        and config.exa_request_reservation_usd <= 0
-    ):
-        raise ValueError("exa_request_reservation_usd must be positive when provided")
-    if config.execute_live and (
-        config.deepseek_budget_usd is None or config.deepseek_budget_usd <= 0
-    ):
-        raise ValueError("live extraction requires a positive explicit DeepSeek budget")
+    if config.execute_live:
+        if config.deepseek_budget_usd is None or config.deepseek_budget_usd <= 0:
+            raise ValueError("live extraction requires a positive explicit DeepSeek budget")
+        if config.exa_budget_usd is None or config.exa_budget_usd <= 0:
+            raise ValueError("live Exa work requires a positive explicit Exa budget")
+        if config.exa_request_reservation_usd is None or config.exa_request_reservation_usd <= 0:
+            raise ValueError("live Exa work requires a positive per-request reservation")
 
     root = config.data_root.expanduser().resolve()
     candidate = root / config.run_id
@@ -214,8 +224,11 @@ def resolve_m2_paths(config: M2BatchConfig) -> M2RunPaths:
     return M2RunPaths(
         run_dir=run_dir,
         companies_raw=run_dir / "companies_raw.jsonl",
+        companies_deduped=run_dir / "companies_deduped.jsonl",
+        research_raw=run_dir / "research_raw.jsonl",
         companies_extracted=run_dir / "companies_extracted.jsonl",
         usage_events=run_dir / "usage_events.jsonl",
+        usage=run_dir / "usage.json",
         checkpoint=run_dir / "checkpoint.json",
     )
 
@@ -356,26 +369,30 @@ def _pause(
 def _record_usage(paths: M2RunPaths, tracker: CostTracker, event: UsageEvent) -> None:
     append_usage_event(paths.usage_events, event)
     tracker.record(event)
+    write_json_atomic(paths.usage, cast(dict[str, Any], tracker.summary()))
 
 
 def _replay_usage(paths: M2RunPaths) -> CostTracker:
-    return CostTracker(load_usage_events(paths.usage_events))
+    tracker = CostTracker(load_usage_events(paths.usage_events))
+    write_json_atomic(paths.usage, cast(dict[str, Any], tracker.summary()))
+    return tracker
 
 
 def _exa_reservation(config: M2BatchConfig) -> float:
-    if config.exa_request_reservation_usd is not None:
-        return config.exa_request_reservation_usd
-    return config.exa_budget_usd or 0.0
+    reservation = config.exa_request_reservation_usd
+    if reservation is None:
+        raise ValueError("Exa request reservation is required for live work")
+    return reservation
 
 
 def _budget_allows(
     tracker: CostTracker,
     provider: str,
     ceiling: float | None,
-    reservation: float = 0.0,
+    reservation: float,
 ) -> bool:
     if ceiling is None:
-        return True
+        return False
     spend = tracker.provider_estimated_spend(provider)
     return spend is not None and spend + reservation <= ceiling + 1e-12
 
@@ -387,6 +404,11 @@ def _load_discovery_records(path: Path) -> list[DiscoveryRecord]:
 def _append_discovery_batch(paths: M2RunPaths, records: Sequence[DiscoveryRecord]) -> None:
     for record in records:
         append_jsonl(paths.companies_raw, record.to_dict())
+
+
+def _append_research_raw(paths: M2RunPaths, rows: Sequence[dict[str, Any]]) -> None:
+    for row in rows:
+        append_jsonl(paths.research_raw, deepcopy(row))
 
 
 def _unknown_in_flight(checkpoint: RunCheckpoint) -> tuple[str, dict[str, Any]] | None:
@@ -422,27 +444,15 @@ def _provider_failure_pause(
         error_kind=exc.kind,
     )
     if exc.kind == "budget_exhausted":
-        return _pause(
-            checkpoint,
-            paths.checkpoint,
-            status="paused_budget",
-            reason=f"{provider}_budget_exhausted",
-            company_id=company_id,
-            stage=stage,
-        )
-    if exc.kind in {"authentication", "invalid_request", "invalid_response", "permanent"}:
-        return _pause(
-            checkpoint,
-            paths.checkpoint,
-            status="failed",
-            reason=f"{provider}_{exc.kind}",
-            company_id=company_id,
-            stage=stage,
-        )
+        status = "paused_budget"
+    elif exc.kind in {"authentication", "invalid_request", "invalid_response", "permanent"}:
+        status = "failed"
+    else:
+        status = "paused_retryable"
     return _pause(
         checkpoint,
         paths.checkpoint,
-        status="paused_retryable",
+        status=status,
         reason=f"{provider}_{exc.kind}",
         company_id=company_id,
         stage=stage,
@@ -503,6 +513,22 @@ def _resume_apify(
     return None
 
 
+def _pause_unknown(
+    checkpoint: RunCheckpoint,
+    paths: M2RunPaths,
+    operation_id: str,
+    entry: dict[str, Any],
+) -> RunCheckpoint:
+    return _pause(
+        checkpoint,
+        paths.checkpoint,
+        status="paused_unknown",
+        reason=f"unknown_in_flight:{operation_id}",
+        company_id=_entry_str(entry, "company_id"),
+        stage=_entry_str(entry, "operation"),
+    )
+
+
 def _run_discovery_request(
     config: M2BatchConfig,
     paths: M2RunPaths,
@@ -515,7 +541,10 @@ def _run_discovery_request(
     operation = "company_search" if request.provider == "exa" else "google_maps_search"
     reservation = _exa_reservation(config) if request.provider == "exa" else 0.0
     if request.provider == "exa" and not _budget_allows(
-        tracker, "exa", config.exa_budget_usd, reservation
+        tracker,
+        "exa",
+        config.exa_budget_usd,
+        reservation,
     ):
         return _pause(
             checkpoint,
@@ -532,48 +561,48 @@ def _run_discovery_request(
         provider=request.provider,
         operation=operation,
         request_id=request.request_id,
-        reservation_usd=reservation if reservation else None,
+        reservation_usd=reservation or None,
     )
     try:
         batch = provider.search(request)
     except DiscoveryProviderError as exc:
-        if request.provider == "apify":
-            _record_usage(paths, tracker, exc.usage_event)
-            entry = _operations(checkpoint)[operation_id]
-            run_id = _entry_str(entry, "run_id")
-            if exc.retryable and run_id is not None:
-                entry["state"] = "pending"
-                entry["error_kind"] = exc.kind
-                checkpoint.pending_company_id = None
-                checkpoint.pending_stage = None
-                _persist_checkpoint(paths.checkpoint, checkpoint)
-                return None
-            if exc.retryable:
-                return _pause(
-                    checkpoint,
-                    paths.checkpoint,
-                    status="paused_unknown",
-                    reason="apify_start_outcome_unknown",
-                    stage="discovery",
-                )
-            _finish_operation(
+        if request.provider != "apify":
+            return _provider_failure_pause(
+                provider="exa",
+                exc=exc,
+                checkpoint=checkpoint,
+                paths=paths,
+                tracker=tracker,
+                operation_id=operation_id,
+                company_id=None,
+                stage="discovery",
+            )
+        _record_usage(paths, tracker, exc.usage_event)
+        entry = _operations(checkpoint)[operation_id]
+        run_id = _entry_str(entry, "run_id")
+        if exc.retryable and run_id is not None:
+            entry["state"] = "pending"
+            entry["error_kind"] = exc.kind
+            checkpoint.pending_company_id = None
+            checkpoint.pending_stage = None
+            _persist_checkpoint(paths.checkpoint, checkpoint)
+            return None
+        if exc.retryable:
+            return _pause(
                 checkpoint,
                 paths.checkpoint,
-                operation_id,
-                state="failed",
-                error_kind=exc.kind,
+                status="paused_unknown",
+                reason="apify_start_outcome_unknown",
+                stage="discovery",
             )
-            return None
-        return _provider_failure_pause(
-            provider="exa",
-            exc=exc,
-            checkpoint=checkpoint,
-            paths=paths,
-            tracker=tracker,
-            operation_id=operation_id,
-            company_id=None,
-            stage="discovery",
+        _finish_operation(
+            checkpoint,
+            paths.checkpoint,
+            operation_id,
+            state="failed",
+            error_kind=exc.kind,
         )
+        return None
 
     for event in batch.usage_events:
         _record_usage(paths, tracker, event)
@@ -612,47 +641,39 @@ def _discovery_phase(
 
     unknown = _unknown_in_flight(checkpoint)
     if unknown is not None:
-        operation_id, entry = unknown
-        return _pause(
-            checkpoint,
-            paths.checkpoint,
-            status="paused_unknown",
-            reason=f"unknown_in_flight:{operation_id}",
-            company_id=_entry_str(entry, "company_id"),
-            stage=_entry_str(entry, "operation"),
-        )
+        return _pause_unknown(checkpoint, paths, *unknown)
 
     for request in requests:
         operation_id = f"discovery:{request.request_id}"
-        entry = _operations(checkpoint).get(operation_id)
-        if entry is not None and entry.get("state") in {"completed", "failed"}:
+        request_entry = _operations(checkpoint).get(operation_id)
+        if request_entry is not None and request_entry.get("state") in {"completed", "failed"}:
             continue
         if (
             request.provider == "apify"
-            and entry is not None
-            and entry.get("state") == "pending"
-            and isinstance(entry.get("run_id"), str)
+            and request_entry is not None
+            and request_entry.get("state") == "pending"
+            and isinstance(request_entry.get("run_id"), str)
         ):
             continue
         provider = discovery.get(request.provider)
         if provider is None:
-            if request.provider == "apify":
-                _operations(checkpoint)[operation_id] = {
-                    "provider": "apify",
-                    "operation": "google_maps_search",
-                    "request_id": request.request_id,
-                    "state": "failed",
-                    "error_kind": "unavailable",
-                }
-                _persist_checkpoint(paths.checkpoint, checkpoint)
-                continue
-            return _pause(
-                checkpoint,
-                paths.checkpoint,
-                status="failed",
-                reason="exa_provider_unavailable",
-                stage="discovery",
-            )
+            if request.provider != "apify":
+                return _pause(
+                    checkpoint,
+                    paths.checkpoint,
+                    status="failed",
+                    reason="exa_provider_unavailable",
+                    stage="discovery",
+                )
+            _operations(checkpoint)[operation_id] = {
+                "provider": "apify",
+                "operation": "google_maps_search",
+                "request_id": request.request_id,
+                "state": "failed",
+                "error_kind": "unavailable",
+            }
+            _persist_checkpoint(paths.checkpoint, checkpoint)
+            continue
         paused = _run_discovery_request(config, paths, checkpoint, request, provider, tracker)
         if paused is not None:
             return paused
@@ -677,12 +698,22 @@ def _discovery_phase(
     return None
 
 
-def _deduplicate_raw(paths: M2RunPaths, checkpoint: RunCheckpoint) -> list[CompanyRecord]:
+def _dedup_phase(paths: M2RunPaths, checkpoint: RunCheckpoint) -> list[CompanyRecord]:
+    stages = _stages(checkpoint)
+    if stages.get("deduplication") == "completed" and paths.companies_deduped.exists():
+        return sorted(
+            load_latest_company_records(paths.companies_deduped).values(),
+            key=lambda company: company.company_id,
+        )
     result = deduplicate(_load_discovery_records(paths.companies_raw))
+    if paths.companies_deduped.exists():
+        paths.companies_deduped.unlink()
+    for company in result.companies:
+        append_company_snapshot(paths.companies_deduped, company)
     checkpoint.provider_state["unresolved_record_ids"] = [
         record.record_id for record in result.unresolved_records
     ]
-    _stages(checkpoint)["deduplication"] = "completed"
+    stages["deduplication"] = "completed"
     _persist_checkpoint(paths.checkpoint, checkpoint)
     return result.companies
 
@@ -722,6 +753,7 @@ def _persist_research_progress(
         raise ValueError("research progress bundle company_id mismatch")
     for event in delta.usage_events:
         _record_usage(paths, tracker, event)
+    _append_research_raw(paths, delta.raw_records)
     cumulative_items.extend(deepcopy(delta.items))
     cumulative = build_evidence_bundle(
         company=company,
@@ -759,14 +791,7 @@ def _research_company(
     operation_id = f"research:{company.company_id}"
     entry = _operations(checkpoint).get(operation_id)
     if entry is not None and entry.get("state") == "in_flight":
-        return _pause(
-            checkpoint,
-            paths.checkpoint,
-            status="paused_unknown",
-            reason=f"unknown_in_flight:{operation_id}",
-            company_id=company.company_id,
-            stage="company_research",
-        )
+        return _pause_unknown(checkpoint, paths, operation_id, entry)
 
     requests = build_research_requests(company)
     completed_queries = _successful_calls(entry, len(requests))
@@ -787,7 +812,7 @@ def _research_company(
         provider="exa",
         operation="company_research",
         company_id=company.company_id,
-        reservation_usd=reservation if reservation else None,
+        reservation_usd=reservation,
         successful_calls=completed_queries,
     )
     cumulative_items: list[Any] = deepcopy(company.evidence)
@@ -860,14 +885,8 @@ def _extract_company(
     operation_id = f"extraction:{company.company_id}"
     entry = _operations(checkpoint).get(operation_id)
     if entry is not None and entry.get("state") == "in_flight":
-        return _pause(
-            checkpoint,
-            paths.checkpoint,
-            status="paused_unknown",
-            reason=f"unknown_in_flight:{operation_id}",
-            company_id=company.company_id,
-            stage="structured_extraction",
-        )
+        return _pause_unknown(checkpoint, paths, operation_id, entry)
+
     reservation = extractor.reservation_cost_usd(company, bundle)
     if (
         isinstance(reservation, bool)
@@ -877,7 +896,10 @@ def _extract_company(
     ):
         raise ValueError("DeepSeek reservation must be a finite nonnegative number")
     if not _budget_allows(
-        tracker, "deepseek", config.deepseek_budget_usd, float(reservation)
+        tracker,
+        "deepseek",
+        config.deepseek_budget_usd,
+        float(reservation),
     ):
         return _pause(
             checkpoint,
@@ -943,7 +965,12 @@ def _research_and_extract_phase(
             )
         else:
             research = _research_company(
-                config, paths, checkpoint, company, researcher, tracker
+                config,
+                paths,
+                checkpoint,
+                company,
+                researcher,
+                tracker,
             )
             if isinstance(research, RunCheckpoint):
                 return research
@@ -958,7 +985,13 @@ def _research_and_extract_phase(
             return checkpoint
 
         extraction = _extract_company(
-            config, paths, checkpoint, company, bundle, extractor, tracker
+            config,
+            paths,
+            checkpoint,
+            company,
+            bundle,
+            extractor,
+            tracker,
         )
         if isinstance(extraction, RunCheckpoint):
             return extraction
@@ -998,24 +1031,22 @@ def run_m2_batch(
     _persist_checkpoint(paths.checkpoint, checkpoint)
     unknown = _unknown_in_flight(checkpoint)
     if unknown is not None and unknown[1].get("provider") != "apify":
-        operation_id, entry = unknown
-        return _pause(
-            checkpoint,
-            paths.checkpoint,
-            status="paused_unknown",
-            reason=f"unknown_in_flight:{operation_id}",
-            company_id=_entry_str(entry, "company_id"),
-            stage=_entry_str(entry, "operation"),
-        )
+        return _pause_unknown(checkpoint, paths, *unknown)
 
     if _stages(checkpoint).get("discovery") != "completed":
         paused = _discovery_phase(config, paths, checkpoint, discovery, tracker)
         if paused is not None:
             return paused
 
-    companies = _deduplicate_raw(paths, checkpoint)
+    companies = _dedup_phase(paths, checkpoint)
     paused = _research_and_extract_phase(
-        config, paths, checkpoint, companies, researcher, extractor, tracker
+        config,
+        paths,
+        checkpoint,
+        companies,
+        researcher,
+        extractor,
+        tracker,
     )
     if paused is not None:
         return paused
