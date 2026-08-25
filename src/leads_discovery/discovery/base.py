@@ -234,10 +234,10 @@ def safe_transport_call(
     operation: str,
     request_count: int,
 ) -> httpx.Response:
-    """Run one injected-client call, precheck declared size, and sanitize transport failures."""
+    """Run one injected-client call and distinguish pre-dispatch-safe from ambiguous failures."""
     try:
         response = cast(httpx.Response, call())
-    except httpx.HTTPError:
+    except (httpx.ConnectError, httpx.ConnectTimeout):
         raise provider_error(
             provider=provider,
             request_id=request_id,
@@ -245,6 +245,17 @@ def safe_transport_call(
             request_count=request_count,
             kind="transient",
             retryable=True,
+            metadata={"request_id": request_id, "safe_to_retry": True},
+        ) from None
+    except httpx.HTTPError:
+        raise provider_error(
+            provider=provider,
+            request_id=request_id,
+            operation=operation,
+            request_count=request_count,
+            kind="transient",
+            retryable=False,
+            metadata={"request_id": request_id, "outcome_unknown": True},
         ) from None
     raw_length = response.headers.get("content-length")
     if raw_length is not None:
