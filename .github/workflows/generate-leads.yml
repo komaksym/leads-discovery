@@ -56,6 +56,7 @@ jobs:
           LEADS_MAX_HTTP_RESPONSE_BYTES: "1048576"
           LEADS_MAX_RECORD_BYTES: "131072"
           LEADS_MAX_FILE_BYTES: "4194304"
+          LEADS_MAX_RUN_BYTES: "8388608"
           LEADS_MAX_RECORDS: "500"
         shell: bash
         run: |
