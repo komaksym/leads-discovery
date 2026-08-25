@@ -177,7 +177,7 @@ def test_contract_4_apify_exposes_run_id_before_polling_and_resumes_it() -> None
         """Serve only the persisted run and its existing dataset."""
         resume_calls.append(req.method)
         assert req.method == "GET", "restart must not create a replacement Actor run"
-        if req.url.path.endswith("/runs/run-123"):
+        if "actor-runs" in req.url.path:
             return httpx.Response(
                 200,
                 json={
