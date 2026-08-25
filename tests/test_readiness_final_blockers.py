@@ -193,9 +193,11 @@ def test_exa_provider_enforces_chunk_limit_while_streaming(
     def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, stream=stream)
 
-    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
-        with pytest.raises(DiscoveryProviderError) as captured:
-            ExaDiscoveryProvider(api_key="test", client=client).search(_exa_request())
+    with (
+        httpx.Client(transport=httpx.MockTransport(handler)) as client,
+        pytest.raises(DiscoveryProviderError) as captured,
+    ):
+        ExaDiscoveryProvider(api_key="test", client=client).search(_exa_request())
 
     assert captured.value.kind == "invalid_response"
     assert stream.read_chunks == 2
