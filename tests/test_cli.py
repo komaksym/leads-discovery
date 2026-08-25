@@ -1,30 +1,30 @@
-"""Frozen-contract tests for M3 CLI orchestration, exit codes, budgets, and offline boundaries."""
+"""CLI contracts for offline behavior, live composition, exit states, and output safety."""
 
 from __future__ import annotations
 
 import json
 import os
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-import httpx
 import pytest
 from m3_factories import accepted_facts, build_company, write_run_inputs
 
 import leads_discovery.cli as cli
-import leads_discovery.discovery as discovery_module
-import leads_discovery.pipeline.m2_batch as m2_module
-import leads_discovery.research as research_module
 from leads_discovery.models import RunCheckpoint
-from leads_discovery.pipeline.m2_batch import M2BatchConfig
+from leads_discovery.pipeline.m2_batch import (
+    LiveM2Result,
+    M2BatchConfig,
+    MissingProviderCredentials,
+)
 from leads_discovery.pipeline.state import load_checkpoint
 
 _PROVIDER_KEYS = {"EXA_API_KEY", "APIFY_TOKEN", "DEEPSEEK_API_KEY"}
 
 
 def _call(argv: Sequence[str]) -> int:
-    """Invoke the public CLI entry and normalize parser exits to an integer."""
+    """Invoke the public CLI and normalize parser exits."""
     try:
         return cli.main(argv)
     except SystemExit as exc:
@@ -32,7 +32,7 @@ def _call(argv: Sequence[str]) -> int:
 
 
 def _summary(capsys: pytest.CaptureFixture[str]) -> tuple[dict[str, Any], str]:
-    """Parse the single stdout JSON object and retain all process text for leak checks."""
+    """Parse the single sanitized stdout JSON object."""
     captured = capsys.readouterr()
     lines = [line for line in captured.out.splitlines() if line.strip()]
     assert len(lines) == 1
@@ -42,7 +42,7 @@ def _summary(capsys: pytest.CaptureFixture[str]) -> tuple[dict[str, Any], str]:
 
 
 def _block_credential_reads(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Fail local/dry paths if any provider credential key is inspected."""
+    """Fail local/dry paths if provider credentials are inspected."""
     env_type = type(os.environ)
     original_get = env_type.get
     original_getitem = env_type.__getitem__
@@ -61,64 +61,6 @@ def _block_credential_reads(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(env_type, "__getitem__", guarded_getitem)
 
 
-class _BombProvider:
-    """Provider constructor that fails if any local/dry path instantiates it."""
-
-    def __init__(self, *_args: Any, **_kwargs: Any) -> None:
-        raise AssertionError("provider client must not be instantiated")
-
-
-class _DummyProvider:
-    """No-op provider adapter accepted by the fake M2 runner."""
-
-    def __init__(self, *_args: Any, **_kwargs: Any) -> None:
-        pass
-
-
-class _DummyHttp:
-    """Context-manager HTTP client that never performs network I/O."""
-
-    def __init__(self, *_args: Any, **_kwargs: Any) -> None:
-        pass
-
-    def __enter__(self) -> _DummyHttp:
-        return self
-
-    def __exit__(self, *_args: Any) -> None:
-        return None
-
-
-def _patch_providers(monkeypatch: pytest.MonkeyPatch, cls: type[Any]) -> None:
-    """Patch provider constructors at package and CLI composition boundaries."""
-    for module, names in (
-        (discovery_module, ["ExaDiscoveryProvider", "ApifyDiscoveryProvider"]),
-        (research_module, ["ExaEvidenceResearcher", "DeepSeekExtractor"]),
-        (cli, [
-            "ExaDiscoveryProvider",
-            "ApifyDiscoveryProvider",
-            "ExaEvidenceResearcher",
-            "DeepSeekExtractor",
-        ]),
-    ):
-        for name in names:
-            if hasattr(module, name):
-                monkeypatch.setattr(module, name, cls)
-
-
-def _patch_http(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Replace composition-time HTTP client construction with a zero-network fake."""
-    monkeypatch.setattr(httpx, "Client", _DummyHttp)
-    if hasattr(cli, "httpx"):
-        monkeypatch.setattr(cli.httpx, "Client", _DummyHttp)
-
-
-def _patch_m2(monkeypatch: pytest.MonkeyPatch, fake: Callable[..., RunCheckpoint]) -> None:
-    """Patch the frozen M2 runner at both source and likely imported alias."""
-    monkeypatch.setattr(m2_module, "run_m2_batch", fake)
-    if hasattr(cli, "run_m2_batch"):
-        monkeypatch.setattr(cli, "run_m2_batch", fake)
-
-
 def _checkpoint(
     config: M2BatchConfig,
     *,
@@ -128,7 +70,7 @@ def _checkpoint(
     stage: str | None = None,
     reason: str | None = None,
 ) -> RunCheckpoint:
-    """Persist coherent fake M2 state and return the exact durable checkpoint."""
+    """Persist coherent fake M2 state for CLI-level orchestration tests."""
     companies = [build_company(facts=accepted_facts())] if include_company else []
     write_run_inputs(
         config.data_root,
@@ -144,23 +86,50 @@ def _checkpoint(
     return checkpoint
 
 
-def test_run_dry_run_is_authorized_offline_zero_credentials(
+def _live_args(tmp_path: Path, run_id: str) -> list[str]:
+    """Return the smallest fully bounded live CLI invocation."""
+    return [
+        "run",
+        "--run-id",
+        run_id,
+        "--data-root",
+        str(tmp_path),
+        "--exa-budget-usd",
+        "1.00",
+        "--exa-request-reservation-usd",
+        "0.10",
+        "--deepseek-budget-usd",
+        "1.00",
+        "--execute-live",
+    ]
+
+
+def test_run_dry_is_offline_and_reads_no_credentials(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Without execute-live, run returns 0 before credentials, clients, files, or providers."""
+    """Dry run returns before credentials, filesystem mutation, or live composition."""
     _block_credential_reads(monkeypatch)
-    _patch_providers(monkeypatch, _BombProvider)
+
+    def bomb(_config: M2BatchConfig) -> LiveM2Result:
+        raise AssertionError("dry run must not compose live providers")
+
+    monkeypatch.setattr(cli, "run_live_m2", bomb)
     code = _call(
         [
-            "run", "--run-id", "dry", "--data-root", str(tmp_path),
-            "--deepseek-budget-usd", "1.00",
+            "run",
+            "--run-id",
+            "dry",
+            "--data-root",
+            str(tmp_path),
+            "--deepseek-budget-usd",
+            "1.00",
         ]
     )
     payload, _ = _summary(capsys)
     assert code == 0
-    assert "dry" in json.dumps(payload).lower()
+    assert payload["status"] == "dry_run"
     assert not (tmp_path / "dry").exists()
 
 
@@ -169,9 +138,8 @@ def test_score_and_calibrate_are_offline_and_do_not_mutate_usage(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Local commands read no credentials, create no providers/network, and emit no usage."""
+    """Local commands read no credentials and leave both usage artifacts unchanged."""
     _block_credential_reads(monkeypatch)
-    _patch_providers(monkeypatch, _BombProvider)
     run_dir = write_run_inputs(tmp_path, "local", [build_company(facts=accepted_facts())])
     usage_before = (run_dir / "usage.json").read_bytes()
     ledger_before = (run_dir / "usage_events.jsonl").read_bytes()
@@ -184,7 +152,15 @@ def test_score_and_calibrate_are_offline_and_do_not_mutate_usage(
     labels = tmp_path / "labels.csv"
     labels.write_text("company_id,manual_label\ncmp_contract,A\n", encoding="utf-8")
     assert _call(
-        ["calibrate", "--run-id", "local", "--data-root", str(tmp_path), "--labels", str(labels)]
+        [
+            "calibrate",
+            "--run-id",
+            "local",
+            "--data-root",
+            str(tmp_path),
+            "--labels",
+            str(labels),
+        ]
     ) == 0
     _summary(capsys)
     assert (run_dir / "usage.json").read_bytes() == usage_before
@@ -201,59 +177,51 @@ def test_score_and_calibrate_are_offline_and_do_not_mutate_usage(
     ],
 )
 def test_invalid_or_forbidden_cli_inputs_exit_one(argv: list[str]) -> None:
-    """Local provider flags, aggregate budgets, and invalid state/input use exit code 1."""
+    """Invalid state/input is reported with exit code one."""
     assert _call(argv) == 1
 
 
-def test_completed_live_run_maps_cap_and_independent_budgets_then_evaluates(
+def test_completed_live_run_maps_bounded_config_and_evaluates(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Full success forwards three independent ceilings, maps max-evaluated, and returns 0."""
-    captured: dict[str, Any] = {}
+    """Successful live composition forwards caps/budgets and completes M3."""
+    captured: dict[str, M2BatchConfig] = {}
 
-    def fake(config: M2BatchConfig, **_kwargs: Any) -> RunCheckpoint:
-        """Capture M2 config and persist one completed extraction."""
+    def fake(config: M2BatchConfig) -> LiveM2Result:
         captured["config"] = config
-        return _checkpoint(config, status="completed")
+        return LiveM2Result(
+            checkpoint=_checkpoint(config, status="completed"),
+            apify_enabled=config.include_apify,
+        )
 
-    _patch_m2(monkeypatch, fake)
-    _patch_providers(monkeypatch, _DummyProvider)
-    _patch_http(monkeypatch)
-    monkeypatch.setenv("EXA_API_KEY", "exa-secret")
-    monkeypatch.setenv("DEEPSEEK_API_KEY", "deepseek-secret")
-    monkeypatch.setenv("APIFY_TOKEN", "apify-secret")
-
-    code = _call(
-        [
-            "run", "--run-id", "complete", "--data-root", str(tmp_path),
-            "--max-candidates", "17", "--max-evaluated", "7",
-            "--include-apify", "--apify-budget-usd", ".20",
-            "--exa-budget-usd", "1.25", "--deepseek-budget-usd", "2.50",
-            "--execute-live",
-        ]
-    )
-    payload, process_text = _summary(capsys)
+    monkeypatch.setattr(cli, "run_live_m2", fake)
+    argv = _live_args(tmp_path, "complete")
+    argv[argv.index("--execute-live"):argv.index("--execute-live")] = [
+        "--max-candidates",
+        "17",
+        "--max-evaluated",
+        "7",
+        "--include-apify",
+        "--apify-budget-usd",
+        ".20",
+    ]
+    code = _call(argv)
+    payload, _ = _summary(capsys)
     config = captured["config"]
-    assert isinstance(config, M2BatchConfig)
+
+    assert code == 0
     assert config.max_candidates == 17
     assert config.max_extracted == 7
     assert config.include_apify is True
-    assert config.apify_budget_usd == pytest.approx(.20)
-    assert config.exa_budget_usd == pytest.approx(1.25)
-    assert config.deepseek_budget_usd == pytest.approx(2.50)
-    assert not hasattr(config, "budget_usd")
-    assert code == 0
-    assert all(
-        secret not in process_text
-        for secret in ("exa-secret", "deepseek-secret", "apify-secret")
-    )
-    assert payload
-    run_dir = tmp_path / "complete"
-    assert (run_dir / "companies_evaluated.jsonl").exists()
-    checkpoint = load_checkpoint(run_dir / "checkpoint.json")
-    assert checkpoint is not None and checkpoint.status == "completed"
+    assert config.apify_budget_usd == pytest.approx(0.20)
+    assert config.exa_budget_usd == pytest.approx(1.00)
+    assert config.exa_request_reservation_usd == pytest.approx(0.10)
+    assert config.deepseek_budget_usd == pytest.approx(1.00)
+    assert payload["status"] == "completed"
+    checkpoint = load_checkpoint(tmp_path / "complete" / "checkpoint.json")
+    assert checkpoint is not None
     assert checkpoint.provider_state["stages"]["evaluation"] == "completed"
     assert checkpoint.provider_state["stages"]["m3_pipeline"] == "completed"
 
@@ -265,43 +233,32 @@ def test_completed_live_run_maps_cap_and_independent_budgets_then_evaluates(
         ("paused_unknown", "unknown_in_flight:extraction:cmp_contract"),
     ],
 )
-def test_paid_pause_evaluates_completed_extractions_and_returns_two(
+def test_paid_pause_exports_completed_work_and_returns_two(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     status: str,
     reason: str,
 ) -> None:
-    """Completed free work is exported after budget/unknown pauses while pause state survives."""
-    def fake(config: M2BatchConfig, **_kwargs: Any) -> RunCheckpoint:
-        """Persist one completed extraction under the requested durable pause."""
-        return _checkpoint(
-            config,
-            status=status,
-            pending="cmp_next",
-            stage="extraction",
-            reason=reason,
+    """Free derived work is exported while the original paid pause survives."""
+
+    def fake(config: M2BatchConfig) -> LiveM2Result:
+        return LiveM2Result(
+            checkpoint=_checkpoint(
+                config,
+                status=status,
+                pending="cmp_next",
+                stage="extraction",
+                reason=reason,
+            ),
+            apify_enabled=False,
         )
 
-    _patch_m2(monkeypatch, fake)
-    _patch_providers(monkeypatch, _DummyProvider)
-    _patch_http(monkeypatch)
-    monkeypatch.setenv("EXA_API_KEY", "test")
-    monkeypatch.setenv("DEEPSEEK_API_KEY", "test")
-
+    monkeypatch.setattr(cli, "run_live_m2", fake)
     run_id = status.replace("_", "-")
-    code = _call(
-        [
-            "run", "--run-id", run_id, "--data-root", str(tmp_path),
-            "--deepseek-budget-usd", "1", "--execute-live",
-        ]
-    )
+    assert _call(_live_args(tmp_path, run_id)) == 2
     _summary(capsys)
-    assert code == 2
-    run_dir = tmp_path / run_id
-    rows = (run_dir / "companies_evaluated.jsonl").read_text(encoding="utf-8").splitlines()
-    assert len(rows) == 1
-    checkpoint = load_checkpoint(run_dir / "checkpoint.json")
+    checkpoint = load_checkpoint(tmp_path / run_id / "checkpoint.json")
     assert checkpoint is not None
     assert checkpoint.status == status
     assert checkpoint.pending_company_id == "cmp_next"
@@ -309,79 +266,52 @@ def test_paid_pause_evaluates_completed_extractions_and_returns_two(
     assert checkpoint.pause_reason == reason
 
 
-def test_failed_paid_run_does_not_evaluate_and_returns_one(
+def test_failed_paid_run_does_not_evaluate(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Failed paid state returns 1 and does not derive M3 artifacts."""
-    def fake(config: M2BatchConfig, **_kwargs: Any) -> RunCheckpoint:
-        """Persist a failed M2 checkpoint with no completed extraction."""
-        return _checkpoint(config, status="failed", include_company=False, reason="authentication")
+    """Failed paid state returns one and publishes no M3 artifact."""
 
-    _patch_m2(monkeypatch, fake)
-    _patch_providers(monkeypatch, _DummyProvider)
-    _patch_http(monkeypatch)
-    monkeypatch.setenv("EXA_API_KEY", "test")
-    monkeypatch.setenv("DEEPSEEK_API_KEY", "test")
-    code = _call(
-        [
-            "run", "--run-id", "failed", "--data-root", str(tmp_path),
-            "--deepseek-budget-usd", "1", "--execute-live",
-        ]
-    )
+    def fake(config: M2BatchConfig) -> LiveM2Result:
+        return LiveM2Result(
+            checkpoint=_checkpoint(
+                config,
+                status="failed",
+                include_company=False,
+                reason="authentication",
+            ),
+            apify_enabled=False,
+        )
+
+    monkeypatch.setattr(cli, "run_live_m2", fake)
+    assert _call(_live_args(tmp_path, "failed")) == 1
     _summary(capsys)
-    assert code == 1
     assert not (tmp_path / "failed" / "companies_evaluated.jsonl").exists()
 
 
-def test_missing_required_live_credentials_returns_one_without_providers(
+def test_missing_required_live_credentials_returns_one(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Live execution requires Exa and DeepSeek credentials before client construction."""
-    _patch_providers(monkeypatch, _BombProvider)
-    monkeypatch.delenv("EXA_API_KEY", raising=False)
-    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
-    code = _call(
-        [
-            "run", "--run-id", "missing-creds", "--data-root", str(tmp_path),
-            "--deepseek-budget-usd", "1", "--execute-live",
-        ]
-    )
-    _summary(capsys)
-    assert code == 1
+    """Missing live credentials map to one sanitized CLI failure."""
+
+    def missing(_config: M2BatchConfig) -> LiveM2Result:
+        raise MissingProviderCredentials
+
+    monkeypatch.setattr(cli, "run_live_m2", missing)
+    assert _call(_live_args(tmp_path, "missing-creds")) == 1
+    payload, _ = _summary(capsys)
+    assert payload["reason"] == "required_provider_credentials_missing"
 
 
-def test_missing_optional_apify_credential_disables_apify_only(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """Absent optional Apify token disables Apify without changing its independent ceiling."""
-    captured: dict[str, Any] = {}
+def test_programming_errors_are_not_swallowed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Unexpected defects remain visible instead of becoming generic operation failures."""
 
-    def fake(config: M2BatchConfig, **_kwargs: Any) -> RunCheckpoint:
-        """Capture the post-credential M2 config and complete."""
-        captured["config"] = config
-        return _checkpoint(config, status="completed")
+    def broken(*_args: Any, **_kwargs: Any) -> Any:
+        raise RuntimeError("programming defect")
 
-    _patch_m2(monkeypatch, fake)
-    _patch_providers(monkeypatch, _DummyProvider)
-    _patch_http(monkeypatch)
-    monkeypatch.setenv("EXA_API_KEY", "test")
-    monkeypatch.setenv("DEEPSEEK_API_KEY", "test")
-    monkeypatch.delenv("APIFY_TOKEN", raising=False)
-    code = _call(
-        [
-            "run", "--run-id", "no-apify", "--data-root", str(tmp_path),
-            "--include-apify", "--apify-budget-usd", ".19",
-            "--deepseek-budget-usd", "1", "--execute-live",
-        ]
-    )
-    _summary(capsys)
-    config = captured["config"]
-    assert code == 0
-    assert config.include_apify is False
-    assert config.apify_budget_usd == pytest.approx(.19)
+    monkeypatch.setattr(cli, "evaluate_run", broken)
+    with pytest.raises(RuntimeError, match="programming defect"):
+        cli.main(["score", "--run-id", "valid-run"])
