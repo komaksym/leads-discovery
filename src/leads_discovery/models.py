@@ -43,7 +43,7 @@ class EvidenceItem:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "EvidenceItem":
+    def from_dict(cls, payload: dict[str, Any]) -> EvidenceItem:
         return cls(**deepcopy(payload))
 
 
@@ -64,7 +64,7 @@ class DecisionReason:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "DecisionReason":
+    def from_dict(cls, payload: dict[str, Any]) -> DecisionReason:
         data = deepcopy(payload)
         return cls(
             code=str(data["code"]),
@@ -125,7 +125,7 @@ class CompanyRecord:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "CompanyRecord":
+    def from_dict(cls, payload: dict[str, Any]) -> CompanyRecord:
         data = deepcopy(payload)
         data["evidence"] = [
             item if isinstance(item, EvidenceItem) else EvidenceItem.from_dict(item)
@@ -159,7 +159,7 @@ class UsageEvent:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "UsageEvent":
+    def from_dict(cls, payload: dict[str, Any]) -> UsageEvent:
         return cls(**deepcopy(payload))
 
 
@@ -182,7 +182,7 @@ class RunCheckpoint:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "RunCheckpoint":
+    def from_dict(cls, payload: dict[str, Any]) -> RunCheckpoint:
         return cls(**deepcopy(payload))
 
 
@@ -203,7 +203,7 @@ class DiscoveryRequest:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "DiscoveryRequest":
+    def from_dict(cls, payload: dict[str, Any]) -> DiscoveryRequest:
         data = deepcopy(payload)
         return cls(
             request_id=str(data["request_id"]),
@@ -246,7 +246,7 @@ class DiscoveryRecord:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "DiscoveryRecord":
+    def from_dict(cls, payload: dict[str, Any]) -> DiscoveryRecord:
         data = deepcopy(payload)
         return cls(
             record_id=str(data["record_id"]),
@@ -285,7 +285,7 @@ class DiscoveryBatch:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "DiscoveryBatch":
+    def from_dict(cls, payload: dict[str, Any]) -> DiscoveryBatch:
         data = deepcopy(payload)
         return cls(
             request=DiscoveryRequest.from_dict(cast(dict[str, Any], data["request"])),
@@ -309,7 +309,7 @@ class DeduplicationResult:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "DeduplicationResult":
+    def from_dict(cls, payload: dict[str, Any]) -> DeduplicationResult:
         data = deepcopy(payload)
         return cls(
             companies=[CompanyRecord.from_dict(item) for item in data.get("companies", [])],
@@ -333,7 +333,7 @@ class ResearchRequest:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "ResearchRequest":
+    def from_dict(cls, payload: dict[str, Any]) -> ResearchRequest:
         return cls(**deepcopy(payload))
 
 
@@ -355,7 +355,7 @@ class EvidenceBundle:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "EvidenceBundle":
+    def from_dict(cls, payload: dict[str, Any]) -> EvidenceBundle:
         data = deepcopy(payload)
         return cls(
             company_id=str(data["company_id"]),
@@ -381,7 +381,7 @@ class ExtractedFact:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "ExtractedFact":
+    def from_dict(cls, payload: dict[str, Any]) -> ExtractedFact:
         data = deepcopy(payload)
         return cls(
             value=cast(FactValue, data.get("value")),
@@ -407,7 +407,7 @@ class ExtractionResult:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "ExtractionResult":
+    def from_dict(cls, payload: dict[str, Any]) -> ExtractionResult:
         data = deepcopy(payload)
         raw_facts = cast(dict[str, dict[str, Any]], data.get("facts", {}))
         return cls(
