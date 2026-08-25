@@ -24,18 +24,12 @@ DecisionKind = Literal["review", "rejection"]
 
 
 def _utc_now() -> str:
-    """Return an ISO-8601 UTC timestamp suitable for persisted records."""
     return datetime.now(UTC).isoformat()
-
-
-def _copy_dict(value: dict[str, Any]) -> dict[str, Any]:
-    """Return a recursive copy of a JSON-like dictionary."""
-    return deepcopy(value)
 
 
 @dataclass(slots=True)
 class EvidenceItem:
-    """Represent one public evidence item retained for later feature extraction."""
+    """One public evidence item retained for feature extraction."""
 
     evidence_id: str
     url: str
@@ -46,18 +40,16 @@ class EvidenceItem:
     retrieved_at: str = field(default_factory=_utc_now)
 
     def to_dict(self) -> dict[str, Any]:
-        """Convert this evidence item to a defensive JSON-safe dictionary."""
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> EvidenceItem:
-        """Rebuild an evidence item from persisted JSON-safe data."""
+    def from_dict(cls, payload: dict[str, Any]) -> "EvidenceItem":
         return cls(**deepcopy(payload))
 
 
 @dataclass(slots=True)
 class DecisionReason:
-    """Explain one review or rejection decision with retained citations."""
+    """One review or rejection reason with retained citations."""
 
     code: str
     kind: DecisionKind
@@ -66,31 +58,26 @@ class DecisionReason:
     evidence_ids: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
-        """Detach retained evidence identifiers from caller-owned collections."""
         self.evidence_ids = deepcopy(self.evidence_ids)
 
     def to_dict(self) -> dict[str, Any]:
-        """Convert the decision reason to a defensive JSON-safe dictionary."""
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> DecisionReason:
-        """Rebuild one decision reason without aliasing persisted nested values."""
+    def from_dict(cls, payload: dict[str, Any]) -> "DecisionReason":
         data = deepcopy(payload)
         return cls(
             code=str(data["code"]),
             kind=cast(DecisionKind, data["kind"]),
             explanation=str(data["explanation"]),
-            confidence=(
-                None if data.get("confidence") is None else float(data["confidence"])
-            ),
+            confidence=None if data.get("confidence") is None else float(data["confidence"]),
             evidence_ids=[str(item) for item in data.get("evidence_ids", [])],
         )
 
 
 @dataclass(slots=True)
 class CompanyRecord:
-    """Store one canonical company plus provenance, evidence, and pipeline state."""
+    """Canonical company plus provenance, evidence, scoring, and stage state."""
 
     company_id: str
     name: str
@@ -119,47 +106,41 @@ class CompanyRecord:
     updated_at: str = field(default_factory=_utc_now)
 
     def __post_init__(self) -> None:
-        """Detach all mutable collection fields from caller-owned values."""
+        """Own all mutable nested values without serialization round trips."""
         self.locations_if_known = deepcopy(self.locations_if_known)
         self.discovery_sources = deepcopy(self.discovery_sources)
         self.discovery_queries = deepcopy(self.discovery_queries)
         self.discovery_records = deepcopy(self.discovery_records)
-        self.evidence = [EvidenceItem.from_dict(item.to_dict()) for item in self.evidence]
+        self.evidence = deepcopy(self.evidence)
         self.features = deepcopy(self.features)
         self.feature_confidence = deepcopy(self.feature_confidence)
         self.coverage = deepcopy(self.coverage)
         self.score_components = deepcopy(self.score_components)
         self.review_reasons = deepcopy(self.review_reasons)
         self.rejection_reasons = deepcopy(self.rejection_reasons)
-        self.decision_reasons = [
-            DecisionReason.from_dict(reason.to_dict()) for reason in self.decision_reasons
-        ]
+        self.decision_reasons = deepcopy(self.decision_reasons)
         self.stage_status = deepcopy(self.stage_status)
 
     def to_dict(self) -> dict[str, Any]:
-        """Convert the complete company record to a defensive JSON-safe dictionary."""
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> CompanyRecord:
-        """Rebuild a company record from a persisted dictionary without aliasing input data."""
+    def from_dict(cls, payload: dict[str, Any]) -> "CompanyRecord":
         data = deepcopy(payload)
-        raw_evidence = data.get("evidence", [])
         data["evidence"] = [
             item if isinstance(item, EvidenceItem) else EvidenceItem.from_dict(item)
-            for item in raw_evidence
+            for item in data.get("evidence", [])
         ]
-        raw_reasons = data.get("decision_reasons", [])
         data["decision_reasons"] = [
             item if isinstance(item, DecisionReason) else DecisionReason.from_dict(item)
-            for item in raw_reasons
+            for item in data.get("decision_reasons", [])
         ]
         return cls(**data)
 
 
 @dataclass(slots=True)
 class UsageEvent:
-    """Represent one provider usage event for cost and quota accounting."""
+    """One provider usage event for cost and quota accounting."""
 
     provider: str
     operation: str
@@ -172,22 +153,19 @@ class UsageEvent:
     recorded_at: str = field(default_factory=_utc_now)
 
     def __post_init__(self) -> None:
-        """Detach usage metadata from caller-owned nested dictionaries."""
-        self.metadata = _copy_dict(self.metadata)
+        self.metadata = deepcopy(self.metadata)
 
     def to_dict(self) -> dict[str, Any]:
-        """Convert this usage event to a defensive JSON-safe dictionary."""
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> UsageEvent:
-        """Rebuild a usage event from persisted JSON-safe data."""
+    def from_dict(cls, payload: dict[str, Any]) -> "UsageEvent":
         return cls(**deepcopy(payload))
 
 
 @dataclass(slots=True)
 class RunCheckpoint:
-    """Capture resumable run-level state and any current pause reason."""
+    """Resumable run-level state and current pause reason."""
 
     run_id: str
     status: str = "running"
@@ -198,22 +176,19 @@ class RunCheckpoint:
     updated_at: str = field(default_factory=_utc_now)
 
     def __post_init__(self) -> None:
-        """Detach persisted provider state from caller-owned nested data."""
-        self.provider_state = _copy_dict(self.provider_state)
+        self.provider_state = deepcopy(self.provider_state)
 
     def to_dict(self) -> dict[str, Any]:
-        """Convert this checkpoint to a defensive JSON-safe dictionary."""
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> RunCheckpoint:
-        """Rebuild a checkpoint from a persisted dictionary without aliasing input data."""
+    def from_dict(cls, payload: dict[str, Any]) -> "RunCheckpoint":
         return cls(**deepcopy(payload))
 
 
 @dataclass(frozen=True, slots=True)
 class DiscoveryRequest:
-    """Describe one bounded discovery operation against a supported provider."""
+    """One bounded discovery operation against a supported provider."""
 
     request_id: str
     provider: DiscoveryProviderName
@@ -225,12 +200,10 @@ class DiscoveryRequest:
     max_cost_usd: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        """Convert this request to a JSON-safe dictionary."""
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> DiscoveryRequest:
-        """Rebuild a discovery request while freezing its query collection."""
+    def from_dict(cls, payload: dict[str, Any]) -> "DiscoveryRequest":
         data = deepcopy(payload)
         return cls(
             request_id=str(data["request_id"]),
@@ -240,17 +213,13 @@ class DiscoveryRequest:
             queries=tuple(str(query) for query in data["queries"]),
             max_results_per_query=int(data["max_results_per_query"]),
             max_results_total=int(data["max_results_total"]),
-            max_cost_usd=(
-                None
-                if data.get("max_cost_usd") is None
-                else float(data["max_cost_usd"])
-            ),
+            max_cost_usd=None if data.get("max_cost_usd") is None else float(data["max_cost_usd"]),
         )
 
 
 @dataclass(slots=True)
 class DiscoveryRecord:
-    """Represent one raw provider discovery row with request provenance."""
+    """One raw provider discovery row with request provenance."""
 
     record_id: str
     provider: DiscoveryProviderName
@@ -271,16 +240,13 @@ class DiscoveryRecord:
     retrieved_at: str
 
     def __post_init__(self) -> None:
-        """Detach raw provider metadata from caller-owned nested data."""
-        self.raw_metadata = _copy_dict(self.raw_metadata)
+        self.raw_metadata = deepcopy(self.raw_metadata)
 
     def to_dict(self) -> dict[str, Any]:
-        """Convert this discovery row to a defensive JSON-safe dictionary."""
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> DiscoveryRecord:
-        """Rebuild a discovery row from persisted JSON-safe data."""
+    def from_dict(cls, payload: dict[str, Any]) -> "DiscoveryRecord":
         data = deepcopy(payload)
         return cls(
             record_id=str(data["record_id"]),
@@ -305,25 +271,21 @@ class DiscoveryRecord:
 
 @dataclass(slots=True)
 class DiscoveryBatch:
-    """Bundle one discovery request, its rows, and aggregate provider usage."""
+    """One discovery request, returned rows, and provider usage."""
 
     request: DiscoveryRequest
     records: list[DiscoveryRecord]
     usage_events: list[UsageEvent]
 
     def __post_init__(self) -> None:
-        """Detach nested request output collections from caller-owned values."""
-        self.request = DiscoveryRequest.from_dict(self.request.to_dict())
-        self.records = [DiscoveryRecord.from_dict(record.to_dict()) for record in self.records]
-        self.usage_events = [UsageEvent.from_dict(event.to_dict()) for event in self.usage_events]
+        self.records = deepcopy(self.records)
+        self.usage_events = deepcopy(self.usage_events)
 
     def to_dict(self) -> dict[str, Any]:
-        """Convert this discovery batch to a defensive JSON-safe dictionary."""
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> DiscoveryBatch:
-        """Rebuild a discovery batch from persisted JSON-safe data."""
+    def from_dict(cls, payload: dict[str, Any]) -> "DiscoveryBatch":
         data = deepcopy(payload)
         return cls(
             request=DiscoveryRequest.from_dict(cast(dict[str, Any], data["request"])),
@@ -334,25 +296,20 @@ class DiscoveryBatch:
 
 @dataclass(slots=True)
 class DeduplicationResult:
-    """Return canonical companies plus raw rows that cannot form an identity."""
+    """Canonical companies plus raw rows that cannot form an identity."""
 
     companies: list[CompanyRecord]
     unresolved_records: list[DiscoveryRecord]
 
     def __post_init__(self) -> None:
-        """Detach canonical and unresolved collections from caller-owned values."""
-        self.companies = [CompanyRecord.from_dict(company.to_dict()) for company in self.companies]
-        self.unresolved_records = [
-            DiscoveryRecord.from_dict(record.to_dict()) for record in self.unresolved_records
-        ]
+        self.companies = deepcopy(self.companies)
+        self.unresolved_records = deepcopy(self.unresolved_records)
 
     def to_dict(self) -> dict[str, Any]:
-        """Convert this result to a defensive JSON-safe dictionary."""
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> DeduplicationResult:
-        """Rebuild a deduplication result from persisted JSON-safe data."""
+    def from_dict(cls, payload: dict[str, Any]) -> "DeduplicationResult":
         data = deepcopy(payload)
         return cls(
             companies=[CompanyRecord.from_dict(item) for item in data.get("companies", [])],
@@ -364,7 +321,7 @@ class DeduplicationResult:
 
 @dataclass(frozen=True, slots=True)
 class ResearchRequest:
-    """Describe one bounded Exa evidence-research query for a company."""
+    """One bounded Exa evidence-research query for a company."""
 
     request_id: str
     company_id: str
@@ -373,18 +330,16 @@ class ResearchRequest:
     max_results: int
 
     def to_dict(self) -> dict[str, Any]:
-        """Convert this research request to a JSON-safe dictionary."""
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> ResearchRequest:
-        """Rebuild a research request from persisted JSON-safe data."""
+    def from_dict(cls, payload: dict[str, Any]) -> "ResearchRequest":
         return cls(**deepcopy(payload))
 
 
 @dataclass(slots=True)
 class EvidenceBundle:
-    """Hold bounded prompt evidence while retaining complete raw research rows separately."""
+    """Bounded evidence, provider rows, and usage for one research operation."""
 
     company_id: str
     items: list[EvidenceItem]
@@ -392,18 +347,15 @@ class EvidenceBundle:
     usage_events: list[UsageEvent]
 
     def __post_init__(self) -> None:
-        """Detach all evidence collections from caller-owned mutable values."""
-        self.items = [EvidenceItem.from_dict(item.to_dict()) for item in self.items]
+        self.items = deepcopy(self.items)
         self.raw_records = deepcopy(self.raw_records)
-        self.usage_events = [UsageEvent.from_dict(event.to_dict()) for event in self.usage_events]
+        self.usage_events = deepcopy(self.usage_events)
 
     def to_dict(self) -> dict[str, Any]:
-        """Convert this bundle to a defensive JSON-safe dictionary."""
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> EvidenceBundle:
-        """Rebuild an evidence bundle from persisted JSON-safe data."""
+    def from_dict(cls, payload: dict[str, Any]) -> "EvidenceBundle":
         data = deepcopy(payload)
         return cls(
             company_id=str(data["company_id"]),
@@ -415,25 +367,21 @@ class EvidenceBundle:
 
 @dataclass(slots=True)
 class ExtractedFact:
-    """Represent one extracted fact with confidence and retained evidence citations."""
+    """One extracted fact with confidence and retained evidence citations."""
 
     value: FactValue
     confidence: float
     evidence_ids: list[str]
 
     def __post_init__(self) -> None:
-        """Detach list-valued facts and citations from caller-owned collections."""
-        if isinstance(self.value, list):
-            self.value = deepcopy(self.value)
+        self.value = deepcopy(self.value)
         self.evidence_ids = deepcopy(self.evidence_ids)
 
     def to_dict(self) -> dict[str, Any]:
-        """Convert this extracted fact to a defensive JSON-safe dictionary."""
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> ExtractedFact:
-        """Rebuild an extracted fact from persisted JSON-safe data."""
+    def from_dict(cls, payload: dict[str, Any]) -> "ExtractedFact":
         data = deepcopy(payload)
         return cls(
             value=cast(FactValue, data.get("value")),
@@ -444,7 +392,7 @@ class ExtractedFact:
 
 @dataclass(slots=True)
 class ExtractionResult:
-    """Hold one model extraction result and its authenticated usage accounting."""
+    """One model extraction result and its authenticated usage accounting."""
 
     company_id: str
     model: str
@@ -452,19 +400,14 @@ class ExtractionResult:
     usage_event: UsageEvent
 
     def __post_init__(self) -> None:
-        """Detach nested extracted facts and usage from caller-owned values."""
-        self.facts = {
-            key: ExtractedFact.from_dict(value.to_dict()) for key, value in self.facts.items()
-        }
-        self.usage_event = UsageEvent.from_dict(self.usage_event.to_dict())
+        self.facts = deepcopy(self.facts)
+        self.usage_event = deepcopy(self.usage_event)
 
     def to_dict(self) -> dict[str, Any]:
-        """Convert this extraction result to a defensive JSON-safe dictionary."""
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> ExtractionResult:
-        """Rebuild an extraction result from persisted JSON-safe data."""
+    def from_dict(cls, payload: dict[str, Any]) -> "ExtractionResult":
         data = deepcopy(payload)
         raw_facts = cast(dict[str, dict[str, Any]], data.get("facts", {}))
         return cls(
