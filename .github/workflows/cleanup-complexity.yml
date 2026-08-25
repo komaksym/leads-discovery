@@ -1,0 +1,40 @@
+name: Cleanup complexity measurement
+
+on:
+  push:
+    branches:
+      - codex/repository-cleanup
+
+permissions:
+  contents: read
+
+jobs:
+  measure:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out cleanup head
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Ruff
+        run: python -m pip install "ruff==0.16.4"
+      - name: Measure cleanup head
+        shell: bash
+        run: |
+          set +e
+          echo "=== CLEANUP HEAD ==="
+          ruff check src --select C901 --output-format concise
+          echo "cleanup_exit=$?"
+      - name: Measure main
+        shell: bash
+        run: |
+          set +e
+          git worktree add /tmp/leads-main origin/main
+          cd /tmp/leads-main
+          echo "=== MAIN ==="
+          ruff check src --select C901 --output-format concise
+          echo "main_exit=$?"
