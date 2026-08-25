@@ -52,8 +52,8 @@ def normalize_contact_name(value: str) -> str:
     return " ".join(unicodedata.normalize("NFKC", value).casefold().split())
 
 
-def normalize_profile_url(value: str | None) -> str | None:
-    """Normalize a public profile URL without fuzzy identity inference."""
+def _normalize_profile_url(value: str | None, *, strip_www: bool) -> str | None:
+    """Normalize profile URL syntax while optionally canonicalizing a leading www host."""
     if value is None or not value.strip():
         return None
     try:
@@ -66,10 +66,20 @@ def normalize_profile_url(value: str | None) -> str | None:
     except ValueError:
         return None
     host = parsed.hostname.casefold().rstrip(".")
-    if host.startswith("www."):
+    if strip_www and host.startswith("www."):
         host = host[4:]
     path = re.sub(r"/+", "/", parsed.path).rstrip("/") or "/"
     return urlunsplit(("https", host, path, "", ""))
+
+
+def normalize_profile_url(value: str | None) -> str | None:
+    """Normalize a public profile URL for deterministic contact identity."""
+    return _normalize_profile_url(value, strip_www=True)
+
+
+def _retained_profile_url(value: str | None) -> str | None:
+    """Remove tracking noise while preserving source host spelling for provider inputs."""
+    return _normalize_profile_url(value, strip_www=False)
 
 
 def _normalized_title(value: str) -> str:
@@ -227,11 +237,12 @@ def _candidate_from_result(
     title = cast(str, work_row["title"]).strip()
 
     source_url = raw.get("url") if isinstance(raw.get("url"), str) else None
-    profile_url = normalize_profile_url(source_url)
+    identity_url = normalize_profile_url(source_url)
+    profile_url = _retained_profile_url(source_url)
     identity = _contact_identity(
         company=company,
         full_name=full_name.strip(),
-        profile_url=profile_url,
+        profile_url=identity_url,
     )
     if identity is None:
         return None
