@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from datetime import UTC, datetime
 from typing import Any, Protocol, cast
 
@@ -16,6 +17,8 @@ from leads_discovery.models import (
     ErrorKind,
     UsageEvent,
 )
+
+_DEFAULT_MAX_HTTP_RESPONSE_BYTES = 2 * 1024 * 1024
 
 
 class DiscoveryProvider(Protocol):
@@ -53,6 +56,20 @@ class DiscoveryProviderError(RuntimeError):
 def utc_timestamp() -> str:
     """Return one timezone-aware UTC timestamp for a provider operation."""
     return datetime.now(UTC).isoformat()
+
+
+def _http_response_limit() -> int:
+    """Return the configurable maximum provider response bytes."""
+    raw = os.getenv("LEADS_MAX_HTTP_RESPONSE_BYTES")
+    if raw is None:
+        return _DEFAULT_MAX_HTTP_RESPONSE_BYTES
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError("LEADS_MAX_HTTP_RESPONSE_BYTES must be a positive integer") from exc
+    if value <= 0:
+        raise ValueError("LEADS_MAX_HTTP_RESPONSE_BYTES must be a positive integer")
+    return value
 
 
 def classify_http_status(status_code: int) -> tuple[ErrorKind, bool]:
@@ -156,7 +173,17 @@ def request_json(
     operation: str,
     request_count: int,
 ) -> dict[str, Any]:
-    """Decode a provider response as a JSON object or raise a sanitized invalid response."""
+    """Decode a bounded provider response as one JSON object."""
+    if len(response.content) > _http_response_limit():
+        raise provider_error(
+            provider=provider,
+            request_id=request_id,
+            operation=operation,
+            request_count=request_count,
+            kind="invalid_response",
+            retryable=False,
+            status_code=response.status_code,
+        ) from None
     try:
         payload = response.json()
     except Exception:
@@ -207,9 +234,9 @@ def safe_transport_call(
     operation: str,
     request_count: int,
 ) -> httpx.Response:
-    """Run one injected-client call and sanitize transport failures without chaining details."""
+    """Run one injected-client call, precheck declared size, and sanitize transport failures."""
     try:
-        response = call()
+        response = cast(httpx.Response, call())
     except httpx.HTTPError:
         raise provider_error(
             provider=provider,
@@ -219,4 +246,31 @@ def safe_transport_call(
             kind="transient",
             retryable=True,
         ) from None
-    return cast(httpx.Response, response)
+    raw_length = response.headers.get("content-length")
+    if raw_length is not None:
+        try:
+            declared = int(raw_length)
+        except ValueError:
+            declared = 0
+        if declared > _http_response_limit():
+            response.close()
+            raise provider_error(
+                provider=provider,
+                request_id=request_id,
+                operation=operation,
+                request_count=request_count,
+                kind="invalid_response",
+                retryable=False,
+                status_code=response.status_code,
+            ) from None
+    if response.is_stream_consumed and len(response.content) > _http_response_limit():
+        raise provider_error(
+            provider=provider,
+            request_id=request_id,
+            operation=operation,
+            request_count=request_count,
+            kind="invalid_response",
+            retryable=False,
+            status_code=response.status_code,
+        ) from None
+    return response
