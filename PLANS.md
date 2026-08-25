@@ -67,6 +67,15 @@ Milestones for this branch:
 4. Add a manual-only GitHub-hosted production workflow that enforces a one-company canary, tiny non-bypassable spend/call/storage ceilings, and publishes only `leads.csv` plus `contacts.jsonl` to `generated-leads` with `GITHUB_TOKEN`.
 5. Add focused regression tests, run repository lint/type/test/build/offline/workflow checks, inspect CI, and leave the real credentialed one-company canary as the final external acceptance gate.
 
+### Final blocker-fix slice
+
+Summary: fix only the three confirmed readiness defects without redesigning passing replay, budget, persistence, workflow, or publication behavior.
+
+1. Require a hard-negative citation to connect the negation to the target concept within the same bounded clause/proximity window; otherwise downgrade the negative fact to unknown.
+2. Read provider bodies through HTTPX streaming responses, reject oversized declared lengths before consumption, and stop incremental body reads immediately when the configured byte ceiling is crossed.
+3. Make Exa request timeout semantics explicit at the adapter request boundary while preserving injected clients and MockTransport tests.
+4. Add focused production regression tests for negative-evidence relation, true streamed byte enforcement, bounded JSON success, and Exa timeout behavior; then run the full existing validation gate.
+
 ## Native GitHub stacked pull requests
 
 Use GitHub's public-preview stacked pull request feature to decompose a larger milestone/change into small atomic review layers. A milestone is not itself a single stack layer by default.
