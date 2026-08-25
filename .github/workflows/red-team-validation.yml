@@ -1,0 +1,101 @@
+name: Red-team validation
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install package and development tools
+        run: python -m pip install -e ".[dev]"
+
+      - name: Ruff
+        id: ruff
+        continue-on-error: true
+        run: ruff check .
+
+      - name: Strict mypy
+        id: mypy
+        continue-on-error: true
+        run: mypy src tests
+
+      - name: Focused readiness contracts
+        id: focused
+        continue-on-error: true
+        run: >-
+          pytest
+          tests/test_live_readiness_contracts.py
+          tests/test_production_readiness.py
+          tests/test_red_team_readiness_adversarial.py
+
+      - name: Full tests
+        id: tests
+        continue-on-error: true
+        run: pytest
+
+      - name: Build package
+        id: build
+        continue-on-error: true
+        run: python -m build
+
+      - name: Offline dry run
+        id: dry_run
+        continue-on-error: true
+        run: python -m leads_discovery run --run-id red-team-dry --deepseek-budget-usd 0.01
+
+      - name: Static production workflow checks
+        id: workflow
+        continue-on-error: true
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          text = Path('.github/workflows/generate-leads.yml').read_text(encoding='utf-8')
+          trigger = text.split('permissions:', 1)[0]
+          assert 'workflow_dispatch:' in trigger
+          assert 'push:' not in trigger
+          assert 'pull_request:' not in trigger
+          assert 'schedule:' not in trigger
+          assert 'inputs:' not in trigger
+          assert 'runs-on: ubuntu-latest' in text
+          assert 'self-hosted' not in text
+          assert 'actions/upload-artifact' not in text
+          assert 'production_canary' in text
+          assert 'contacts.jsonl' in text and 'leads.csv' in text
+          assert 'contact_checkpoint.json' not in text
+          assert 'contact_usage_events.jsonl' not in text
+          PY
+
+      - name: Enforce all validation gates
+        if: always()
+        env:
+          RUFF: ${{ steps.ruff.outcome }}
+          MYPY: ${{ steps.mypy.outcome }}
+          FOCUSED: ${{ steps.focused.outcome }}
+          TESTS: ${{ steps.tests.outcome }}
+          BUILD: ${{ steps.build.outcome }}
+          DRY_RUN: ${{ steps.dry_run.outcome }}
+          WORKFLOW: ${{ steps.workflow.outcome }}
+        run: |
+          printf 'ruff=%s\nmypy=%s\nfocused=%s\nfull=%s\nbuild=%s\noffline=%s\nworkflow=%s\n' \
+            "$RUFF" "$MYPY" "$FOCUSED" "$TESTS" "$BUILD" "$DRY_RUN" "$WORKFLOW"
+          test "$RUFF" = success
+          test "$MYPY" = success
+          test "$FOCUSED" = success
+          test "$TESTS" = success
+          test "$BUILD" = success
+          test "$DRY_RUN" = success
+          test "$WORKFLOW" = success
