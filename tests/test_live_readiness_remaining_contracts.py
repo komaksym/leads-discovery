@@ -166,6 +166,7 @@ def test_exa_default_adapter_owns_explicit_deterministic_timeout(
     real_client = httpx.Client
     provider_type = cast(Any, ExaDiscoveryProvider)
     observed: list[object] = []
+    created: list[httpx.Client] = []
 
     def capture_client(*args: Any, **kwargs: Any) -> httpx.Client:
         """Record explicit timeout construction while keeping a real offline client."""
@@ -174,12 +175,18 @@ def test_exa_default_adapter_owns_explicit_deterministic_timeout(
         kwargs["transport"] = httpx.MockTransport(
             lambda _request: httpx.Response(200, json={"results": []})
         )
-        return real_client(*args, **kwargs)
+        client = real_client(*args, **kwargs)
+        created.append(client)
+        return client
 
     monkeypatch.setattr(httpx, "Client", capture_client)
-    first = provider_type(api_key="test-key")
-    second = provider_type(api_key="test-key")
-    del first, second
+    try:
+        first = provider_type(api_key="test-key")
+        second = provider_type(api_key="test-key")
+        del first, second
+    finally:
+        for client in created:
+            client.close()
 
     assert len(observed) == 2
     first_timeout = _timeout_signature(observed[0])
