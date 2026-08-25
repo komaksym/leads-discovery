@@ -26,6 +26,8 @@ _RUN_URL = "https://api.apify.com/v2/actor-runs/{run_id}"
 _DATASET_URL = "https://api.apify.com/v2/datasets/{dataset_id}/items"
 _NONTERMINAL = {"READY", "RUNNING"}
 _TERMINAL_ERROR = {"FAILED", "TIMED-OUT", "ABORTED"}
+_CONTROL_TIMEOUT = httpx.Timeout(15.0, connect=5.0)
+_DATASET_TIMEOUT = httpx.Timeout(30.0, connect=5.0)
 
 
 class ApifyDiscoveryProvider:
@@ -50,7 +52,7 @@ class ApifyDiscoveryProvider:
         self._on_run_started = on_run_started
 
     def search(self, request: DiscoveryRequest) -> DiscoveryBatch:
-        """Start one capped Actor run and poll/fetch only that run."""
+        """Start one capped Actor run, persist its ID immediately, then poll/fetch it."""
         self._validate(request)
         body = self._actor_input(request)
         response = safe_transport_call(
@@ -58,11 +60,12 @@ class ApifyDiscoveryProvider:
                 _START_URL,
                 headers={"Authorization": f"Bearer {self._api_token}"},
                 params={
-                    "waitForFinish": 60,
+                    "waitForFinish": 0,
                     "maxItems": request.max_results_total,
                     "maxTotalChargeUsd": request.max_cost_usd,
                 },
                 json=body,
+                timeout=_CONTROL_TIMEOUT,
             ),
             provider="apify",
             request_id=request.request_id,
@@ -192,6 +195,7 @@ class ApifyDiscoveryProvider:
                     lambda: self._client.get(
                         _RUN_URL.format(run_id=run_id),
                         headers={"Authorization": f"Bearer {self._api_token}"},
+                        timeout=_CONTROL_TIMEOUT,
                     ),
                     provider="apify",
                     request_id=request.request_id,
@@ -263,6 +267,7 @@ class ApifyDiscoveryProvider:
                 _DATASET_URL.format(dataset_id=dataset_id),
                 headers={"Authorization": f"Bearer {self._api_token}"},
                 params={"clean": "true"},
+                timeout=_DATASET_TIMEOUT,
             ),
             provider="apify",
             request_id=request.request_id,
