@@ -84,6 +84,8 @@ def _deepseek_bundle() -> EvidenceBundle:
                 provider="exa",
             )
         ],
+        raw_records=[],
+        usage_events=[],
     )
 
 
@@ -103,7 +105,7 @@ def _deepseek_response(content: str) -> dict[str, Any]:
 
 def _valid_deepseek_content() -> str:
     """Return a complete schema-valid model result containing only unknown facts."""
-    facts = {
+    facts: dict[str, dict[str, object]] = {
         key: {"value": None, "confidence": 0, "evidence_ids": []}
         for key in FACT_KEYS
     }
