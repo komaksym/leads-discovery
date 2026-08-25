@@ -1,0 +1,207 @@
+name: Scoped production blocker fix
+
+on:
+  push:
+    branches:
+      - codex/production-readiness
+
+permissions:
+  contents: write
+
+jobs:
+  fix-and-validate:
+    if: ${{ !contains(github.event.head_commit.message, 'Close readiness blockers') }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out branch
+        uses: actions/checkout@v4
+        with:
+          ref: codex/production-readiness
+          fetch-depth: 0
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Apply scoped fixes and tests
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path: str, old: str, new: str) -> None:
+              """Replace one exact source fragment and fail if the branch moved unexpectedly."""
+              target = Path(path)
+              text = target.read_text(encoding="utf-8")
+              if text.count(old) != 1:
+                  raise SystemExit(f"expected exactly one match in {path}")
+              target.write_text(text.replace(old, new), encoding="utf-8")
+
+          # 1. Require a target concept to fall inside the cited negative scope.
+          path = "src/leads_discovery/research/extract.py"
+          replace_once(
+              path,
+              '''_EXPLICIT_NEGATION = re.compile(\n    r"\\b(no|not|none|never|without|does\\s+not|doesn't|isn't|aren't|lacks?|lacking)\\b",\n    re.IGNORECASE,\n)\n_EXCLUSIONARY_FALSE_TERMS: dict[str, tuple[str, ...]] = {\n    "pvf_relevant": ("pvf", "pipe", "valve", "fitting"),\n''',
+              '''_NEGATIVE_CLAUSE_SPLIT = re.compile(r"(?:[.!?;]+|\\n+)")\n_NEGATIVE_SCOPE_PREFIX = (\n    r"(?:\\b(?:no|never|without|lacks?|lacking)\\b"\n    r"|\\b(?:do|does|is|are|was|were|has|have)\\s+not\\b"\n    r"|\\b(?:doesn't|isn't|aren't|wasn't|weren't|hasn't|haven't)\\b)"\n)\n_EXCLUSIONARY_FALSE_TERMS: dict[str, tuple[str, ...]] = {\n    "pvf_relevant": ("pvf", "pipe", "piping", "valve", "fitting"),\n''',
+          )
+          replace_once(
+              path,
+              '''def _explicitly_supports_false(\n    key: str,\n    fact: ExtractedFact,\n    bundle: EvidenceBundle,\n) -> bool:\n    """Require explicit negation in cited evidence before retaining exclusionary false facts."""\n    terms = _EXCLUSIONARY_FALSE_TERMS.get(key)\n    if terms is None or fact.value is not False:\n        return True\n    cited = set(fact.evidence_ids)\n    text = " ".join(\n        f"{item.title or ''} {item.excerpt or ''}"\n        for item in bundle.items\n        if item.evidence_id in cited\n    ).casefold()\n    return bool(_EXPLICIT_NEGATION.search(text)) and any(term in text for term in terms)\n''',
+              '''def _supports_negated_term(text: str, terms: tuple[str, ...]) -> bool:\n    """Return true only when a target term appears inside a nearby explicit negative scope."""\n    targets = "|".join(re.escape(term) for term in sorted(terms, key=len, reverse=True))\n    pattern = re.compile(\n        rf"{_NEGATIVE_SCOPE_PREFIX}(?:[\\s,:-]+\\w+){{0,3}}[\\s,:-]+(?:{targets})\\b",\n        re.IGNORECASE,\n    )\n    return any(pattern.search(clause) for clause in _NEGATIVE_CLAUSE_SPLIT.split(text))\n\n\ndef _explicitly_supports_false(\n    key: str,\n    fact: ExtractedFact,\n    bundle: EvidenceBundle,\n) -> bool:\n    """Require the cited target concept itself to fall inside explicit negative scope."""\n    terms = _EXCLUSIONARY_FALSE_TERMS.get(key)\n    if terms is None or fact.value is not False:\n        return True\n    cited = set(fact.evidence_ids)\n    return any(\n        _supports_negated_term(f"{item.title or ''} {item.excerpt or ''}", terms)\n        for item in bundle.items\n        if item.evidence_id in cited\n    )\n''',
+          )
+
+          # 2. Stream-bound DeepSeek responses while preserving its fixed retry policy.
+          replace_once(
+              path,
+              '''    DiscoveryProviderError,\n    classify_http_status,\n    provider_error,\n    safe_transport_call,\n)\n''',
+              '''    DiscoveryProviderError,\n    ResponseTooLargeError,\n    classify_http_status,\n    provider_error,\n    read_bounded_response,\n    safe_transport_call,\n)\n''',
+          )
+          replace_once(
+              path,
+              '''                response = safe_transport_call(\n                    lambda: self._client.post(\n                        _DEEPSEEK_URL,\n                        headers={"Authorization": f"Bearer {self._api_key}"},\n                        json=body,\n                        timeout=_REQUEST_TIMEOUT,\n                    ),\n                    provider="deepseek",\n                    request_id=company.company_id,\n                    operation="structured_extraction",\n                    request_count=attempt,\n                )\n''',
+              '''                request = self._client.build_request(\n                    "POST",\n                    _DEEPSEEK_URL,\n                    headers={"Authorization": f"Bearer {self._api_key}"},\n                    json=body,\n                    timeout=_REQUEST_TIMEOUT,\n                )\n                response = safe_transport_call(\n                    lambda: self._client.send(request, stream=True),\n                    provider="deepseek",\n                    request_id=company.company_id,\n                    operation="structured_extraction",\n                    request_count=attempt,\n                )\n''',
+          )
+          replace_once(
+              path,
+              '''            if not 200 <= response.status_code < 300:\n                kind, retryable = classify_http_status(response.status_code)\n                if retryable and attempt < _MAX_ATTEMPTS:\n                    continue\n                raise provider_error(\n                    provider="deepseek",\n                    request_id=company.company_id,\n                    operation="structured_extraction",\n                    request_count=attempt,\n                    kind=kind,\n                    retryable=retryable,\n                    status_code=response.status_code,\n                    metadata={"company_id": company.company_id, "attempts": attempt},\n                ) from None\n            try:\n                payload = response.json()\n            except Exception:\n''',
+              '''            if not 200 <= response.status_code < 300:\n                status_code = response.status_code\n                response.close()\n                kind, retryable = classify_http_status(status_code)\n                if retryable and attempt < _MAX_ATTEMPTS:\n                    continue\n                raise provider_error(\n                    provider="deepseek",\n                    request_id=company.company_id,\n                    operation="structured_extraction",\n                    request_count=attempt,\n                    kind=kind,\n                    retryable=retryable,\n                    status_code=status_code,\n                    metadata={"company_id": company.company_id, "attempts": attempt},\n                ) from None\n            try:\n                payload = json.loads(read_bounded_response(response))\n            except (ResponseTooLargeError, json.JSONDecodeError, UnicodeDecodeError):\n''',
+          )
+
+          # 3. Give Exa evidence research an explicit request timeout and streamed body cap.
+          path = "src/leads_discovery/research/evidence.py"
+          replace_once(
+              path,
+              '''from leads_discovery.discovery.base import (\n    classify_http_status,\n    provider_error,\n    safe_transport_call,\n    utc_timestamp,\n)\n''',
+              '''from leads_discovery.discovery.base import (\n    ResponseTooLargeError,\n    classify_http_status,\n    provider_error,\n    read_bounded_response,\n    safe_transport_call,\n    utc_timestamp,\n)\n''',
+          )
+          replace_once(
+              path,
+              '''_EXA_SEARCH_URL = "https://api.exa.ai/search"\n_RESEARCH_FAMILIES = (\n''',
+              '''_EXA_SEARCH_URL = "https://api.exa.ai/search"\n_REQUEST_TIMEOUT = httpx.Timeout(30.0, connect=5.0)\n_RESEARCH_FAMILIES = (\n''',
+          )
+          replace_once(
+              path,
+              '''            response = safe_transport_call(\n                lambda request=request: self._client.post(\n                    _EXA_SEARCH_URL,\n                    headers={"x-api-key": self._api_key},\n                    json={\n                        "query": request.query,\n                        "type": "auto",\n                        "numResults": request.max_results,\n                        "contents": {"highlights": True},\n                    },\n                ),\n                provider="exa",\n                request_id=request.request_id,\n                operation="company_research",\n                request_count=delta_request_count,\n            )\n''',
+              '''            http_request = self._client.build_request(\n                "POST",\n                _EXA_SEARCH_URL,\n                headers={"x-api-key": self._api_key},\n                json={\n                    "query": request.query,\n                    "type": "auto",\n                    "numResults": request.max_results,\n                    "contents": {"highlights": True},\n                },\n                timeout=_REQUEST_TIMEOUT,\n            )\n            response = safe_transport_call(\n                lambda: self._client.send(http_request, stream=True),\n                provider="exa",\n                request_id=request.request_id,\n                operation="company_research",\n                request_count=delta_request_count,\n            )\n''',
+          )
+          replace_once(
+              path,
+              '''            if not 200 <= response.status_code < 300:\n                kind, retryable = classify_http_status(response.status_code)\n                raise provider_error(\n                    provider="exa",\n                    request_id=request.request_id,\n                    operation="company_research",\n                    request_count=delta_request_count,\n                    kind=kind,\n                    retryable=retryable,\n                    status_code=response.status_code,\n                    metadata={\n                        "company_id": company.company_id,\n                        "attempted_requests": attempted_position,\n                    },\n                ) from None\n            try:\n                payload_raw = response.json()\n            except Exception:\n''',
+              '''            if not 200 <= response.status_code < 300:\n                status_code = response.status_code\n                response.close()\n                kind, retryable = classify_http_status(status_code)\n                raise provider_error(\n                    provider="exa",\n                    request_id=request.request_id,\n                    operation="company_research",\n                    request_count=delta_request_count,\n                    kind=kind,\n                    retryable=retryable,\n                    status_code=status_code,\n                    metadata={\n                        "company_id": company.company_id,\n                        "attempted_requests": attempted_position,\n                    },\n                ) from None\n            try:\n                payload_raw = json.loads(read_bounded_response(response))\n            except (ResponseTooLargeError, json.JSONDecodeError, UnicodeDecodeError):\n''',
+          )
+
+          # 4. Make every Apify response use the existing stream-bounded reader.
+          path = "src/leads_discovery/discovery/apify.py"
+          replace_once(path, "import math\nimport time\n", "import json\nimport math\nimport time\n")
+          replace_once(
+              path,
+              '''from leads_discovery.discovery.base import (\n    classify_http_status,\n    provider_error,\n    request_json,\n    safe_transport_call,\n''',
+              '''from leads_discovery.discovery.base import (\n    ResponseTooLargeError,\n    classify_http_status,\n    provider_error,\n    read_bounded_response,\n    request_json,\n    safe_transport_call,\n''',
+          )
+          replace_once(
+              path,
+              '''        response = safe_transport_call(\n            lambda: self._client.post(\n                _START_URL,\n                headers={"Authorization": f"Bearer {self._api_token}"},\n                params={\n                    "waitForFinish": 0,\n                    "maxItems": request.max_results_total,\n                    "maxTotalChargeUsd": request.max_cost_usd,\n                },\n                json=body,\n                timeout=_CONTROL_TIMEOUT,\n            ),\n''',
+              '''        http_request = self._client.build_request(\n            "POST",\n            _START_URL,\n            headers={"Authorization": f"Bearer {self._api_token}"},\n            params={\n                "waitForFinish": 0,\n                "maxItems": request.max_results_total,\n                "maxTotalChargeUsd": request.max_cost_usd,\n            },\n            json=body,\n            timeout=_CONTROL_TIMEOUT,\n        )\n        response = safe_transport_call(\n            lambda: self._client.send(http_request, stream=True),\n''',
+          )
+          replace_once(
+              path,
+              '''        if not 200 <= response.status_code < 300:\n            kind, retryable = classify_http_status(response.status_code)\n''',
+              '''        if not 200 <= response.status_code < 300:\n            status_code = response.status_code\n            response.close()\n            kind, retryable = classify_http_status(status_code)\n''',
+          )
+          replace_once(path, "                status_code=response.status_code,\n", "                status_code=status_code,\n")
+          replace_once(
+              path,
+              '''                response = safe_transport_call(\n                    lambda: self._client.get(\n                        _RUN_URL.format(run_id=run_id),\n                        headers={"Authorization": f"Bearer {self._api_token}"},\n                        timeout=_CONTROL_TIMEOUT,\n                    ),\n''',
+              '''                http_request = self._client.build_request(\n                    "GET",\n                    _RUN_URL.format(run_id=run_id),\n                    headers={"Authorization": f"Bearer {self._api_token}"},\n                    timeout=_CONTROL_TIMEOUT,\n                )\n                response = safe_transport_call(\n                    lambda: self._client.send(http_request, stream=True),\n''',
+          )
+          replace_once(
+              path,
+              '''                if not 200 <= response.status_code < 300:\n                    kind, retryable = classify_http_status(response.status_code)\n''',
+              '''                if not 200 <= response.status_code < 300:\n                    status_code = response.status_code\n                    response.close()\n                    kind, retryable = classify_http_status(status_code)\n''',
+          )
+          replace_once(path, "                        status_code=response.status_code,\n", "                        status_code=status_code,\n")
+          replace_once(
+              path,
+              '''        dataset_response = safe_transport_call(\n            lambda: self._client.get(\n                _DATASET_URL.format(dataset_id=dataset_id),\n                headers={"Authorization": f"Bearer {self._api_token}"},\n                params={"clean": "true"},\n                timeout=_DATASET_TIMEOUT,\n            ),\n''',
+              '''        dataset_request = self._client.build_request(\n            "GET",\n            _DATASET_URL.format(dataset_id=dataset_id),\n            headers={"Authorization": f"Bearer {self._api_token}"},\n            params={"clean": "true"},\n            timeout=_DATASET_TIMEOUT,\n        )\n        dataset_response = safe_transport_call(\n            lambda: self._client.send(dataset_request, stream=True),\n''',
+          )
+          replace_once(
+              path,
+              '''        if not 200 <= dataset_response.status_code < 300:\n            kind, retryable = classify_http_status(dataset_response.status_code)\n''',
+              '''        if not 200 <= dataset_response.status_code < 300:\n            status_code = dataset_response.status_code\n            dataset_response.close()\n            kind, retryable = classify_http_status(status_code)\n''',
+          )
+          replace_once(path, "                status_code=dataset_response.status_code,\n", "                status_code=status_code,\n")
+          replace_once(
+              path,
+              '''        try:\n            raw_rows = dataset_response.json()\n        except Exception:\n''',
+              '''        try:\n            raw_rows = json.loads(read_bounded_response(dataset_response))\n        except (ResponseTooLargeError, json.JSONDecodeError, UnicodeDecodeError):\n''',
+          )
+
+          # 5. M4 provider requests now stream into a hard bounded buffer; Exa owns its timeout.
+          path = "src/leads_discovery/contacts/providers.py"
+          replace_once(
+              path,
+              '''_DEFAULT_MAX_HTTP_RESPONSE_BYTES = 2 * 1024 * 1024\n_EMAIL = re.compile''',
+              '''_DEFAULT_MAX_HTTP_RESPONSE_BYTES = 2 * 1024 * 1024\n_EXA_REQUEST_TIMEOUT = httpx.Timeout(30.0, connect=5.0)\n_EMAIL = re.compile''',
+          )
+          replace_once(
+              path,
+              '''def _call(\n    call: Any,\n    *,\n    provider: str,\n    operation: str,\n    metadata: dict[str, Any] | None = None,\n) -> httpx.Response:\n    """Execute one bounded HTTP call and preserve ambiguous paid outcomes."""\n    try:\n        response = cast(httpx.Response, call())\n    except (httpx.ConnectError, httpx.ConnectTimeout):\n        _raise(\n            provider,\n            operation,\n            kind="transient",\n            retryable=True,\n            metadata={**(metadata or {}), "safe_to_retry": True},\n        )\n    except httpx.HTTPError:\n        _raise(\n            provider,\n            operation,\n            kind="transient",\n            retryable=False,\n            metadata={**(metadata or {}), "outcome_unknown": True},\n        )\n    raw_length = response.headers.get("content-length")\n    if raw_length is not None:\n        try:\n            declared = int(raw_length)\n        except ValueError:\n            declared = 0\n        if declared > _http_response_limit():\n            response.close()\n            _raise(\n                provider,\n                operation,\n                kind="invalid_response",\n                retryable=False,\n                status_code=response.status_code,\n                metadata=metadata,\n            )\n    if response.is_stream_consumed and len(response.content) > _http_response_limit():\n        _raise(\n            provider,\n            operation,\n            kind="invalid_response",\n            retryable=False,\n            status_code=response.status_code,\n            metadata=metadata,\n        )\n    return response\n''',
+              '''def _call(\n    call: Any,\n    *,\n    provider: str,\n    operation: str,\n    metadata: dict[str, Any] | None = None,\n) -> httpx.Response:\n    """Consume one HTTP response incrementally into a hard bounded in-memory buffer."""\n    try:\n        with call() as raw_response:\n            response = cast(httpx.Response, raw_response)\n            limit = _http_response_limit()\n            raw_length = response.headers.get("content-length")\n            if raw_length is not None:\n                try:\n                    declared = int(raw_length)\n                except ValueError:\n                    declared = 0\n                if declared > limit:\n                    _raise(\n                        provider,\n                        operation,\n                        kind="invalid_response",\n                        retryable=False,\n                        status_code=response.status_code,\n                        metadata=metadata,\n                    )\n            body = bytearray()\n            for chunk in response.iter_bytes():\n                if len(body) + len(chunk) > limit:\n                    _raise(\n                        provider,\n                        operation,\n                        kind="invalid_response",\n                        retryable=False,\n                        status_code=response.status_code,\n                        metadata=metadata,\n                    )\n                body.extend(chunk)\n            return httpx.Response(\n                response.status_code,\n                headers=response.headers,\n                content=bytes(body),\n                request=response.request,\n            )\n    except (httpx.ConnectError, httpx.ConnectTimeout):\n        _raise(\n            provider,\n            operation,\n            kind="transient",\n            retryable=True,\n            metadata={**(metadata or {}), "safe_to_retry": True},\n        )\n    except httpx.HTTPError:\n        _raise(\n            provider,\n            operation,\n            kind="transient",\n            retryable=False,\n            metadata={**(metadata or {}), "outcome_unknown": True},\n        )\n''',
+          )
+          replace_once(path, "lambda: self._client.post(\n                _EXA_SEARCH_URL,", "lambda: self._client.stream(\n                \"POST\",\n                _EXA_SEARCH_URL,")
+          replace_once(
+              path,
+              '''                    "contents": {"highlights": True},\n                },\n            ),\n''',
+              '''                    "contents": {"highlights": True},\n                },\n                timeout=_EXA_REQUEST_TIMEOUT,\n            ),\n''',
+          )
+          replace_once(path, "lambda: self._client.post(\n                f\"{_CLAY_BASE_URL}", "lambda: self._client.stream(\n                \"POST\",\n                f\"{_CLAY_BASE_URL}")
+          replace_once(path, "lambda: self._client.get(\n                f\"{_CLAY_BASE_URL}", "lambda: self._client.stream(\n                \"GET\",\n                f\"{_CLAY_BASE_URL}")
+          replace_once(path, "lambda: self._client.post(\n                _APOLLO_PEOPLE_URL,", "lambda: self._client.stream(\n                \"POST\",\n                _APOLLO_PEOPLE_URL,")
+          replace_once(path, "call=lambda: self._client.post(\n                _INSTANTLY_VERIFY_URL,", "call=lambda: self._client.stream(\n                \"POST\",\n                _INSTANTLY_VERIFY_URL,")
+          replace_once(path, "call=lambda: self._client.get(\n                f\"{_INSTANTLY_VERIFY_URL}", "call=lambda: self._client.stream(\n                \"GET\",\n                f\"{_INSTANTLY_VERIFY_URL}")
+
+          Path("tests/test_production_blocker_fixes.py").write_text('''"""Regression tests for the final three production-readiness blockers."""\n\nfrom __future__ import annotations\n\nfrom collections.abc import Iterator\nfrom typing import Any\n\nimport httpx\nimport pytest\n\nfrom leads_discovery.contacts.providers import ContactProviderError, ExaPeopleProvider\nfrom leads_discovery.models import (\n    CompanyRecord,\n    EvidenceBundle,\n    EvidenceItem,\n    ExtractedFact,\n    ExtractionResult,\n    UsageEvent,\n)\nfrom leads_discovery.research.evidence import ExaEvidenceResearcher\nfrom leads_discovery.research.extract import FACT_KEYS, apply_extraction\n\n_EVIDENCE_ID = "ev_readiness_blocker_fix"\n\n\ndef _company() -> CompanyRecord:\n    """Build one canonical company for blocker regression tests."""\n    return CompanyRecord(\n        company_id="cmp_acme",\n        name="Acme Valve",\n        normalized_name="acme valve",\n        domain="acme.com",\n        normalized_domain="acme.com",\n        country="US",\n    )\n\n\ndef _apply_pvf(value: bool, excerpt: str) -> CompanyRecord:\n    """Apply one model PVF fact against exactly one cited evidence excerpt."""\n    bundle = EvidenceBundle(\n        company_id="cmp_acme",\n        items=[\n            EvidenceItem(\n                evidence_id=_EVIDENCE_ID,\n                url="https://acme.com/about",\n                title="About Acme",\n                excerpt=excerpt,\n                provider="exa",\n            )\n        ],\n        raw_records=[],\n        usage_events=[],\n    )\n    facts = {key: ExtractedFact(None, 0.0, []) for key in FACT_KEYS}\n    facts["pvf_relevant"] = ExtractedFact(value, 0.99, [_EVIDENCE_ID])\n    result = ExtractionResult(\n        company_id="cmp_acme",\n        model="deepseek-v4-flash",\n        facts=facts,\n        usage_event=UsageEvent(provider="deepseek", operation="structured_extraction"),\n    )\n    return apply_extraction(_company(), bundle, result)\n\n\n@pytest.mark.parametrize(\n    "excerpt",\n    [\n        "We do not sell electrical equipment. We distribute pipe, valves, and fittings.",\n        "We are not a manufacturer. We distribute industrial valves.",\n        "We do not serve residential customers. Our PVF products serve industrial facilities.",\n    ],\n)\ndef test_unrelated_negation_cannot_support_pvf_false(excerpt: str) -> None:\n    """Negation elsewhere in a citation cannot manufacture a PVF hard negative."""\n    updated = _apply_pvf(False, excerpt)\n    assert updated.features["pvf_relevant"] is None\n    assert updated.feature_confidence["pvf_relevant"] == {\n        "confidence": 0.0,\n        "evidence_ids": [],\n    }\n\n\n@pytest.mark.parametrize(\n    "excerpt",\n    [\n        "We do not sell pipe, valves, or fittings.",\n        "Our company does not distribute PVF products.",\n        "We exclusively sell electrical equipment and do not offer piping products.",\n    ],\n)\ndef test_target_linked_negation_can_support_pvf_false(excerpt: str) -> None:\n    """A nearby explicit negative scope around the target concept remains supported."""\n    updated = _apply_pvf(False, excerpt)\n    assert updated.features["pvf_relevant"] is False\n    assert updated.feature_confidence["pvf_relevant"]["evidence_ids"] == [_EVIDENCE_ID]\n\n\ndef test_supported_positive_pvf_evidence_is_unchanged() -> None:\n    """The conservative negative validator does not alter positive fact handling."""\n    updated = _apply_pvf(True, "We distribute industrial pipe, valves, and fittings.")\n    assert updated.features["pvf_relevant"] is True\n\n\nclass _CountingStream(httpx.SyncByteStream):\n    """Expose exactly how many network chunks the provider consumed."""\n\n    def __init__(self, chunks: list[bytes]) -> None:\n        """Store deterministic chunks and initialize the consumption counter."""\n        self._chunks = chunks\n        self.yielded = 0\n\n    def __iter__(self) -> Iterator[bytes]:\n        """Yield chunks lazily while recording each network read."""\n        for chunk in self._chunks:\n            self.yielded += 1\n            yield chunk\n\n\ndef test_declared_oversized_contact_response_is_rejected_before_body_read(\n    monkeypatch: pytest.MonkeyPatch,\n) -> None:\n    """An oversized Content-Length fails before any streamed body chunk is consumed."""\n    monkeypatch.setenv("LEADS_MAX_HTTP_RESPONSE_BYTES", "10")\n    stream = _CountingStream([b"this must never be read"])\n\n    def handler(_request: httpx.Request) -> httpx.Response:\n        """Return an oversized declared body through a lazy stream."""\n        return httpx.Response(200, headers={"content-length": "11"}, stream=stream)\n\n    with httpx.Client(transport=httpx.MockTransport(handler)) as client:\n        with pytest.raises(ContactProviderError) as captured:\n            ExaPeopleProvider(api_key="test", client=client).search(_company())\n    assert captured.value.kind == "invalid_response"\n    assert stream.yielded == 0\n\n\ndef test_chunked_contact_response_aborts_at_running_byte_limit(\n    monkeypatch: pytest.MonkeyPatch,\n) -> None:\n    """A no-length body stops on the first chunk crossing the limit, not after full buffering."""\n    monkeypatch.setenv("LEADS_MAX_HTTP_RESPONSE_BYTES", "10")\n    stream = _CountingStream([b"12345", b"67890", b"x", b"must-not-be-read"])\n\n    def handler(_request: httpx.Request) -> httpx.Response:\n        """Return a chunked-style lazy response with no Content-Length."""\n        return httpx.Response(200, stream=stream)\n\n    with httpx.Client(transport=httpx.MockTransport(handler)) as client:\n        with pytest.raises(ContactProviderError) as captured:\n            ExaPeopleProvider(api_key="test", client=client).search(_company())\n    assert captured.value.kind == "invalid_response"\n    assert stream.yielded == 3\n\n\ndef test_normal_bounded_contact_json_still_works() -> None:\n    """Normal bounded JSON survives the streaming response path unchanged."""\n\n    def handler(_request: httpx.Request) -> httpx.Response:\n        """Return one valid empty Exa People result."""\n        return httpx.Response(200, json={"results": []})\n\n    with httpx.Client(transport=httpx.MockTransport(handler)) as client:\n        result = ExaPeopleProvider(api_key="test", client=client).search(_company())\n    assert result.results == []\n\n\ndef test_exa_people_request_owns_explicit_timeout() -> None:\n    """A plain injected client cannot make Exa People fall back to HTTPX timeout defaults."""\n    seen: list[dict[str, float]] = []\n\n    def handler(request: httpx.Request) -> httpx.Response:\n        """Capture the request-level timeout extension configured by the adapter."""\n        timeout = request.extensions.get("timeout")\n        assert isinstance(timeout, dict)\n        seen.append(timeout)\n        return httpx.Response(200, json={"results": []})\n\n    with httpx.Client(transport=httpx.MockTransport(handler)) as client:\n        ExaPeopleProvider(api_key="test", client=client).search(_company())\n    assert seen == [{"connect": 5.0, "read": 30.0, "write": 30.0, "pool": 30.0}]\n\n\ndef test_exa_research_request_owns_explicit_timeout() -> None:\n    """Exa evidence research also applies provider timeouts with an otherwise plain client."""\n    seen: list[dict[str, float]] = []\n\n    def handler(request: httpx.Request) -> httpx.Response:\n        """Capture each bounded research request's timeout extension."""\n        timeout = request.extensions.get("timeout")\n        assert isinstance(timeout, dict)\n        seen.append(timeout)\n        return httpx.Response(200, json={"results": []})\n\n    with httpx.Client(transport=httpx.MockTransport(handler)) as client:\n        ExaEvidenceResearcher(api_key="test", client=client).research(_company())\n    assert seen == [\n        {"connect": 5.0, "read": 30.0, "write": 30.0, "pool": 30.0},\n        {"connect": 5.0, "read": 30.0, "write": 30.0, "pool": 30.0},\n        {"connect": 5.0, "read": 30.0, "write": 30.0, "pool": 30.0},\n    ]\n''', encoding="utf-8")
+          PY
+      - name: Install package and development tools
+        run: python -m pip install -e ".[dev]"
+      - name: Run focused blocker regressions
+        run: pytest -q tests/test_production_blocker_fixes.py
+      - name: Lint
+        run: ruff check .
+      - name: Typecheck
+        run: mypy src tests
+      - name: Full test suite
+        run: pytest
+      - name: Build
+        run: python -m build
+      - name: Offline dry run
+        run: python -m leads_discovery run --run-id blocker-fix-dry --deepseek-budget-usd 0.01
+      - name: Validate production workflow safety
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          text = Path(".github/workflows/generate-leads.yml").read_text(encoding="utf-8")
+          trigger = text.split("permissions:", 1)[0]
+          assert "workflow_dispatch:" in trigger
+          assert "push:" not in trigger
+          assert "pull_request:" not in trigger
+          assert "schedule:" not in trigger
+          assert "inputs:" not in trigger
+          assert "runs-on: ubuntu-latest" in text
+          assert "actions/upload-artifact" not in text
+          assert "python -m leads_discovery.production_canary" in text
+          assert "generated-leads" in text
+          PY
+      - name: Commit validated patch
+        run: |
+          rm .github/workflows/production-blocker-fix.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/leads_discovery/research/extract.py \
+                  src/leads_discovery/research/evidence.py \
+                  src/leads_discovery/discovery/apify.py \
+                  src/leads_discovery/contacts/providers.py \
+                  tests/test_production_blocker_fixes.py \
+                  .github/workflows/production-blocker-fix.yml
+          git commit -m "Close readiness blockers" -m "Require target-linked negative evidence before retaining exclusionary false facts. Stream-bound provider bodies during network consumption with early Content-Length rejection, and give Exa request boundaries explicit timeouts while preserving injected test clients. Add focused regressions for semantic negative support, streaming byte ceilings, normal JSON, and Exa timeout semantics."
+          git push origin HEAD:codex/production-readiness
