@@ -3,22 +3,31 @@
 from __future__ import annotations
 
 import inspect
+import json
+import logging
 from pathlib import Path
 from typing import Any
 
 import httpx
 import pytest
+from m3_factories import build_company
 
 from leads_discovery.discovery.apify import ApifyDiscoveryProvider
-from leads_discovery.discovery.base import provider_error, request_json
+from leads_discovery.discovery.base import DiscoveryProviderError, provider_error, request_json
 from leads_discovery.discovery.queries import build_discovery_requests
+from leads_discovery.models import CompanyRecord, EvidenceBundle, EvidenceItem
 from leads_discovery.pipeline.m2_batch import (
     M2BatchConfig,
     _validate_artifact_paths,
     _validate_config,
 )
 from leads_discovery.pipeline.state import load_jsonl
-from leads_discovery.research.extract import DeepSeekExtractor
+from leads_discovery.research.extract import (
+    FACT_KEYS,
+    DeepSeekExtractor,
+    DeepSeekPriceSchedule,
+)
+from leads_discovery.scoring import evaluate_company
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW_DIR = REPO_ROOT / ".github" / "workflows"
@@ -53,6 +62,54 @@ def _paid_workflow() -> str:
     return matches[0]
 
 
+def _deepseek_company() -> CompanyRecord:
+    """Build the smallest company accepted by the DeepSeek adapter boundary."""
+    return CompanyRecord(
+        company_id="cmp_live_readiness",
+        name="Readiness Valve",
+        domain="readiness.example",
+        normalized_domain="readiness.example",
+    )
+
+
+def _deepseek_bundle() -> EvidenceBundle:
+    """Build one bounded retained-evidence bundle for DeepSeek retry tests."""
+    return EvidenceBundle(
+        company_id="cmp_live_readiness",
+        items=[
+            EvidenceItem(
+                evidence_id="ev_live_readiness",
+                url="https://readiness.example/about",
+                excerpt="Readiness Valve distributes industrial valves.",
+                provider="exa",
+            )
+        ],
+    )
+
+
+def _deepseek_response(content: str) -> dict[str, Any]:
+    """Build one syntactically valid provider envelope around supplied model content."""
+    return {
+        "choices": [{"message": {"content": content}, "finish_reason": "stop"}],
+        "usage": {
+            "prompt_tokens": 1,
+            "completion_tokens": 1,
+            "total_tokens": 2,
+            "prompt_cache_hit_tokens": 0,
+            "prompt_cache_miss_tokens": 1,
+        },
+    }
+
+
+def _valid_deepseek_content() -> str:
+    """Return a complete schema-valid model result containing only unknown facts."""
+    facts = {
+        key: {"value": None, "confidence": 0, "evidence_ids": []}
+        for key in FACT_KEYS
+    }
+    return json.dumps({"facts": facts})
+
+
 def test_contract_1_unknown_paid_work_is_global_replay_barrier() -> None:
     """Ambiguous paid work must globally freeze later paid dispatch."""
     source = _module_source("leads_discovery.pipeline.m2_batch")
@@ -77,14 +134,14 @@ def test_contract_3_budget_is_checked_before_dispatch() -> None:
     assert source.index("_provider_budget_allows") < source.index("extractor.extract")
 
 
-def test_contract_4_apify_exposes_run_id_before_polling() -> None:
-    """Apify run identity must be observable before long polling starts."""
-    calls: list[str] = []
+def test_contract_4_apify_exposes_run_id_before_polling_and_resumes_it() -> None:
+    """Apify must persist a run identity before waiting and resume that exact run."""
+    start_calls: list[str] = []
     observed: list[str] = []
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def start_handler(request: httpx.Request) -> httpx.Response:
         """Return one running Actor creation and reject any later poll."""
-        calls.append(request.method)
+        start_calls.append(request.method)
         if request.method == "POST":
             return httpx.Response(
                 201,
@@ -100,7 +157,7 @@ def test_contract_4_apify_exposes_run_id_before_polling() -> None:
     request = next(
         req for req in build_discovery_requests(include_apify=True) if req.provider == "apify"
     )
-    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+    with httpx.Client(transport=httpx.MockTransport(start_handler)) as client:
         provider = ApifyDiscoveryProvider(
             api_token="test-token",
             client=client,
@@ -110,7 +167,32 @@ def test_contract_4_apify_exposes_run_id_before_polling() -> None:
             provider.search(request)
 
     assert observed == ["run-123"]
-    assert calls == ["POST"]
+    assert start_calls == ["POST"]
+
+    resume_calls: list[str] = []
+
+    def resume_handler(req: httpx.Request) -> httpx.Response:
+        """Serve only the persisted run and its existing dataset."""
+        resume_calls.append(req.method)
+        assert req.method == "GET", "restart must not create a replacement Actor run"
+        if req.url.path.endswith("/runs/run-123"):
+            return httpx.Response(
+                200,
+                json={
+                    "data": {
+                        "id": "run-123",
+                        "status": "SUCCEEDED",
+                        "defaultDatasetId": "dataset-123",
+                    }
+                },
+            )
+        return httpx.Response(200, json=[])
+
+    with httpx.Client(transport=httpx.MockTransport(resume_handler)) as client:
+        provider = ApifyDiscoveryProvider(api_token="test-token", client=client)
+        provider.resume(request, "run-123")
+
+    assert resume_calls and set(resume_calls) == {"GET"}
 
 
 def test_contract_5_provider_timeout_policy_is_explicit() -> None:
@@ -124,23 +206,83 @@ def test_contract_5_provider_timeout_policy_is_explicit() -> None:
     assert not missing, f"provider modules lack explicit timeout behavior: {missing}"
 
 
-def test_contract_6_deepseek_invalid_json_retry_is_bounded() -> None:
-    """Malformed model JSON must be retryable within a finite bound."""
-    source = _source(DeepSeekExtractor.extract)
-    invalid = _source(DeepSeekExtractor._invalid)
-    assert "retry" in source or "attempt" in source
-    assert "retryable=true" in source or "retryable=true" in invalid
-    assert any(word in source for word in ("max_attempt", "max_retr", "range("))
+@pytest.mark.parametrize("bad_content", ["", "{not-json", '{"facts": {}}'])
+def test_contract_6_deepseek_invalid_json_retries_then_succeeds(bad_content: str) -> None:
+    """Empty, malformed, and schema-invalid JSON must each get a bounded retry."""
+    calls = 0
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        """Return one retryable invalid result followed by a valid result."""
+        nonlocal calls
+        calls += 1
+        content = bad_content if calls == 1 else _valid_deepseek_content()
+        return httpx.Response(200, json=_deepseek_response(content))
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        extractor = DeepSeekExtractor(
+            api_key="test-key",
+            client=client,
+            model="deepseek-v4-flash",
+            prices=DeepSeekPriceSchedule(0, 0, 0),
+        )
+        extractor.extract(_deepseek_company(), _deepseek_bundle())
+
+    assert calls == 2
+
+
+def test_contract_6_deepseek_retry_exhaustion_is_bounded() -> None:
+    """Repeated malformed JSON must terminate deterministically without an infinite loop."""
+    calls = 0
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        """Return malformed JSON while guarding against an unbounded retry loop."""
+        nonlocal calls
+        calls += 1
+        if calls > 10:
+            raise AssertionError("DeepSeek malformed-response retry is unbounded")
+        return httpx.Response(200, json=_deepseek_response("{not-json"))
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        extractor = DeepSeekExtractor(
+            api_key="test-key",
+            client=client,
+            model="deepseek-v4-flash",
+            prices=DeepSeekPriceSchedule(0, 0, 0),
+        )
+        with pytest.raises(DiscoveryProviderError):
+            extractor.extract(_deepseek_company(), _deepseek_bundle())
+
+    assert 1 < calls <= 10
 
 
 def test_contract_7_unsupported_negative_cannot_hard_reject() -> None:
-    """No supporting evidence is not equivalent to a false fact."""
-    evaluation = _module_source("leads_discovery.pipeline.evaluation")
-    extraction = _module_source("leads_discovery.research.extract")
-    assert "pvf_relevant" in evaluation
-    assert "evidence" in extraction
-    assert any(word in evaluation for word in ("unsupported", "support", "unknown"))
-    assert "unsupported" in extraction or "no supporting evidence" in extraction
+    """A cited false claim unsupported by its text must be treated as unknown."""
+    company = build_company(facts={"pvf_relevant": (False, 0.95)})
+    evidence = company.evidence[0]
+    payload = evidence.to_dict()
+    payload["excerpt"] = "We distribute industrial pipe, valves, and fittings."
+    company.evidence = [EvidenceItem.from_dict(payload)]
+
+    result = evaluate_company(company)
+
+    assert result.final_decision == "uncertain"
+    assert "confirmed_not_pvf_relevant" not in result.rejection_reasons
+
+
+def test_contract_7_explicit_negative_evidence_can_reject() -> None:
+    """Explicit exclusionary evidence may support a normal negative hard fact."""
+    company = build_company(facts={"pvf_relevant": (False, 0.95)})
+    evidence = company.evidence[0]
+    payload = evidence.to_dict()
+    payload["excerpt"] = (
+        "We sell electrical supplies only and do not distribute pipe, valves, or fittings."
+    )
+    company.evidence = [EvidenceItem.from_dict(payload)]
+
+    result = evaluate_company(company)
+
+    assert result.final_decision == "rejected"
+    assert result.rejection_reasons == ["confirmed_not_pvf_relevant"]
 
 
 def test_contract_8_provider_json_parsing_is_stream_bounded() -> None:
@@ -222,6 +364,24 @@ def test_contract_12_child_output_symlink_is_rejected(tmp_path: Path) -> None:
     assert outside.read_text(encoding="utf-8") == "sentinel"
 
 
+def test_contract_12_parent_component_redirect_is_rejected(tmp_path: Path) -> None:
+    """Replacing the validated run directory with a symlink must fail closed."""
+    root = tmp_path / "data"
+    root.mkdir()
+    run_dir = root / "parent-test"
+    run_dir.mkdir()
+    paths = _validate_config(M2BatchConfig(run_id="parent-test", data_root=root))
+    run_dir.rmdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    run_dir.symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="symlink"):
+        _validate_artifact_paths(paths)
+
+    assert list(outside.iterdir()) == []
+
+
 def test_contract_13_paid_workflow_has_production_boundary() -> None:
     """Only explicit workflow_dispatch may authorize live paid execution."""
     workflow = _paid_workflow().casefold()
@@ -256,12 +416,39 @@ def test_contract_14_one_company_canary_limits_are_fixed() -> None:
         assert f"inputs.{name}" not in workflow
 
 
-def test_contract_15_failure_text_does_not_retain_secret_or_raw_payload(
+def test_contract_15_failure_logs_do_not_retain_secrets_or_raw_payload(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Representative provider failures cannot expose secret/raw values."""
     secret = "secret-api-key-value"
     raw = "private-raw-provider-payload"
+    response = httpx.Response(
+        500,
+        content=raw.encode(),
+        request=httpx.Request(
+            "GET",
+            "https://provider.invalid/test",
+            headers={"Authorization": f"Bearer {secret}"},
+        ),
+    )
+    with pytest.raises(DiscoveryProviderError) as caught:
+        request_json(
+            response,
+            provider="exa",
+            request_id="request-1",
+            operation="company_search",
+            request_count=1,
+        )
+
+    logging.getLogger("live-readiness-contract").error("%s", caught.value)
+    assert secret not in str(caught.value)
+    assert raw not in str(caught.value)
+    assert secret not in caplog.text
+    assert raw not in caplog.text
+
+
+def test_contract_15_sanitized_error_constructor_is_private_by_default() -> None:
+    """Structured provider errors retain identifiers, not credentials or payloads."""
     error = provider_error(
         provider="exa",
         request_id="request-1",
@@ -271,10 +458,8 @@ def test_contract_15_failure_text_does_not_retain_secret_or_raw_payload(
         retryable=True,
         metadata={"request_id": "request-1"},
     )
-    assert secret not in str(error)
-    assert raw not in str(error)
-    assert secret not in caplog.text
-    assert raw not in caplog.text
+    assert "authorization" not in str(error).casefold()
+    assert "payload" not in str(error).casefold()
 
 
 def test_global_guard_allows_mocktransport() -> None:
