@@ -55,6 +55,18 @@ M4 contract documents:
 - `docs/superpowers/specs/2026-08-24-m4-contact-discovery-enrichment-design.md`
 - `docs/superpowers/plans/2026-08-24-m4-contact-discovery-enrichment.md`
 
+## Production-readiness implementation
+
+Summary: keep the existing staged/file architecture, but make the live path fail closed around money, ambiguous provider outcomes, persisted state, and public output publication. The production runtime is a standard GitHub-hosted runner; no local machine or new infrastructure is introduced.
+
+Milestones for this branch:
+
+1. Harden the existing persistence/accounting boundary with bounded incremental replay, resource limits, and Linux-safe no-symlink atomic writes.
+2. Make paid provider dispatches reserve worst-case budget and durable operation identity/state before dispatch; ambiguous potentially-billed outcomes pause instead of replaying.
+3. Split Apify start/persist/poll, add explicit provider timeouts, bounded DeepSeek retry handling, and conservative validation of decision-affecting negative facts.
+4. Add a manual-only GitHub-hosted production workflow that enforces a one-company canary, tiny non-bypassable spend/call/storage ceilings, and publishes only `leads.csv` plus `contacts.jsonl` to `generated-leads` with `GITHUB_TOKEN`.
+5. Add focused regression tests, run repository lint/type/test/build/offline/workflow checks, inspect CI, and leave the real credentialed one-company canary as the final external acceptance gate.
+
 ## Native GitHub stacked pull requests
 
 Use GitHub's public-preview stacked pull request feature to decompose a larger milestone/change into small atomic review layers. A milestone is not itself a single stack layer by default.
