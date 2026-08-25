@@ -144,7 +144,7 @@ def test_apify_exact_start_input_one_run_callback_poll_dataset_mapping_and_usage
     assert start.url.path == "/v2/acts/compass~crawler-google-places/runs"
     assert start.headers["authorization"] == f"Bearer {TOKEN}"
     assert dict(start.url.params) == {
-        "waitForFinish": "60",
+        "waitForFinish": "0",
         "maxItems": "15",
         "maxTotalChargeUsd": "0.125",
     }

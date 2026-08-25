@@ -4,13 +4,21 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, cast
 
 import httpx
 
-from leads_discovery.discovery.base import classify_http_status, provider_error, safe_transport_call
+from leads_discovery.discovery.base import (
+    DiscoveryProviderError,
+    ResponseTooLargeError,
+    classify_http_status,
+    provider_error,
+    read_bounded_response,
+    safe_transport_call,
+)
 from leads_discovery.models import (
     CompanyRecord,
     EvidenceBundle,
@@ -23,6 +31,21 @@ from leads_discovery.models import (
 _DEEPSEEK_URL = "https://api.deepseek.com/chat/completions"
 _MODEL = "deepseek-v4-flash"
 _MAX_TOKENS = 2048
+_MAX_ATTEMPTS = 3
+_REQUEST_TIMEOUT = httpx.Timeout(45.0, connect=5.0)
+_EXPLICIT_NEGATION = re.compile(
+    r"\b(no|not|none|never|without|does\s+not|doesn't|isn't|aren't|lacks?|lacking)\b",
+    re.IGNORECASE,
+)
+_CLAUSE_BOUNDARY = re.compile(
+    r"(?:[.!?;:,\n]+|\b(?:and|but|however|whereas|while|yet)\b)",
+    re.IGNORECASE,
+)
+_EXCLUSIONARY_FALSE_TERMS: dict[str, tuple[str, ...]] = {
+    "pvf_relevant": ("pvf", "pipe", "piping", "valve", "fitting"),
+    "inside_sales_or_estimating_presence": ("inside sales", "estimating", "estimator"),
+    "rfq_or_quote_workflow_evidence": ("rfq", "request for quote", "quotation", "quote"),
+}
 FACT_KEYS = (
     "pvf_relevant",
     "pvf_product_breadth",
@@ -88,7 +111,7 @@ class DeepSeekPriceSchedule:
 
 
 class DeepSeekExtractor:
-    """Make one exact non-thinking JSON extraction request for retained evidence."""
+    """Make one bounded non-thinking JSON extraction operation for retained evidence."""
 
     def __init__(
         self,
@@ -108,8 +131,10 @@ class DeepSeekExtractor:
         self._model = model
         self._prices = prices
 
-    def reservation_cost_usd(self, company: CompanyRecord, bundle: EvidenceBundle) -> float:
-        """Return the conservative cache-miss plus maximum-output reservation for this call."""
+    def _single_reservation_cost_usd(
+        self, company: CompanyRecord, bundle: EvidenceBundle
+    ) -> float:
+        """Return the conservative cache-miss plus maximum-output cost for one attempt."""
         evidence_json = _evidence_json(company, bundle)
         prompt_characters = len(SYSTEM_PROMPT) + len(evidence_json)
         return (
@@ -117,8 +142,12 @@ class DeepSeekExtractor:
             + _MAX_TOKENS * self._prices.output_per_million
         ) / 1_000_000
 
+    def reservation_cost_usd(self, company: CompanyRecord, bundle: EvidenceBundle) -> float:
+        """Reserve enough budget for every bounded attempt before the first dispatch."""
+        return self._single_reservation_cost_usd(company, bundle) * _MAX_ATTEMPTS
+
     def extract(self, company: CompanyRecord, bundle: EvidenceBundle) -> ExtractionResult:
-        """Execute exactly one DeepSeek request and strictly validate its complete fact schema."""
+        """Execute up to three safe attempts and strictly validate the complete fact schema."""
         if bundle.company_id != company.company_id:
             raise ValueError("evidence bundle company_id must match company")
         if not bundle.items:
@@ -144,38 +173,74 @@ class DeepSeekExtractor:
             "temperature": 0,
             "stream": False,
         }
-        response = safe_transport_call(
-            lambda: self._client.post(
+        single_reservation = self._single_reservation_cost_usd(company, bundle)
+        for attempt in range(1, _MAX_ATTEMPTS + 1):
+            http_request = self._client.build_request(
+                "POST",
                 _DEEPSEEK_URL,
                 headers={"Authorization": f"Bearer {self._api_key}"},
                 json=body,
-            ),
-            provider="deepseek",
-            request_id=company.company_id,
-            operation="structured_extraction",
-            request_count=1,
-        )
-        if not 200 <= response.status_code < 300:
-            kind, retryable = classify_http_status(response.status_code)
-            raise provider_error(
-                provider="deepseek",
-                request_id=company.company_id,
-                operation="structured_extraction",
-                request_count=1,
-                kind=kind,
-                retryable=retryable,
-                status_code=response.status_code,
-                metadata={"company_id": company.company_id},
-            ) from None
-        try:
-            payload = response.json()
-        except Exception:
-            raise self._invalid(company.company_id, response.status_code) from None
-        if not isinstance(payload, dict):
-            raise self._invalid(company.company_id, response.status_code) from None
-        return self._parse_result(
-            company, bundle, cast(dict[str, Any], payload), response.status_code
-        )
+                timeout=_REQUEST_TIMEOUT,
+            )
+            try:
+                response = safe_transport_call(
+                    lambda http_request=http_request: self._client.send(
+                        http_request, stream=True
+                    ),
+                    provider="deepseek",
+                    request_id=company.company_id,
+                    operation="structured_extraction",
+                    request_count=attempt,
+                )
+            except DiscoveryProviderError as exc:
+                if exc.retryable and attempt < _MAX_ATTEMPTS:
+                    continue
+                raise
+            status_code = response.status_code
+            if not 200 <= status_code < 300:
+                response.close()
+                kind, retryable = classify_http_status(status_code)
+                if retryable and attempt < _MAX_ATTEMPTS:
+                    continue
+                raise provider_error(
+                    provider="deepseek",
+                    request_id=company.company_id,
+                    operation="structured_extraction",
+                    request_count=attempt,
+                    kind=kind,
+                    retryable=retryable,
+                    status_code=status_code,
+                    metadata={"company_id": company.company_id, "attempts": attempt},
+                ) from None
+            try:
+                body_bytes = read_bounded_response(response)
+            except ResponseTooLargeError:
+                raise self._invalid(company.company_id, status_code, attempt) from None
+            try:
+                payload = json.loads(body_bytes)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                if attempt < _MAX_ATTEMPTS:
+                    continue
+                raise self._invalid(company.company_id, status_code, attempt) from None
+            if not isinstance(payload, dict):
+                if attempt < _MAX_ATTEMPTS:
+                    continue
+                raise self._invalid(company.company_id, status_code, attempt) from None
+            try:
+                result = self._parse_result(
+                    company,
+                    bundle,
+                    cast(dict[str, Any], payload),
+                    status_code,
+                )
+            except DiscoveryProviderError as exc:
+                if exc.kind == "invalid_response" and attempt < _MAX_ATTEMPTS:
+                    continue
+                if exc.kind == "invalid_response":
+                    raise self._invalid(company.company_id, status_code, attempt) from None
+                raise
+            return _account_retries(result, attempt, single_reservation)
+        raise AssertionError("bounded DeepSeek retry loop is unreachable")
 
     def _parse_result(
         self,
@@ -187,29 +252,29 @@ class DeepSeekExtractor:
         """Validate the response envelope, fact JSON, citations, and authenticated usage."""
         choices = payload.get("choices")
         if not isinstance(choices, list) or len(choices) != 1 or not isinstance(choices[0], dict):
-            raise self._invalid(company.company_id, status_code) from None
+            raise self._invalid(company.company_id, status_code, 1) from None
         choice = cast(dict[str, Any], choices[0])
         if choice.get("finish_reason") != "stop":
-            raise self._invalid(company.company_id, status_code) from None
+            raise self._invalid(company.company_id, status_code, 1) from None
         message = choice.get("message")
         if not isinstance(message, dict) or not isinstance(message.get("content"), str):
-            raise self._invalid(company.company_id, status_code) from None
+            raise self._invalid(company.company_id, status_code, 1) from None
+        content = cast(str, message["content"])
+        if not content.strip():
+            raise self._invalid(company.company_id, status_code, 1) from None
         try:
-            decoded = json.loads(
-                cast(str, message["content"]),
-                object_pairs_hook=_reject_duplicate_json_keys,
-            )
+            decoded = json.loads(content, object_pairs_hook=_reject_duplicate_json_keys)
         except (json.JSONDecodeError, ValueError):
-            raise self._invalid(company.company_id, status_code) from None
+            raise self._invalid(company.company_id, status_code, 1) from None
         if (
             not isinstance(decoded, dict)
             or set(decoded) != {"facts"}
             or not isinstance(decoded["facts"], dict)
         ):
-            raise self._invalid(company.company_id, status_code) from None
+            raise self._invalid(company.company_id, status_code, 1) from None
         raw_facts = cast(dict[str, Any], decoded["facts"])
         if set(raw_facts) != set(FACT_KEYS):
-            raise self._invalid(company.company_id, status_code) from None
+            raise self._invalid(company.company_id, status_code, 1) from None
         allowed_evidence = {item.evidence_id for item in bundle.items}
         facts = {
             key: _parse_fact(raw_facts[key], allowed_evidence, company.company_id)
@@ -224,18 +289,47 @@ class DeepSeekExtractor:
         )
 
     @staticmethod
-    def _invalid(company_id: str, status_code: int | None) -> RuntimeError:
-        """Build a sanitized one-attempt invalid-response error for extraction failures."""
+    def _invalid(company_id: str, status_code: int | None, attempts: int) -> DiscoveryProviderError:
+        """Build a sanitized terminal invalid-response error after bounded retries."""
         return provider_error(
             provider="deepseek",
             request_id=company_id,
             operation="structured_extraction",
-            request_count=1,
+            request_count=attempts,
             kind="invalid_response",
             retryable=False,
             status_code=status_code,
-            metadata={"company_id": company_id},
+            metadata={"company_id": company_id, "attempts": attempts},
         )
+
+
+def _account_retries(
+    result: ExtractionResult,
+    attempts: int,
+    single_reservation: float,
+) -> ExtractionResult:
+    """Conservatively account failed prior attempts without retaining provider bodies."""
+    event = result.usage_event
+    estimated = event.estimated_cost_usd
+    if estimated is not None:
+        estimated += (attempts - 1) * single_reservation
+    usage = UsageEvent(
+        provider=event.provider,
+        operation=event.operation,
+        request_count=attempts,
+        input_tokens=event.input_tokens,
+        output_tokens=event.output_tokens,
+        estimated_cost_usd=estimated,
+        exact_cost_usd=event.exact_cost_usd if attempts == 1 else None,
+        metadata={**event.metadata, "attempts": attempts},
+        recorded_at=event.recorded_at,
+    )
+    return ExtractionResult(
+        company_id=result.company_id,
+        model=result.model,
+        facts={key: deepcopy(value) for key, value in result.facts.items()},
+        usage_event=usage,
+    )
 
 
 def _reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -437,19 +531,55 @@ def _parse_usage(raw: Any, prices: DeepSeekPriceSchedule, company_id: str) -> Us
         metadata={
             "company_id": company_id,
             "prompt_cache_hit_tokens": counters["prompt_cache_hit_tokens"],
-            "prompt_cache_miss_tokens": counters["prompt_cache_miss_input_tokens"]
-            if "prompt_cache_miss_input_tokens" in counters
-            else counters["prompt_cache_miss_tokens"],
+            "prompt_cache_miss_tokens": counters["prompt_cache_miss_tokens"],
             "completion_tokens": output_tokens,
             "total_tokens": counters["total_tokens"],
         },
     )
 
 
+def _negative_term_is_local(clause: str, term: str) -> bool:
+    """Return true only when a negation and target term are locally connected in one clause."""
+    term_pattern = re.compile(rf"\b{re.escape(term)}\b", re.IGNORECASE)
+    targets = tuple(term_pattern.finditer(clause))
+    if not targets:
+        return False
+    for negation in _EXPLICIT_NEGATION.finditer(clause):
+        for target in targets:
+            start = min(negation.end(), target.end())
+            end = max(negation.start(), target.start())
+            between = clause[start:end]
+            if len(re.findall(r"\b[\w']+\b", between)) <= 4:
+                return True
+    return False
+
+
+def _explicitly_supports_false(
+    key: str,
+    fact: ExtractedFact,
+    bundle: EvidenceBundle,
+) -> bool:
+    """Require a local negation-to-target relation before retaining exclusionary false facts."""
+    terms = _EXCLUSIONARY_FALSE_TERMS.get(key)
+    if terms is None or fact.value is not False:
+        return True
+    cited = set(fact.evidence_ids)
+    for item in bundle.items:
+        if item.evidence_id not in cited:
+            continue
+        for text in (item.title, item.excerpt):
+            if not text:
+                continue
+            for clause in _CLAUSE_BOUNDARY.split(text.casefold()):
+                if any(_negative_term_is_local(clause, term) for term in terms):
+                    return True
+    return False
+
+
 def apply_extraction(
     company: CompanyRecord, bundle: EvidenceBundle, result: ExtractionResult
 ) -> CompanyRecord:
-    """Apply facts/evidence without touching M1 scoring or decision fields."""
+    """Apply facts while converting unsupported exclusionary negatives to explicit unknown."""
     if bundle.company_id != company.company_id or result.company_id != company.company_id:
         raise ValueError("company, evidence bundle, and extraction result IDs must match")
     updated = CompanyRecord.from_dict(company.to_dict())
@@ -458,6 +588,10 @@ def apply_extraction(
         if key not in result.facts:
             raise ValueError("extraction result is missing a required fact")
         fact = result.facts[key]
+        if not _explicitly_supports_false(key, fact, bundle):
+            updated.features[key] = None
+            updated.feature_confidence[key] = {"confidence": 0.0, "evidence_ids": []}
+            continue
         updated.features[key] = deepcopy(fact.value)
         updated.feature_confidence[key] = {
             "confidence": fact.confidence,
