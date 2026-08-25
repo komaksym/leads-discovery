@@ -6,10 +6,9 @@ import json
 from pathlib import Path
 from typing import Any
 
-from leads_discovery.models import DiscoveryRecord, UsageEvent
+from leads_discovery.models import DiscoveryRecord, RunCheckpoint, UsageEvent
 from leads_discovery.pipeline.m2_batch import M2BatchConfig, run_m2_batch
 from leads_discovery.pipeline.state import append_jsonl, append_usage_event, write_checkpoint
-from leads_discovery.models import RunCheckpoint
 
 
 def _seed_research_run(tmp_path: Path, run_id: str) -> Path:
