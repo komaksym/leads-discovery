@@ -41,8 +41,7 @@ def _git(root: Path, *args: str, input_text: str | None = None) -> str:
             cwd=root,
             input=input_text,
             text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             check=True,
             timeout=30,
         )
