@@ -314,15 +314,47 @@ def test_decision_proximity_caps_candidates_contacts_and_paid_enrichment(
     assert "sam engineer" not in persisted
     assert "overflow executive" not in persisted
 
-    paid_payload = "\n".join(
-        request.content.decode("utf-8").casefold() for request in clay.posts
-    )
-    assert "erin-estimator" not in paid_payload
-    assert "erin estimator" not in paid_payload
-    assert "phone" not in paid_payload
-    assert "personal" not in paid_payload
-    assert "email" in paid_payload
-    assert "work" in paid_payload
+    assert len(clay.posts) == 1
+    paid_payload = json_body(clay.posts[0])
+    assert set(paid_payload) == {"items"}
+    items = paid_payload["items"]
+    assert isinstance(items, list)
+    assert len(items) == 2
+    expected_inputs = [
+        {
+            "full_name": "Pat Owner",
+            "company_name": "Acme Valve",
+            "company_domain": "acmevalve.com",
+            "linkedin_url": "https://www.linkedin.com/in/pat-owner",
+            "profile_url": "https://www.linkedin.com/in/pat-owner",
+        },
+        {
+            "full_name": "Vera Ops",
+            "company_name": "Acme Valve",
+            "company_domain": "acmevalve.com",
+            "linkedin_url": "https://www.linkedin.com/in/vera-ops",
+            "profile_url": "https://www.linkedin.com/in/vera-ops",
+        },
+    ]
+    submitted_inputs: list[dict[str, Any]] = []
+    for item in items:
+        assert isinstance(item, dict)
+        assert set(item) == {"id", "inputs"}
+        assert isinstance(item["id"], str)
+        assert item["id"]
+        inputs = item["inputs"]
+        assert isinstance(inputs, dict)
+        assert set(inputs) == {
+            "full_name",
+            "company_name",
+            "company_domain",
+            "linkedin_url",
+            "profile_url",
+        }
+        for forbidden in ("phone", "personal_email", "personal"):
+            assert forbidden not in inputs
+        submitted_inputs.append(inputs)
+    assert submitted_inputs == expected_inputs
     assert stub.for_provider("apollo") == []
 
     instant_payload = "\n".join(
