@@ -38,8 +38,11 @@ jobs:
         run: >-
           pytest
           tests/test_live_readiness_contracts.py
+          tests/test_live_readiness_remaining_contracts.py
           tests/test_production_readiness.py
+          tests/test_readiness_final_blockers.py
           tests/test_red_team_readiness_adversarial.py
+          tests/test_red_team_final_blockers.py
 
       - name: Full tests
         id: tests
