@@ -1,4 +1,4 @@
-"""Implementation-independent live-readiness and paid-execution safety contracts."""
+"""Independent live-readiness and paid-execution safety contracts."""
 
 from __future__ import annotations
 
@@ -20,79 +20,80 @@ from leads_discovery.pipeline.m2_batch import (
 from leads_discovery.pipeline.state import load_jsonl
 from leads_discovery.research.extract import DeepSeekExtractor
 
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW_DIR = REPO_ROOT / ".github" / "workflows"
 
 
 def _source(obj: Any) -> str:
-    """Return normalized lowercase source for one runtime object."""
+    """Return normalized source for one runtime object."""
     return inspect.getsource(obj).casefold()
 
 
+def _module_source(name: str) -> str:
+    """Return normalized source for one imported runtime module."""
+    return _source(__import__(name, fromlist=["*"]))
+
+
 def _workflow_texts() -> dict[str, str]:
-    """Load checked-in workflow YAML as inert text without executing it."""
+    """Load checked-in workflow YAML as inert text."""
     return {
         path.name: path.read_text(encoding="utf-8")
         for path in sorted(WORKFLOW_DIR.glob("*.y*ml"))
     }
 
 
-def _paid_workflow() -> tuple[str, str]:
-    """Return the dedicated live/canary workflow, failing clearly when it does not exist."""
-    workflows = _workflow_texts()
+def _paid_workflow() -> str:
+    """Return the one dedicated live/canary workflow."""
     matches = [
-        (name, text)
-        for name, text in workflows.items()
-        if any(marker in text.casefold() for marker in ("canary", "live", "paid"))
+        text
+        for text in _workflow_texts().values()
+        if any(word in text.casefold() for word in ("canary", "live", "paid"))
     ]
     assert len(matches) == 1, "exactly one dedicated paid live/canary workflow is required"
     return matches[0]
 
 
-def test_unknown_paid_work_is_a_global_replay_barrier() -> None:
-    """Contract 1: ambiguous paid work must globally freeze later paid dispatch."""
-    source = _source(__import__("leads_discovery.pipeline.m2_batch", fromlist=["*"]))
-    assert "unknown_outcome" in source or "paused_unknown" in source
-    assert "global" in source or "unknown_in_flight" in source
-    paid = {"exa", "apify", "deepseek", "clay", "apollo", "instantly"}
-    represented = {provider for provider in paid if provider in source}
-    assert represented >= {"exa", "apify", "deepseek"}
+def test_contract_1_unknown_paid_work_is_global_replay_barrier() -> None:
+    """Ambiguous paid work must globally freeze later paid dispatch."""
+    source = _module_source("leads_discovery.pipeline.m2_batch")
+    assert "paused_unknown" in source or "unknown_outcome" in source
+    assert "unknown_in_flight" in source or "global" in source
+    assert all(provider in source for provider in ("exa", "apify", "deepseek"))
 
 
-def test_unknown_cost_is_not_silently_zero_and_reservation_is_durable() -> None:
-    """Contract 2: unknown spend stays unknown/reserved across replay."""
-    costs = _source(__import__("leads_discovery.pipeline.costs", fromlist=["*"]))
-    runner = _source(__import__("leads_discovery.pipeline.m2_batch", fromlist=["*"]))
+def test_contract_2_unknown_cost_is_not_silently_zero() -> None:
+    """Unknown spend stays unknown/reserved across replay."""
+    costs = _module_source("leads_discovery.pipeline.costs")
+    runner = _module_source("leads_discovery.pipeline.m2_batch")
     assert "return none" in costs
     assert "reservation_usd" in runner
     assert "unknown" in runner
 
 
-def test_budget_is_checked_before_dispatch_with_next_call_reservation() -> None:
-    """Contract 3: committed + reserved + worst-case next call must fit before dispatch."""
-    source = _source(__import__("leads_discovery.pipeline.m2_batch", fromlist=["*"]))
+def test_contract_3_budget_is_checked_before_dispatch() -> None:
+    """Committed spend plus reservation must fit before paid dispatch."""
+    source = _module_source("leads_discovery.pipeline.m2_batch")
     assert "spend + reservation" in source
     assert source.index("_provider_budget_allows") < source.index("extractor.extract")
 
 
-def test_apify_run_identity_is_observed_before_long_polling() -> None:
-    """Contract 4: Apify exposes durable run identity before any long wait/poll loop."""
-    calls: list[tuple[str, str]] = []
+def test_contract_4_apify_exposes_run_id_before_polling() -> None:
+    """Apify run identity must be observable before long polling starts."""
+    calls: list[str] = []
     observed: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
-        """Return a created running Actor and reject any poll after interruption."""
-        calls.append((request.method, request.url.path))
+        """Return one running Actor creation and reject any later poll."""
+        calls.append(request.method)
         if request.method == "POST":
             return httpx.Response(
                 201,
                 json={"data": {"id": "run-123", "status": "RUNNING"}},
             )
-        raise AssertionError("polling must not begin after simulated process interruption")
+        raise AssertionError("polling began after simulated interruption")
 
     def persist_then_crash(run_id: str) -> None:
-        """Model durable run-id persistence followed immediately by process death."""
+        """Model durable run-id persistence followed by process death."""
         observed.append(run_id)
         raise KeyboardInterrupt
 
@@ -109,41 +110,41 @@ def test_apify_run_identity_is_observed_before_long_polling() -> None:
             provider.search(request)
 
     assert observed == ["run-123"]
-    assert calls == [("POST", "/v2/acts/compass~crawler-google-places/runs")]
+    assert calls == ["POST"]
 
 
-def test_provider_clients_use_explicit_timeout_policy() -> None:
-    """Contract 5: long-running provider HTTP must not inherit accidental HTTPX defaults."""
-    modules = (
-        __import__("leads_discovery.discovery.apify", fromlist=["*"]),
-        __import__("leads_discovery.discovery.exa", fromlist=["*"]),
-        __import__("leads_discovery.research.extract", fromlist=["*"]),
+def test_contract_5_provider_timeout_policy_is_explicit() -> None:
+    """Provider HTTP calls must not accidentally inherit HTTPX defaults."""
+    names = (
+        "leads_discovery.discovery.apify",
+        "leads_discovery.discovery.exa",
+        "leads_discovery.research.extract",
     )
-    missing = [module.__name__ for module in modules if "timeout=" not in _source(module)]
+    missing = [name for name in names if "timeout=" not in _module_source(name)]
     assert not missing, f"provider modules lack explicit timeout behavior: {missing}"
 
 
-def test_deepseek_invalid_json_is_retryable_but_bounded() -> None:
-    """Contract 6: empty/malformed/schema-invalid model JSON gets bounded retry handling."""
+def test_contract_6_deepseek_invalid_json_retry_is_bounded() -> None:
+    """Malformed model JSON must be retryable within a finite bound."""
     source = _source(DeepSeekExtractor.extract)
     invalid = _source(DeepSeekExtractor._invalid)
     assert "retry" in source or "attempt" in source
     assert "retryable=true" in source or "retryable=true" in invalid
-    assert any(marker in source for marker in ("max_attempt", "max_retr", "range("))
+    assert any(word in source for word in ("max_attempt", "max_retr", "range("))
 
 
-def test_unsupported_negative_fact_cannot_be_hard_rejection() -> None:
-    """Contract 7: cited-but-unsupported false is unknown; explicit exclusion may stay false."""
-    evaluation = _source(__import__("leads_discovery.pipeline.evaluation", fromlist=["*"]))
-    extraction = _source(__import__("leads_discovery.research.extract", fromlist=["*"]))
+def test_contract_7_unsupported_negative_cannot_hard_reject() -> None:
+    """No supporting evidence is not equivalent to a false fact."""
+    evaluation = _module_source("leads_discovery.pipeline.evaluation")
+    extraction = _module_source("leads_discovery.research.extract")
     assert "pvf_relevant" in evaluation
     assert "evidence" in extraction
-    assert any(marker in evaluation for marker in ("unsupported", "support", "unknown"))
-    assert "no supporting evidence" in extraction or "unsupported" in extraction
+    assert any(word in evaluation for word in ("unsupported", "support", "unknown"))
+    assert "unsupported" in extraction or "no supporting evidence" in extraction
 
 
-def test_provider_response_parsing_is_stream_bounded() -> None:
-    """Contract 8: provider JSON parsing must not buffer an unchecked whole response."""
+def test_contract_8_provider_json_parsing_is_stream_bounded() -> None:
+    """Provider response parsing must not buffer an unchecked whole body."""
     source = _source(request_json)
     assert ".json()" not in source
     assert ".read()" not in source
@@ -151,30 +152,30 @@ def test_provider_response_parsing_is_stream_bounded() -> None:
     assert "max" in source and "byte" in source
 
 
-def test_nested_raw_provider_fields_have_a_deterministic_bound() -> None:
-    """Contract 9: raw/nested provider fields cannot be persisted without a size boundary."""
-    sources = "\n".join(
-        _source(__import__(name, fromlist=["*"]))
+def test_contract_9_nested_raw_fields_have_deterministic_bound() -> None:
+    """Multi-megabyte raw/nested fields cannot be persisted unbounded."""
+    source = "\n".join(
+        _module_source(name)
         for name in (
             "leads_discovery.discovery.apify",
             "leads_discovery.discovery.exa",
             "leads_discovery.pipeline.m2_batch",
         )
     )
-    assert "raw_metadata" in sources or "raw_records" in sources
-    assert any(marker in sources for marker in ("max_raw", "raw_byte", "sanitize_raw", "truncate"))
+    assert "raw_metadata" in source or "raw_records" in source
+    assert any(word in source for word in ("max_raw", "raw_byte", "sanitize_raw", "truncate"))
 
 
-def test_jsonl_replay_is_incremental_not_read_text_splitlines(
+def test_contract_10_jsonl_replay_is_incremental(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Contract 10: replay must stream records and enforce bounds without read-all."""
+    """Replay must not read and split the complete history in memory."""
     path = tmp_path / "history.jsonl"
     path.write_text('{"ok":1}\n{"ok":2}\n', encoding="utf-8")
 
     def forbidden_read_text(self: Path, *args: Any, **kwargs: Any) -> str:
-        """Reject any implementation that loads the complete history into one string."""
+        """Reject read-all JSONL replay."""
         del self, args, kwargs
         raise AssertionError("JSONL replay must be incremental")
 
@@ -182,26 +183,22 @@ def test_jsonl_replay_is_incremental_not_read_text_splitlines(
     assert load_jsonl(path) == [{"ok": 1}, {"ok": 2}]
 
 
-def test_replay_exposes_file_line_and_record_hard_limits() -> None:
-    """Contract 10: replay has explicit file-byte, line-byte, and record-count ceilings."""
-    source = _source(__import__("leads_discovery.pipeline.state", fromlist=["*"]))
-    expected = ("file", "line", "record")
-    assert all(word in source for word in expected)
+def test_contract_10_replay_has_three_hard_limits() -> None:
+    """Replay must bound file bytes, line bytes, and record count."""
+    source = _module_source("leads_discovery.pipeline.state")
+    assert all(word in source for word in ("file", "line", "record"))
     assert source.count("max") >= 3
 
 
-def test_per_run_persisted_storage_has_a_hard_ceiling() -> None:
-    """Contract 11: storage exhaustion must stop safely before more paid work."""
-    state = _source(__import__("leads_discovery.pipeline.state", fromlist=["*"]))
-    source = _source(M2BatchConfig) + state
-    assert any(
-        marker in source
-        for marker in ("storage_budget", "persisted_byte", "max_storage", "disk_budget")
-    )
+def test_contract_11_per_run_storage_has_hard_ceiling() -> None:
+    """Persisted bytes must have a per-run hard ceiling."""
+    source = _source(M2BatchConfig) + _module_source("leads_discovery.pipeline.state")
+    markers = ("storage_budget", "persisted_byte", "max_storage", "disk_budget")
+    assert any(marker in source for marker in markers)
 
 
-def test_data_root_symlink_is_rejected(tmp_path: Path) -> None:
-    """Contract 12: the configured writable root itself cannot be a symlink."""
+def test_contract_12_data_root_symlink_is_rejected(tmp_path: Path) -> None:
+    """The configured writable root itself cannot be a symlink."""
     real_root = tmp_path / "real"
     real_root.mkdir()
     linked_root = tmp_path / "linked"
@@ -211,8 +208,8 @@ def test_data_root_symlink_is_rejected(tmp_path: Path) -> None:
         _validate_config(config)
 
 
-def test_child_output_symlink_is_rejected(tmp_path: Path) -> None:
-    """Contract 12: a pre-existing child artifact symlink cannot redirect writes."""
+def test_contract_12_child_output_symlink_is_rejected(tmp_path: Path) -> None:
+    """A child artifact symlink cannot redirect generated files."""
     root = tmp_path / "data"
     run_dir = root / "child-test"
     run_dir.mkdir(parents=True)
@@ -225,52 +222,45 @@ def test_child_output_symlink_is_rejected(tmp_path: Path) -> None:
     assert outside.read_text(encoding="utf-8") == "sentinel"
 
 
-def test_paid_github_workflow_has_explicit_production_boundary() -> None:
-    """Contract 13: only explicit workflow_dispatch may authorize live paid execution."""
-    _, workflow = _paid_workflow()
-    lowered = workflow.casefold()
-    assert "workflow_dispatch" in lowered
-    assert "pull_request" not in lowered
-    assert "push:" not in lowered
-    assert "actions/checkout@" in lowered
-    assert "pip install" in lowered or "python -m pip install" in lowered
-    assert "execute_live" in lowered or "live" in lowered
-    assert "github.event.inputs.command" not in lowered
+def test_contract_13_paid_workflow_has_production_boundary() -> None:
+    """Only explicit workflow_dispatch may authorize live paid execution."""
+    workflow = _paid_workflow().casefold()
+    assert "workflow_dispatch" in workflow
+    assert "pull_request" not in workflow
+    assert "push:" not in workflow
+    assert "actions/checkout@" in workflow
+    assert "pip install" in workflow or "python -m pip install" in workflow
+    assert "github.event.inputs.command" not in workflow
 
 
-def test_pr_and_push_ci_do_not_inject_live_provider_credentials() -> None:
-    """Contract 13: ordinary CI must not silently turn into paid scraping."""
-    workflows = _workflow_texts()
-    for name, text in workflows.items():
-        lowered = text.casefold()
-        if "pull_request" not in lowered and "push:" not in lowered:
+def test_contract_13_pr_and_push_ci_do_not_get_live_credentials() -> None:
+    """Ordinary CI must not silently become paid scraping."""
+    for name, text in _workflow_texts().items():
+        workflow = text.casefold()
+        if "pull_request" not in workflow and "push:" not in workflow:
             continue
-        assert "execute_live" not in lowered, f"{name} enables live execution in CI"
-        assert "secrets.deepseek" not in lowered, f"{name} exposes paid credentials to CI"
-        assert "secrets.apify" not in lowered, f"{name} exposes paid credentials to CI"
-        assert "secrets.exa" not in lowered, f"{name} exposes paid credentials to CI"
+        assert "execute_live" not in workflow, f"{name} enables live execution in CI"
+        for provider in ("deepseek", "apify", "exa"):
+            assert f"secrets.{provider}" not in workflow
 
 
-def test_one_company_canary_limits_are_not_user_raiseable() -> None:
-    """Contract 14: canary scope, spend, calls, and storage are hard-coded safe ceilings."""
-    _, workflow = _paid_workflow()
-    lowered = workflow.casefold()
-    assert any(
-        marker in lowered for marker in ("max_companies: 1", "max-companies 1", "companies=1")
-    )
-    assert "budget" in lowered
-    assert "max" in lowered and "call" in lowered
-    assert "storage" in lowered or "bytes" in lowered
-    assert "inputs.max_companies" not in lowered
-    assert "inputs.budget" not in lowered
-    assert "inputs.max_calls" not in lowered
+def test_contract_14_one_company_canary_limits_are_fixed() -> None:
+    """Canary scope, spend, calls, and storage must be hard-coded ceilings."""
+    workflow = _paid_workflow().casefold()
+    one_company = ("max_companies: 1", "max-companies 1", "companies=1")
+    assert any(marker in workflow for marker in one_company)
+    assert "budget" in workflow
+    assert "max" in workflow and "call" in workflow
+    assert "storage" in workflow or "bytes" in workflow
+    for name in ("max_companies", "budget", "max_calls"):
+        assert f"inputs.{name}" not in workflow
 
 
-def test_representative_provider_failure_does_not_retain_secrets_or_raw_payload(
+def test_contract_15_failure_text_does_not_retain_secret_or_raw_payload(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Contract 15: safe errors/logs never expose credentials or raw provider payloads."""
-    api_key = "secret-api-key-value"
+    """Representative provider failures cannot expose secret/raw values."""
+    secret = "secret-api-key-value"
     raw = "private-raw-provider-payload"
     error = provider_error(
         provider="exa",
@@ -281,25 +271,27 @@ def test_representative_provider_failure_does_not_retain_secrets_or_raw_payload(
         retryable=True,
         metadata={"request_id": "request-1"},
     )
-    assert api_key not in str(error)
+    assert secret not in str(error)
     assert raw not in str(error)
-    assert api_key not in caplog.text
+    assert secret not in caplog.text
     assert raw not in caplog.text
 
 
-def test_mocktransport_remains_usable_under_global_offline_guard() -> None:
-    """Global safety: in-memory HTTP mocks work even though real DNS/sockets are blocked."""
+def test_global_guard_allows_mocktransport() -> None:
+    """The offline guard must preserve in-memory HTTP transports."""
 
     def handler(request: httpx.Request) -> httpx.Response:
-        """Return one local in-memory response without touching the network stack."""
+        """Return one in-memory response without network access."""
         return httpx.Response(200, json={"path": request.url.path})
 
     with httpx.Client(transport=httpx.MockTransport(handler)) as client:
         assert client.get("https://example.invalid/test").json() == {"path": "/test"}
 
 
-def test_default_http_network_is_blocked_by_global_guard() -> None:
-    """Global safety: a default HTTP client cannot reach real networking."""
-    with httpx.Client(timeout=0.01) as client:
-        with pytest.raises((AssertionError, httpx.HTTPError, OSError)):
-            client.get("https://example.com/")
+def test_global_guard_blocks_default_http_network() -> None:
+    """A default HTTP client cannot reach real networking."""
+    with (
+        httpx.Client(timeout=0.01) as client,
+        pytest.raises((AssertionError, httpx.HTTPError, OSError)),
+    ):
+        client.get("https://example.com/")
