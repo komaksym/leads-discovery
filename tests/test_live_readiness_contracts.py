@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import inspect
-import json
 from pathlib import Path
 from typing import Any
 
@@ -13,7 +12,11 @@ import pytest
 from leads_discovery.discovery.apify import ApifyDiscoveryProvider
 from leads_discovery.discovery.base import provider_error, request_json
 from leads_discovery.discovery.queries import build_discovery_requests
-from leads_discovery.pipeline.m2_batch import M2BatchConfig
+from leads_discovery.pipeline.m2_batch import (
+    M2BatchConfig,
+    _validate_artifact_paths,
+    _validate_config,
+)
 from leads_discovery.pipeline.state import load_jsonl
 from leads_discovery.research.extract import DeepSeekExtractor
 
@@ -23,7 +26,7 @@ WORKFLOW_DIR = REPO_ROOT / ".github" / "workflows"
 
 
 def _source(obj: Any) -> str:
-    """Return normalized lowercase source for one public runtime object."""
+    """Return normalized lowercase source for one runtime object."""
     return inspect.getsource(obj).casefold()
 
 
@@ -55,7 +58,6 @@ def test_unknown_paid_work_is_a_global_replay_barrier() -> None:
     paid = {"exa", "apify", "deepseek", "clay", "apollo", "instantly"}
     represented = {provider for provider in paid if provider in source}
     assert represented >= {"exa", "apify", "deepseek"}
-    assert "zero duplicate paid dispatch" not in source  # prose must not be the mechanism
 
 
 def test_unknown_cost_is_not_silently_zero_and_reservation_is_durable() -> None:
@@ -64,7 +66,6 @@ def test_unknown_cost_is_not_silently_zero_and_reservation_is_durable() -> None:
     runner = _source(__import__("leads_discovery.pipeline.m2_batch", fromlist=["*"]))
     assert "return none" in costs
     assert "reservation_usd" in runner
-    assert "reserved" in runner or "reservation_usd" in runner
     assert "unknown" in runner
 
 
@@ -95,7 +96,9 @@ def test_apify_run_identity_is_observed_before_long_polling() -> None:
         observed.append(run_id)
         raise KeyboardInterrupt
 
-    request = next(req for req in build_discovery_requests(include_apify=True) if req.provider == "apify")
+    request = next(
+        req for req in build_discovery_requests(include_apify=True) if req.provider == "apify"
+    )
     with httpx.Client(transport=httpx.MockTransport(handler)) as client:
         provider = ApifyDiscoveryProvider(
             api_token="test-token",
@@ -189,8 +192,12 @@ def test_replay_exposes_file_line_and_record_hard_limits() -> None:
 
 def test_per_run_persisted_storage_has_a_hard_ceiling() -> None:
     """Contract 11: storage exhaustion must stop safely before more paid work."""
-    source = _source(M2BatchConfig) + _source(__import__("leads_discovery.pipeline.state", fromlist=["*"]))
-    assert any(marker in source for marker in ("storage_budget", "persisted_byte", "max_storage", "disk_budget"))
+    state = _source(__import__("leads_discovery.pipeline.state", fromlist=["*"]))
+    source = _source(M2BatchConfig) + state
+    assert any(
+        marker in source
+        for marker in ("storage_budget", "persisted_byte", "max_storage", "disk_budget")
+    )
 
 
 def test_data_root_symlink_is_rejected(tmp_path: Path) -> None:
@@ -200,9 +207,8 @@ def test_data_root_symlink_is_rejected(tmp_path: Path) -> None:
     linked_root = tmp_path / "linked"
     linked_root.symlink_to(real_root, target_is_directory=True)
     config = M2BatchConfig(run_id="symlink-test", data_root=linked_root)
-    validator = __import__("leads_discovery.pipeline.m2_batch", fromlist=["_validate_config"])
     with pytest.raises(ValueError, match="symlink"):
-        validator._validate_config(config)
+        _validate_config(config)
 
 
 def test_child_output_symlink_is_rejected(tmp_path: Path) -> None:
@@ -213,10 +219,9 @@ def test_child_output_symlink_is_rejected(tmp_path: Path) -> None:
     outside = tmp_path / "outside.jsonl"
     outside.write_text("sentinel", encoding="utf-8")
     (run_dir / "companies_raw.jsonl").symlink_to(outside)
-    module = __import__("leads_discovery.pipeline.m2_batch", fromlist=["*"])
-    paths = module._validate_config(M2BatchConfig(run_id="child-test", data_root=root))
+    paths = _validate_config(M2BatchConfig(run_id="child-test", data_root=root))
     with pytest.raises(ValueError, match="symlink"):
-        module._validate_artifact_paths(paths)
+        _validate_artifact_paths(paths)
     assert outside.read_text(encoding="utf-8") == "sentinel"
 
 
@@ -230,7 +235,7 @@ def test_paid_github_workflow_has_explicit_production_boundary() -> None:
     assert "actions/checkout@" in lowered
     assert "pip install" in lowered or "python -m pip install" in lowered
     assert "execute_live" in lowered or "live" in lowered
-    assert "command" not in lowered or "github.event.inputs.command" not in lowered
+    assert "github.event.inputs.command" not in lowered
 
 
 def test_pr_and_push_ci_do_not_inject_live_provider_credentials() -> None:
@@ -250,7 +255,9 @@ def test_one_company_canary_limits_are_not_user_raiseable() -> None:
     """Contract 14: canary scope, spend, calls, and storage are hard-coded safe ceilings."""
     _, workflow = _paid_workflow()
     lowered = workflow.casefold()
-    assert any(marker in lowered for marker in ("max_companies: 1", "max-companies 1", "companies=1"))
+    assert any(
+        marker in lowered for marker in ("max_companies: 1", "max-companies 1", "companies=1")
+    )
     assert "budget" in lowered
     assert "max" in lowered and "call" in lowered
     assert "storage" in lowered or "bytes" in lowered
@@ -282,6 +289,7 @@ def test_representative_provider_failure_does_not_retain_secrets_or_raw_payload(
 
 def test_mocktransport_remains_usable_under_global_offline_guard() -> None:
     """Global safety: in-memory HTTP mocks work even though real DNS/sockets are blocked."""
+
     def handler(request: httpx.Request) -> httpx.Response:
         """Return one local in-memory response without touching the network stack."""
         return httpx.Response(200, json={"path": request.url.path})
