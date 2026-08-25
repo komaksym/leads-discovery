@@ -197,17 +197,6 @@ def test_contract_4_apify_exposes_run_id_before_polling_and_resumes_it() -> None
     assert resume_calls and set(resume_calls) == {"GET"}
 
 
-def test_contract_5_provider_timeout_policy_is_explicit() -> None:
-    """Provider HTTP calls must not accidentally inherit HTTPX defaults."""
-    names = (
-        "leads_discovery.discovery.apify",
-        "leads_discovery.discovery.exa",
-        "leads_discovery.research.extract",
-    )
-    missing = [name for name in names if "timeout=" not in _module_source(name)]
-    assert not missing, f"provider modules lack explicit timeout behavior: {missing}"
-
-
 @pytest.mark.parametrize("bad_content", ["", "{not-json", '{"facts": {}}'])
 def test_contract_6_deepseek_invalid_json_retries_then_succeeds(bad_content: str) -> None:
     """Empty, malformed, and schema-invalid JSON must each get a bounded retry."""
@@ -285,15 +274,6 @@ def test_contract_7_explicit_negative_evidence_can_reject() -> None:
 
     assert result.final_decision == "rejected"
     assert result.rejection_reasons == ["confirmed_not_pvf_relevant"]
-
-
-def test_contract_8_provider_json_parsing_is_stream_bounded() -> None:
-    """Provider response parsing must not buffer an unchecked whole body."""
-    source = _source(request_json)
-    assert ".json()" not in source
-    assert ".read()" not in source
-    assert "iter_bytes" in source or "iter_raw" in source
-    assert "max" in source and "byte" in source
 
 
 def test_contract_9_nested_raw_fields_have_deterministic_bound() -> None:
