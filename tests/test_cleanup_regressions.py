@@ -108,7 +108,7 @@ def test_exa_admission_includes_next_request_reservation(
             config,
             discovery={},
             researcher=ExaEvidenceResearcher(api_key="test", client=client),
-            extractor=_BombExtractor(),  # type: ignore[arg-type]
+            extractor=_BombExtractor(),
         )
 
     assert calls == expected_calls
