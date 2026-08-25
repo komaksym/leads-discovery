@@ -10,22 +10,29 @@ from typing import Any
 
 import httpx
 import pytest
-from m3_factories import build_company
 
 from leads_discovery.discovery.apify import ApifyDiscoveryProvider
 from leads_discovery.discovery.base import DiscoveryProviderError, provider_error, request_json
 from leads_discovery.discovery.queries import build_discovery_requests
-from leads_discovery.models import CompanyRecord, EvidenceBundle, EvidenceItem
+from leads_discovery.models import (
+    CompanyRecord,
+    EvidenceBundle,
+    EvidenceItem,
+    ExtractedFact,
+    ExtractionResult,
+    UsageEvent,
+)
 from leads_discovery.pipeline.m2_batch import (
     M2BatchConfig,
     _validate_artifact_paths,
     _validate_config,
 )
-from leads_discovery.pipeline.state import load_jsonl
+from leads_discovery.pipeline.state import load_jsonl, write_jsonl_atomic, write_text_atomic
 from leads_discovery.research.extract import (
     FACT_KEYS,
     DeepSeekExtractor,
     DeepSeekPriceSchedule,
+    apply_extraction,
 )
 from leads_discovery.scoring import evaluate_company
 
@@ -52,12 +59,12 @@ def _workflow_texts() -> dict[str, str]:
 
 
 def _paid_workflow() -> str:
-    """Return the one dedicated live/canary workflow."""
-    matches = [
-        text
-        for text in _workflow_texts().values()
-        if any(word in text.casefold() for word in ("canary", "live", "paid"))
-    ]
+    """Return the one workflow whose trigger is manual and whose job runs the fixed canary."""
+    matches: list[str] = []
+    for text in _workflow_texts().values():
+        trigger = text.split("jobs:", 1)[0].casefold()
+        if "workflow_dispatch:" in trigger and "production_canary" in text.casefold():
+            matches.append(text)
     assert len(matches) == 1, "exactly one dedicated paid live/canary workflow is required"
     return matches[0]
 
@@ -72,15 +79,17 @@ def _deepseek_company() -> CompanyRecord:
     )
 
 
-def _deepseek_bundle() -> EvidenceBundle:
-    """Build one bounded retained-evidence bundle for DeepSeek retry tests."""
+def _deepseek_bundle(
+    excerpt: str = "Readiness Valve distributes industrial valves.",
+) -> EvidenceBundle:
+    """Build one bounded retained-evidence bundle for DeepSeek and evidence tests."""
     return EvidenceBundle(
         company_id="cmp_live_readiness",
         items=[
             EvidenceItem(
                 evidence_id="ev_live_readiness",
                 url="https://readiness.example/about",
-                excerpt="Readiness Valve distributes industrial valves.",
+                excerpt=excerpt,
                 provider="exa",
             )
         ],
@@ -110,6 +119,27 @@ def _valid_deepseek_content() -> str:
         for key in FACT_KEYS
     }
     return json.dumps({"facts": facts})
+
+
+def _evaluate_pvf_false(excerpt: str) -> CompanyRecord:
+    """Apply one cited negative model fact through the production extraction boundary."""
+    facts = {key: ExtractedFact(None, 0.0, []) for key in FACT_KEYS}
+    facts["pvf_relevant"] = ExtractedFact(False, 0.95, ["ev_live_readiness"])
+    bundle = _deepseek_bundle(excerpt)
+    extracted = apply_extraction(
+        _deepseek_company(),
+        bundle,
+        ExtractionResult(
+            company_id="cmp_live_readiness",
+            model="deepseek-v4-flash",
+            facts=facts,
+            usage_event=UsageEvent(
+                provider="deepseek",
+                operation="structured_extraction",
+            ),
+        ),
+    )
+    return evaluate_company(extracted)
 
 
 def test_contract_1_unknown_paid_work_is_global_replay_barrier() -> None:
@@ -197,6 +227,17 @@ def test_contract_4_apify_exposes_run_id_before_polling_and_resumes_it() -> None
     assert resume_calls and set(resume_calls) == {"GET"}
 
 
+def test_contract_5_provider_timeout_policy_is_explicit() -> None:
+    """Provider HTTP calls must not accidentally inherit HTTPX defaults."""
+    names = (
+        "leads_discovery.discovery.apify",
+        "leads_discovery.discovery.exa",
+        "leads_discovery.research.extract",
+    )
+    missing = [name for name in names if "timeout=" not in _module_source(name)]
+    assert not missing, f"provider modules lack explicit timeout behavior: {missing}"
+
+
 @pytest.mark.parametrize("bad_content", ["", "{not-json", '{"facts": {}}'])
 def test_contract_6_deepseek_invalid_json_retries_then_succeeds(bad_content: str) -> None:
     """Empty, malformed, and schema-invalid JSON must each get a bounded retry."""
@@ -248,46 +289,49 @@ def test_contract_6_deepseek_retry_exhaustion_is_bounded() -> None:
 
 def test_contract_7_unsupported_negative_cannot_hard_reject() -> None:
     """A cited false claim unsupported by its text must be treated as unknown."""
-    company = build_company(facts={"pvf_relevant": (False, 0.95)})
-    evidence = company.evidence[0]
-    payload = evidence.to_dict()
-    payload["excerpt"] = "We distribute industrial pipe, valves, and fittings."
-    company.evidence = [EvidenceItem.from_dict(payload)]
-
-    result = evaluate_company(company)
-
+    result = _evaluate_pvf_false("We distribute industrial pipe, valves, and fittings.")
     assert result.final_decision == "uncertain"
     assert "confirmed_not_pvf_relevant" not in result.rejection_reasons
 
 
 def test_contract_7_explicit_negative_evidence_can_reject() -> None:
     """Explicit exclusionary evidence may support a normal negative hard fact."""
-    company = build_company(facts={"pvf_relevant": (False, 0.95)})
-    evidence = company.evidence[0]
-    payload = evidence.to_dict()
-    payload["excerpt"] = (
+    result = _evaluate_pvf_false(
         "We sell electrical supplies only and do not distribute pipe, valves, or fittings."
     )
-    company.evidence = [EvidenceItem.from_dict(payload)]
-
-    result = evaluate_company(company)
-
     assert result.final_decision == "rejected"
     assert result.rejection_reasons == ["confirmed_not_pvf_relevant"]
 
 
-def test_contract_9_nested_raw_fields_have_deterministic_bound() -> None:
-    """Multi-megabyte raw/nested fields cannot be persisted unbounded."""
-    source = "\n".join(
-        _module_source(name)
-        for name in (
-            "leads_discovery.discovery.apify",
-            "leads_discovery.discovery.exa",
-            "leads_discovery.pipeline.m2_batch",
-        )
+def test_contract_7_unrelated_negation_cannot_support_hard_negative() -> None:
+    """Negation elsewhere in a citation cannot validate the opposite PVF claim."""
+    result = _evaluate_pvf_false(
+        "We do not sell electrical equipment. We distribute industrial pipe, valves, and fittings."
     )
-    assert "raw_metadata" in source or "raw_records" in source
-    assert any(word in source for word in ("max_raw", "raw_byte", "sanitize_raw", "truncate"))
+    assert result.final_decision == "uncertain"
+    assert "confirmed_not_pvf_relevant" not in result.rejection_reasons
+
+
+def test_contract_8_provider_json_parsing_is_stream_bounded() -> None:
+    """Provider response parsing must not buffer an unchecked whole body."""
+    source = _source(request_json)
+    assert ".json()" not in source
+    assert ".read()" not in source
+    assert "iter_bytes" in source or "iter_raw" in source
+    assert "max" in source and "byte" in source
+
+
+def test_contract_9_nested_raw_fields_have_deterministic_bound(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An oversized nested provider field cannot cross the persisted record ceiling."""
+    monkeypatch.setenv("LEADS_MAX_RECORD_BYTES", "128")
+    monkeypatch.setenv("LEADS_MAX_FILE_BYTES", "4096")
+    monkeypatch.setenv("LEADS_MAX_RUN_BYTES", "4096")
+    payload = {"raw_metadata": {"nested": {"blob": "x" * 1024}}}
+    with pytest.raises(ValueError, match="record exceeds"):
+        write_jsonl_atomic(tmp_path / "raw.jsonl", [payload])
 
 
 def test_contract_10_jsonl_replay_is_incremental(
@@ -314,11 +358,17 @@ def test_contract_10_replay_has_three_hard_limits() -> None:
     assert source.count("max") >= 3
 
 
-def test_contract_11_per_run_storage_has_hard_ceiling() -> None:
-    """Persisted bytes must have a per-run hard ceiling."""
-    source = _source(M2BatchConfig) + _module_source("leads_discovery.pipeline.state")
-    markers = ("storage_budget", "persisted_byte", "max_storage", "disk_budget")
-    assert any(marker in source for marker in markers)
+def test_contract_11_per_run_storage_has_hard_ceiling(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The configured aggregate run-byte ceiling blocks the next unsafe write."""
+    monkeypatch.setenv("LEADS_MAX_FILE_BYTES", "128")
+    monkeypatch.setenv("LEADS_MAX_RUN_BYTES", "40")
+    write_text_atomic(tmp_path / "one.txt", "a" * 30)
+    with pytest.raises(ValueError, match="run would exceed"):
+        write_text_atomic(tmp_path / "two.txt", "b" * 20)
+    assert not (tmp_path / "two.txt").exists()
 
 
 def test_contract_12_data_root_symlink_is_rejected(tmp_path: Path) -> None:
@@ -347,7 +397,7 @@ def test_contract_12_child_output_symlink_is_rejected(tmp_path: Path) -> None:
 
 
 def test_contract_12_parent_component_redirect_is_rejected(tmp_path: Path) -> None:
-    """Replacing the validated run directory with a symlink must fail closed."""
+    """Replacing the validated run directory cannot redirect an actual artifact write."""
     root = tmp_path / "data"
     root.mkdir()
     run_dir = root / "parent-test"
@@ -359,7 +409,7 @@ def test_contract_12_parent_component_redirect_is_rejected(tmp_path: Path) -> No
     run_dir.symlink_to(outside, target_is_directory=True)
 
     with pytest.raises(ValueError, match="symlink"):
-        _validate_artifact_paths(paths)
+        write_text_atomic(paths.checkpoint, "{}\n")
 
     assert list(outside.iterdir()) == []
 
@@ -387,15 +437,25 @@ def test_contract_13_pr_and_push_ci_do_not_get_live_credentials() -> None:
 
 
 def test_contract_14_one_company_canary_limits_are_fixed() -> None:
-    """Canary scope, spend, calls, and storage must be hard-coded ceilings."""
+    """Workflow and fixed wrapper together must enforce tiny non-input canary ceilings."""
     workflow = _paid_workflow().casefold()
-    one_company = ("max_companies: 1", "max-companies 1", "companies=1")
-    assert any(marker in workflow for marker in one_company)
-    assert "budget" in workflow
-    assert "max" in workflow and "call" in workflow
-    assert "storage" in workflow or "bytes" in workflow
-    for name in ("max_companies", "budget", "max_calls"):
-        assert f"inputs.{name}" not in workflow
+    wrapper = _module_source("leads_discovery.production_canary")
+    assert "production_canary" in workflow
+    assert all(
+        marker in wrapper
+        for marker in (
+            "_max_candidates",
+            "_max_evaluated",
+            "_max_contacts",
+            "_max_paid_contacts",
+            "_exa_budget_usd",
+            "_deepseek_budget_usd",
+            "_apollo_credit_cap",
+            "_instantly_call_cap",
+        )
+    )
+    assert "leads_max_run_bytes" in workflow
+    assert "inputs:" not in workflow
 
 
 def test_contract_15_failure_logs_do_not_retain_secrets_or_raw_payload(

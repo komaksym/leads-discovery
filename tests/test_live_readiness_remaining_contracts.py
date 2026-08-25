@@ -3,17 +3,27 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
-from typing import Any, cast
+from typing import Any
 
 import httpx
 import pytest
-from m3_factories import build_company
 
 from leads_discovery.discovery.base import DiscoveryProviderError
 from leads_discovery.discovery.exa import ExaDiscoveryProvider
 from leads_discovery.discovery.queries import build_discovery_requests
-from leads_discovery.models import CompanyRecord, DiscoveryRequest, EvidenceItem
+from leads_discovery.models import (
+    CompanyRecord,
+    DiscoveryRequest,
+    EvidenceBundle,
+    EvidenceItem,
+    ExtractedFact,
+    ExtractionResult,
+    UsageEvent,
+)
+from leads_discovery.research.extract import FACT_KEYS, apply_extraction
 from leads_discovery.scoring import evaluate_company
+
+_EVIDENCE_ID = "ev_remaining_readiness"
 
 
 class _GuardedChunkStream(httpx.SyncByteStream):
@@ -57,14 +67,40 @@ def _exa_request() -> DiscoveryRequest:
     )
 
 
-def _company_with_negative_relevance_evidence(excerpt: str) -> CompanyRecord:
-    """Build one high-confidence negative relevance claim backed by supplied evidence."""
-    company = build_company(facts={"pvf_relevant": (False, 0.95)})
-    evidence = company.evidence[0]
-    payload = evidence.to_dict()
-    payload["excerpt"] = excerpt
-    company.evidence = [EvidenceItem.from_dict(payload)]
-    return company
+def _evaluate_negative_relevance(excerpt: str) -> CompanyRecord:
+    """Apply one cited negative relevance claim through the production extraction boundary."""
+    company = CompanyRecord(
+        company_id="cmp_remaining_readiness",
+        name="Remaining Readiness Valve",
+        domain="remaining.example",
+        normalized_domain="remaining.example",
+    )
+    bundle = EvidenceBundle(
+        company_id=company.company_id,
+        items=[
+            EvidenceItem(
+                evidence_id=_EVIDENCE_ID,
+                url="https://remaining.example/about",
+                excerpt=excerpt,
+                provider="exa",
+            )
+        ],
+        raw_records=[],
+        usage_events=[],
+    )
+    facts = {key: ExtractedFact(None, 0.0, []) for key in FACT_KEYS}
+    facts["pvf_relevant"] = ExtractedFact(False, 0.95, [_EVIDENCE_ID])
+    extracted = apply_extraction(
+        company,
+        bundle,
+        ExtractionResult(
+            company_id=company.company_id,
+            model="deepseek-v4-flash",
+            facts=facts,
+            usage_event=UsageEvent(provider="deepseek", operation="structured_extraction"),
+        ),
+    )
+    return evaluate_company(extracted)
 
 
 @pytest.mark.parametrize(
@@ -79,7 +115,7 @@ def _company_with_negative_relevance_evidence(excerpt: str) -> CompanyRecord:
 )
 def test_negative_claim_requires_semantically_associated_negation(excerpt: str) -> None:
     """Unrelated negation cannot validate pvf_relevant=false or hard-reject a company."""
-    result = evaluate_company(_company_with_negative_relevance_evidence(excerpt))
+    result = _evaluate_negative_relevance(excerpt)
 
     assert result.final_decision == "uncertain"
     assert "confirmed_not_pvf_relevant" not in result.rejection_reasons
@@ -87,10 +123,8 @@ def test_negative_claim_requires_semantically_associated_negation(excerpt: str) 
 
 def test_genuine_pvf_negation_remains_valid_negative_evidence() -> None:
     """A negation directly governing PVF selling/distribution may support rejection."""
-    result = evaluate_company(
-        _company_with_negative_relevance_evidence(
-            "We do not sell or distribute pipe, valves, or fittings."
-        )
+    result = _evaluate_negative_relevance(
+        "We do not sell or distribute pipe, valves, or fittings."
     )
 
     assert result.final_decision == "rejected"
@@ -105,10 +139,11 @@ def test_exa_chunked_response_limit_stops_stream_consumption_early() -> None:
         """Return an indefinitely chunked provider body with no Content-Length."""
         return httpx.Response(200, stream=stream)
 
-    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
-        provider = ExaDiscoveryProvider(api_key="test-key", client=client)
-        with pytest.raises(DiscoveryProviderError):
-            provider.search(_exa_request())
+    with (
+        httpx.Client(transport=httpx.MockTransport(handler)) as client,
+        pytest.raises(DiscoveryProviderError),
+    ):
+        ExaDiscoveryProvider(api_key="test-key", client=client).search(_exa_request())
 
     assert stream.chunks_consumed < 32
 
@@ -125,10 +160,11 @@ def test_exa_oversized_content_length_is_rejected_before_body_read() -> None:
             stream=stream,
         )
 
-    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
-        provider = ExaDiscoveryProvider(api_key="test-key", client=client)
-        with pytest.raises(DiscoveryProviderError):
-            provider.search(_exa_request())
+    with (
+        httpx.Client(transport=httpx.MockTransport(handler)) as client,
+        pytest.raises(DiscoveryProviderError),
+    ):
+        ExaDiscoveryProvider(api_key="test-key", client=client).search(_exa_request())
 
     assert stream.chunks_consumed == 0
 
@@ -147,52 +183,26 @@ def test_exa_small_json_response_still_works_with_response_limits() -> None:
     assert result.records == []
 
 
-def _timeout_signature(value: object) -> tuple[float | None, ...]:
-    """Normalize supported HTTPX timeout forms without requiring one exact duration."""
-    if isinstance(value, bool):
-        raise AssertionError("boolean is not a provider timeout policy")
-    if isinstance(value, (int, float)):
-        number = float(value)
-        return (number, number, number, number)
-    if isinstance(value, httpx.Timeout):
-        return (value.connect, value.read, value.write, value.pool)
-    raise AssertionError(f"unsupported provider timeout value: {type(value).__name__}")
+def test_exa_provider_boundary_owns_explicit_deterministic_timeout() -> None:
+    """Exa request timeout behavior must remain explicit even with a timeout-free caller client."""
+    observed: list[dict[str, Any]] = []
 
+    def handler(request: httpx.Request) -> httpx.Response:
+        """Capture the timeout policy attached to the actual Exa provider request."""
+        timeout = request.extensions.get("timeout")
+        assert isinstance(timeout, dict)
+        observed.append(timeout)
+        return httpx.Response(200, json={"results": []})
 
-def test_exa_default_adapter_owns_explicit_deterministic_timeout(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Default Exa construction must explicitly configure its own HTTP timeout policy."""
-    real_client = httpx.Client
-    provider_type = cast(Any, ExaDiscoveryProvider)
-    observed: list[object] = []
-    created: list[httpx.Client] = []
+    with httpx.Client(transport=httpx.MockTransport(handler), timeout=None) as client:
+        first = ExaDiscoveryProvider(api_key="test-key", client=client).search(_exa_request())
+        second = ExaDiscoveryProvider(api_key="test-key", client=client).search(_exa_request())
 
-    def capture_client(*args: Any, **kwargs: Any) -> httpx.Client:
-        """Record explicit timeout construction while keeping a real offline client."""
-        assert "timeout" in kwargs, "Exa must not inherit HTTPX's generic default timeout"
-        observed.append(kwargs["timeout"])
-        kwargs["transport"] = httpx.MockTransport(
-            lambda _request: httpx.Response(200, json={"results": []})
-        )
-        client = real_client(*args, **kwargs)
-        created.append(client)
-        return client
-
-    monkeypatch.setattr(httpx, "Client", capture_client)
-    try:
-        first = provider_type(api_key="test-key")
-        second = provider_type(api_key="test-key")
-        del first, second
-    finally:
-        for client in created:
-            client.close()
-
+    assert first.records == []
+    assert second.records == []
     assert len(observed) == 2
-    first_timeout = _timeout_signature(observed[0])
-    second_timeout = _timeout_signature(observed[1])
-    assert first_timeout == second_timeout
-    assert all(value is not None and value > 0 for value in first_timeout)
+    assert observed[0] == observed[1]
+    assert all(value is not None and float(value) > 0 for value in observed[0].values())
 
 
 def test_exa_injected_mock_client_remains_supported() -> None:

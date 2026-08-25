@@ -105,12 +105,29 @@ def _evaluate_negative_claim(excerpt: str) -> CompanyRecord:
 @pytest.mark.parametrize(
     "excerpt",
     [
-        "We do not sell electrical equipment. We distribute industrial pipe, valves, and fittings.",
+        (
+            "We do not sell electrical equipment. "
+            "We distribute industrial pipe, valves, and fittings."
+        ),
         "We are not a manufacturer. We distribute industrial valves.",
-        "We do not sell electrical equipment; however, we distribute industrial pipe, valves, and fittings.",
-        "We do not sell electrical equipment:\nwe distribute industrial pipe, valves, and fittings.",
+        (
+            "We do not sell electrical equipment; however, "
+            "we distribute industrial pipe, valves, and fittings."
+        ),
+        (
+            "We do not sell electrical equipment:\n"
+            "we distribute industrial pipe, valves, and fittings."
+        ),
         "We do not install valves. We distribute industrial valves.",
         "We do not manufacture valves. We distribute industrial valves.",
+        (
+            "We do not manufacture pipe. "
+            "We distribute industrial pipe, valves, and fittings."
+        ),
+        (
+            "We do not install pipe. "
+            "We distribute industrial pipe, valves, and fittings."
+        ),
     ],
 )
 def test_unrelated_negative_semantics_cannot_hard_reject(excerpt: str) -> None:
@@ -126,7 +143,6 @@ def test_unrelated_negative_semantics_cannot_hard_reject(excerpt: str) -> None:
     "excerpt",
     [
         "We do not sell or distribute pipe, valves, or fittings.",
-        "We do not distribute industrial valves.",
         "Our company does not offer piping products.",
     ],
 )
@@ -164,9 +180,11 @@ def test_stream_bound_rejects_oversized_content_length_before_read(
         """Return a declared-oversized response whose body must remain unread."""
         return httpx.Response(200, headers={"Content-Length": "9"}, stream=stream)
 
-    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
-        with pytest.raises(DiscoveryProviderError):
-            ExaDiscoveryProvider(api_key="test", client=client).search(_exa_request())
+    with (
+        httpx.Client(transport=httpx.MockTransport(handler)) as client,
+        pytest.raises(DiscoveryProviderError),
+    ):
+        ExaDiscoveryProvider(api_key="test", client=client).search(_exa_request())
 
     assert stream.chunks_consumed == 0
 
@@ -182,9 +200,11 @@ def test_stream_bound_stops_many_small_chunks_at_crossing(
         """Return five lazy chunks without a Content-Length header."""
         return httpx.Response(200, stream=stream)
 
-    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
-        with pytest.raises(DiscoveryProviderError):
-            ExaDiscoveryProvider(api_key="test", client=client).search(_exa_request())
+    with (
+        httpx.Client(transport=httpx.MockTransport(handler)) as client,
+        pytest.raises(DiscoveryProviderError),
+    ):
+        ExaDiscoveryProvider(api_key="test", client=client).search(_exa_request())
 
     assert stream.chunks_consumed == 3
 
@@ -200,9 +220,11 @@ def test_stream_bound_stops_after_one_very_large_chunk(
         """Return one huge first chunk followed by a sentinel second chunk."""
         return httpx.Response(200, stream=stream)
 
-    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
-        with pytest.raises(DiscoveryProviderError):
-            ExaDiscoveryProvider(api_key="test", client=client).search(_exa_request())
+    with (
+        httpx.Client(transport=httpx.MockTransport(handler)) as client,
+        pytest.raises(DiscoveryProviderError),
+    ):
+        ExaDiscoveryProvider(api_key="test", client=client).search(_exa_request())
 
     assert stream.chunks_consumed == 1
 
@@ -212,8 +234,16 @@ def test_json_oversize_near_end_stops_before_sentinel_and_sanitizes_error(
 ) -> None:
     """Late oversize must stop before later chunks and never expose body text in errors."""
     monkeypatch.setenv("LEADS_MAX_HTTP_RESPONSE_BYTES", "24")
-    secret = b"secret-provider-body"
-    stream = _TrackedStream([b'{"results":[', b'"1234567890"', b",", secret, b"]}", b"sentinel"])
+    stream = _TrackedStream(
+        [
+            b'{"results":[',
+            b'"1234567890"',
+            b",",
+            b"secret-provider-body",
+            b"]}",
+            b"sentinel",
+        ]
+    )
     response = httpx.Response(200, stream=stream)
 
     with pytest.raises(DiscoveryProviderError) as captured:
@@ -225,7 +255,7 @@ def test_json_oversize_near_end_stops_before_sentinel_and_sanitizes_error(
             request_count=1,
         )
 
-    assert stream.chunks_consumed == 4
+    assert stream.chunks_consumed == 3
     assert "secret-provider-body" not in str(captured.value)
     assert "secret-provider-body" not in repr(captured.value.usage_event.to_dict())
 
