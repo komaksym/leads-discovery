@@ -99,8 +99,6 @@ def test_genuine_pvf_negation_remains_valid_negative_evidence() -> None:
 
 def test_exa_chunked_response_limit_stops_stream_consumption_early() -> None:
     """A no-Length oversized body must be rejected before its stream is exhausted."""
-    # The 32-chunk guard is only a runaway-read sentinel; it is not the product limit.
-    # A compliant implementation must stop at its own configured maximum before this guard.
     stream = _GuardedChunkStream(chunk=b"x" * (1024 * 1024), allowed_chunks=32)
 
     def handler(_request: httpx.Request) -> httpx.Response:
