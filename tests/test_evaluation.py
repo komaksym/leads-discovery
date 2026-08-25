@@ -1,4 +1,4 @@
-"""Contract tests for local M3 evaluation persistence and path safety."""
+"""Frozen-contract tests for local M3 evaluation persistence and path safety."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ from leads_discovery.pipeline.evaluation import EvaluationConfig, EvaluationSumm
 
 
 def _evaluate(root: Path, run_id: str, max_evaluated: int = 20) -> EvaluationSummary:
-    """Run the local evaluation API."""
+    """Run the frozen local evaluation API."""
     return evaluate_run(
         EvaluationConfig(run_id=run_id, data_root=root, max_evaluated=max_evaluated)
     )
@@ -33,7 +33,7 @@ def _symlink_or_skip(link: Path, target: Path) -> None:
 
 
 def test_latest_completed_snapshots_are_selected_sorted_and_capped(tmp_path: Path) -> None:
-    """Append-only M2 history collapses to latest completed snapshots and at most 20 IDs."""
+    """Append-only M2 history is collapsed to latest completed snapshots and at most 20 IDs."""
     old = build_company(
         facts=low_score_facts(),
         company_id="cmp_00",
@@ -92,13 +92,16 @@ def test_empty_partial_run_is_valid_but_empty_completed_run_is_error(tmp_path: P
     assert not (completed / "companies_evaluated.jsonl").exists()
 
 
-def test_atomic_recomputation_replaces_m3_and_never_mutates_authoritative_m2(
-    tmp_path: Path,
-) -> None:
-    """Rerun replaces derived M3 views while authoritative M2 artifacts stay byte-identical."""
+def test_atomic_recomputation_replaces_m3_and_never_mutates_m2(tmp_path: Path) -> None:
+    """Rerun replaces stale derived snapshots while every M2 artifact remains byte-identical."""
     first = build_company(facts=accepted_facts(), company_id="cmp_atomic")
     run_dir = write_run_inputs(tmp_path, "atomic", [first])
-    (run_dir / "companies_raw.jsonl").write_text('{"raw":1}\n', encoding="utf-8")
+    for name, content in {
+        "companies_raw.jsonl": '{"raw":1}\n',
+        "companies_deduped.jsonl": '{"dedup":1}\n',
+        "research_raw.jsonl": '{"research":1}\n',
+    }.items():
+        (run_dir / name).write_text(content, encoding="utf-8")
 
     _evaluate(tmp_path, "atomic")
     assert read_jsonl(run_dir / "companies_evaluated.jsonl")[0]["final_decision"] == "accepted"
@@ -109,9 +112,11 @@ def test_atomic_recomputation_replaces_m3_and_never_mutates_authoritative_m2(
 
     m2_names = [
         "companies_raw.jsonl",
+        "companies_deduped.jsonl",
+        "research_raw.jsonl",
         "companies_extracted.jsonl",
         "usage_events.jsonl",
-        "checkpoint.json",
+        "usage.json",
     ]
     before = {name: (run_dir / name).read_bytes() for name in m2_names}
     _evaluate(tmp_path, "atomic")
@@ -126,7 +131,7 @@ def test_atomic_recomputation_replaces_m3_and_never_mutates_authoritative_m2(
 def test_one_malformed_fact_does_not_erase_successful_peer(tmp_path: Path) -> None:
     """Fact-level invalidity yields a reviewable company instead of aborting the run."""
     good = build_company(facts=accepted_facts(), company_id="cmp_good")
-    bad = build_company(facts={"employee_count": (50, 0.90)}, company_id="cmp_bad")
+    bad = build_company(facts={"employee_count": (50, .90)}, company_id="cmp_bad")
     bad.features["employee_count"] = "fifty"
     run_dir = write_run_inputs(tmp_path, "bad-fact", [good, bad])
 
@@ -147,7 +152,7 @@ def test_raw_nonfinite_persisted_fact_is_rejected_before_m3_output_mutation(
     run_id: str,
 ) -> None:
     """Non-finite persisted fact numbers fail closed before derived artifacts are written."""
-    company = build_company(facts={"employee_count": (50, 0.90)})
+    company = build_company(facts={"employee_count": (50, .90)})
     run_dir = write_run_inputs(tmp_path, run_id, [company])
     path = run_dir / "companies_extracted.jsonl"
     raw = path.read_bytes()
@@ -160,6 +165,8 @@ def test_raw_nonfinite_persisted_fact_is_rejected_before_m3_output_mutation(
     for name in (
         "companies_evaluated.jsonl",
         "companies_ranked.csv",
+        "companies_rejected.csv",
+        "companies_uncertain.csv",
         "calibration_template.csv",
         "run_summary.json",
     ):

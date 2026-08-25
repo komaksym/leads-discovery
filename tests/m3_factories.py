@@ -1,4 +1,4 @@
-"""Strict M3 contract fixtures built only from public models."""
+"""Strict M3 contract fixtures built only from frozen public models."""
 
 from __future__ import annotations
 
@@ -6,15 +6,9 @@ import json
 from collections.abc import Iterable, Mapping
 from copy import deepcopy
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
-from leads_discovery.models import (
-    CompanyRecord,
-    EvidenceItem,
-    FactValue,
-    RunCheckpoint,
-    UsageEvent,
-)
+from leads_discovery.models import CompanyRecord, EvidenceItem, FactValue, RunCheckpoint
 
 type FactInput = tuple[FactValue, float]
 
@@ -169,35 +163,16 @@ def write_jsonl(path: Path, payloads: Iterable[dict[str, Any]]) -> None:
 
 
 def write_json(path: Path, payload: dict[str, Any]) -> None:
-    """Write one strict deterministic JSON object for a fixture artifact."""
+    """Write one strict deterministic JSON object for an M2 fixture artifact."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    text = json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False, allow_nan=False)
+    text = json.dumps(
+        payload,
+        indent=2,
+        sort_keys=True,
+        ensure_ascii=False,
+        allow_nan=False,
+    )
     path.write_text(text + "\n", encoding="utf-8", newline="\n")
-
-
-def _usage_events(usage: dict[str, Any] | None) -> list[UsageEvent]:
-    """Translate old aggregate fixture input into authoritative ledger events."""
-    if usage is None:
-        return []
-    providers = usage.get("providers", {})
-    if not isinstance(providers, dict):
-        raise ValueError("fixture usage.providers must be an object")
-    events: list[UsageEvent] = []
-    for provider, raw in sorted(providers.items()):
-        totals = cast(dict[str, Any], raw)
-        events.append(
-            UsageEvent(
-                provider=str(provider),
-                operation="fixture",
-                request_count=int(totals["request_count"]),
-                input_tokens=int(totals["input_tokens"]),
-                output_tokens=int(totals["output_tokens"]),
-                estimated_cost_usd=cast(float | None, totals["estimated_cost_usd"]),
-                exact_cost_usd=cast(float | None, totals["exact_cost_usd"]),
-                recorded_at=_FIXED_TIME,
-            )
-        )
-    return events
 
 
 def write_run_inputs(
@@ -228,7 +203,19 @@ def write_run_inputs(
         updated_at=_FIXED_TIME,
     )
     write_json(run_dir / "checkpoint.json", checkpoint.to_dict())
-    write_jsonl(run_dir / "usage_events.jsonl", (event.to_dict() for event in _usage_events(usage)))
+    if usage is None:
+        usage = {
+            "providers": {},
+            "total": {
+                "request_count": 0,
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "estimated_cost_usd": None,
+                "exact_cost_usd": None,
+            },
+        }
+    write_json(run_dir / "usage.json", usage)
+    (run_dir / "usage_events.jsonl").write_text("", encoding="utf-8", newline="\n")
     return run_dir
 
 
