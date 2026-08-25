@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from leads_discovery.models import CompanyRecord, RunCheckpoint, UsageEvent
+from leads_discovery.pipeline.git_journal import sync_checkpoint_barrier
 
 _DEFAULT_MAX_RECORD_BYTES = 256 * 1024
 _DEFAULT_MAX_FILE_BYTES = 16 * 1024 * 1024
@@ -333,7 +334,12 @@ def read_json(path: Path) -> dict[str, Any] | None:
 
 
 def write_checkpoint(path: Path, checkpoint: RunCheckpoint) -> None:
-    """Atomically replace the run checkpoint with a fully written JSON document."""
+    """Durably publish paid-operation barriers before atomically replacing local checkpoint."""
+    previous_payload = read_json(path) if path.exists() else None
+    previous = (
+        None if previous_payload is None else RunCheckpoint.from_dict(previous_payload)
+    )
+    sync_checkpoint_barrier(checkpoint, previous)
     write_json_atomic(path, checkpoint.to_dict())
 
 
