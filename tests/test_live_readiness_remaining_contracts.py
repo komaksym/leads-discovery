@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any
+from collections.abc import Iterator
+from typing import Any, cast
 
 import httpx
 import pytest
@@ -24,7 +25,7 @@ class _GuardedChunkStream(httpx.SyncByteStream):
         self._allowed_chunks = allowed_chunks
         self.chunks_consumed = 0
 
-    def __iter__(self):  # type: ignore[no-untyped-def]
+    def __iter__(self) -> Iterator[bytes]:
         """Yield chunks lazily and expose an unmistakable unbounded-read failure."""
         while True:
             if self.chunks_consumed >= self._allowed_chunks:
@@ -40,7 +41,7 @@ class _UnreadableStream(httpx.SyncByteStream):
         """Initialize the read counter used by the assertion."""
         self.chunks_consumed = 0
 
-    def __iter__(self):  # type: ignore[no-untyped-def]
+    def __iter__(self) -> Iterator[bytes]:
         """Reject the first attempted body read."""
         self.chunks_consumed += 1
         raise AssertionError("oversized Content-Length body must not be consumed")
@@ -163,6 +164,7 @@ def test_exa_default_adapter_owns_explicit_deterministic_timeout(
 ) -> None:
     """Default Exa construction must explicitly configure its own HTTP timeout policy."""
     real_client = httpx.Client
+    provider_type = cast(Any, ExaDiscoveryProvider)
     observed: list[object] = []
 
     def capture_client(*args: Any, **kwargs: Any) -> httpx.Client:
@@ -175,8 +177,8 @@ def test_exa_default_adapter_owns_explicit_deterministic_timeout(
         return real_client(*args, **kwargs)
 
     monkeypatch.setattr(httpx, "Client", capture_client)
-    first = ExaDiscoveryProvider(api_key="test-key")
-    second = ExaDiscoveryProvider(api_key="test-key")
+    first = provider_type(api_key="test-key")
+    second = provider_type(api_key="test-key")
     del first, second
 
     assert len(observed) == 2
