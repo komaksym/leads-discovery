@@ -13,8 +13,10 @@ import httpx
 
 from leads_discovery.discovery.base import (
     DiscoveryProviderError,
+    ResponseTooLargeError,
     classify_http_status,
     provider_error,
+    read_bounded_response,
     safe_transport_call,
 )
 from leads_discovery.models import (
@@ -35,8 +37,12 @@ _EXPLICIT_NEGATION = re.compile(
     r"\b(no|not|none|never|without|does\s+not|doesn't|isn't|aren't|lacks?|lacking)\b",
     re.IGNORECASE,
 )
+_CLAUSE_BOUNDARY = re.compile(
+    r"(?:[.!?;:,\n]+|\b(?:and|but|however|whereas|while|yet)\b)",
+    re.IGNORECASE,
+)
 _EXCLUSIONARY_FALSE_TERMS: dict[str, tuple[str, ...]] = {
-    "pvf_relevant": ("pvf", "pipe", "valve", "fitting"),
+    "pvf_relevant": ("pvf", "pipe", "piping", "valve", "fitting"),
     "inside_sales_or_estimating_presence": ("inside sales", "estimating", "estimator"),
     "rfq_or_quote_workflow_evidence": ("rfq", "request for quote", "quotation", "quote"),
 }
@@ -169,13 +175,17 @@ class DeepSeekExtractor:
         }
         single_reservation = self._single_reservation_cost_usd(company, bundle)
         for attempt in range(1, _MAX_ATTEMPTS + 1):
+            http_request = self._client.build_request(
+                "POST",
+                _DEEPSEEK_URL,
+                headers={"Authorization": f"Bearer {self._api_key}"},
+                json=body,
+                timeout=_REQUEST_TIMEOUT,
+            )
             try:
                 response = safe_transport_call(
-                    lambda: self._client.post(
-                        _DEEPSEEK_URL,
-                        headers={"Authorization": f"Bearer {self._api_key}"},
-                        json=body,
-                        timeout=_REQUEST_TIMEOUT,
+                    lambda http_request=http_request: self._client.send(
+                        http_request, stream=True
                     ),
                     provider="deepseek",
                     request_id=company.company_id,
@@ -186,8 +196,10 @@ class DeepSeekExtractor:
                 if exc.retryable and attempt < _MAX_ATTEMPTS:
                     continue
                 raise
-            if not 200 <= response.status_code < 300:
-                kind, retryable = classify_http_status(response.status_code)
+            status_code = response.status_code
+            if not 200 <= status_code < 300:
+                response.close()
+                kind, retryable = classify_http_status(status_code)
                 if retryable and attempt < _MAX_ATTEMPTS:
                     continue
                 raise provider_error(
@@ -197,33 +209,35 @@ class DeepSeekExtractor:
                     request_count=attempt,
                     kind=kind,
                     retryable=retryable,
-                    status_code=response.status_code,
+                    status_code=status_code,
                     metadata={"company_id": company.company_id, "attempts": attempt},
                 ) from None
             try:
-                payload = response.json()
-            except Exception:
+                body_bytes = read_bounded_response(response)
+            except ResponseTooLargeError:
+                raise self._invalid(company.company_id, status_code, attempt) from None
+            try:
+                payload = json.loads(body_bytes)
+            except (json.JSONDecodeError, UnicodeDecodeError):
                 if attempt < _MAX_ATTEMPTS:
                     continue
-                raise self._invalid(company.company_id, response.status_code, attempt) from None
+                raise self._invalid(company.company_id, status_code, attempt) from None
             if not isinstance(payload, dict):
                 if attempt < _MAX_ATTEMPTS:
                     continue
-                raise self._invalid(company.company_id, response.status_code, attempt) from None
+                raise self._invalid(company.company_id, status_code, attempt) from None
             try:
                 result = self._parse_result(
                     company,
                     bundle,
                     cast(dict[str, Any], payload),
-                    response.status_code,
+                    status_code,
                 )
             except DiscoveryProviderError as exc:
                 if exc.kind == "invalid_response" and attempt < _MAX_ATTEMPTS:
                     continue
                 if exc.kind == "invalid_response":
-                    raise self._invalid(
-                        company.company_id, response.status_code, attempt
-                    ) from None
+                    raise self._invalid(company.company_id, status_code, attempt) from None
                 raise
             return _account_retries(result, attempt, single_reservation)
         raise AssertionError("bounded DeepSeek retry loop is unreachable")
@@ -524,22 +538,42 @@ def _parse_usage(raw: Any, prices: DeepSeekPriceSchedule, company_id: str) -> Us
     )
 
 
+def _negative_term_is_local(clause: str, term: str) -> bool:
+    """Return true only when a negation and target term are locally connected in one clause."""
+    term_pattern = re.compile(rf"\b{re.escape(term)}\b", re.IGNORECASE)
+    targets = tuple(term_pattern.finditer(clause))
+    if not targets:
+        return False
+    for negation in _EXPLICIT_NEGATION.finditer(clause):
+        for target in targets:
+            start = min(negation.end(), target.end())
+            end = max(negation.start(), target.start())
+            between = clause[start:end]
+            if len(re.findall(r"\b[\w']+\b", between)) <= 4:
+                return True
+    return False
+
+
 def _explicitly_supports_false(
     key: str,
     fact: ExtractedFact,
     bundle: EvidenceBundle,
 ) -> bool:
-    """Require explicit negation in cited evidence before retaining exclusionary false facts."""
+    """Require a local negation-to-target relation before retaining exclusionary false facts."""
     terms = _EXCLUSIONARY_FALSE_TERMS.get(key)
     if terms is None or fact.value is not False:
         return True
     cited = set(fact.evidence_ids)
-    text = " ".join(
-        f"{item.title or ''} {item.excerpt or ''}"
-        for item in bundle.items
-        if item.evidence_id in cited
-    ).casefold()
-    return bool(_EXPLICIT_NEGATION.search(text)) and any(term in text for term in terms)
+    for item in bundle.items:
+        if item.evidence_id not in cited:
+            continue
+        for text in (item.title, item.excerpt):
+            if not text:
+                continue
+            for clause in _CLAUSE_BOUNDARY.split(text.casefold()):
+                if any(_negative_term_is_local(clause, term) for term in terms):
+                    return True
+    return False
 
 
 def apply_extraction(
