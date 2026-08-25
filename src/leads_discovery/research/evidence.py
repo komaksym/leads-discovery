@@ -123,7 +123,7 @@ def build_evidence_bundle(
     raw_records: Iterable[dict[str, Any]],
     usage_events: Iterable[UsageEvent],
 ) -> EvidenceBundle:
-    """Purely deduplicate and bound evidence while preserving complete raw rows separately."""
+    """Deduplicate and bound model evidence while keeping provider rows out of prompt data."""
     own_domain = company.normalized_domain or company.domain
     seen_urls: set[str] = set()
     domain_counts: dict[str, int] = defaultdict(int)
@@ -143,16 +143,17 @@ def build_evidence_bundle(
         remaining = 20000 - excerpt_chars
         if excerpt is not None and len(excerpt) > remaining:
             excerpt = excerpt[:remaining]
-        item = EvidenceItem(
-            evidence_id=source.evidence_id,
-            url=source.url,
-            title=source.title,
-            excerpt=excerpt,
-            source_type=source.source_type,
-            provider=source.provider,
-            retrieved_at=source.retrieved_at,
+        bounded.append(
+            EvidenceItem(
+                evidence_id=source.evidence_id,
+                url=source.url,
+                title=source.title,
+                excerpt=excerpt,
+                source_type=source.source_type,
+                provider=source.provider,
+                retrieved_at=source.retrieved_at,
+            )
         )
-        bounded.append(item)
         domain_counts[domain_key] += 1
         excerpt_chars += len(excerpt or "")
         if len(bounded) >= 12 or excerpt_chars >= 20000:
@@ -166,7 +167,7 @@ def build_evidence_bundle(
 
 
 class ExaEvidenceResearcher:
-    """Collect exactly three bounded Exa searches and retain raw rows outside model input."""
+    """Collect exactly three bounded Exa searches with durable per-call progress."""
 
     def __init__(self, *, api_key: str, client: httpx.Client) -> None:
         """Store a nonempty Exa credential and caller-owned injected HTTP client."""
@@ -181,8 +182,18 @@ class ExaEvidenceResearcher:
         *,
         on_progress: Callable[[EvidenceBundle], None] | None = None,
     ) -> EvidenceBundle:
-        """Execute all three searches and optionally report each successful call before the next."""
+        """Execute all three searches and report each successful call before the next."""
         return self._research_from(company, start_index=0, on_progress=on_progress)
+
+    def resume(
+        self,
+        company: CompanyRecord,
+        *,
+        start_index: int,
+        on_progress: Callable[[EvidenceBundle], None],
+    ) -> EvidenceBundle:
+        """Continue after a durable successful-query cursor without replaying paid calls."""
+        return self._research_from(company, start_index=start_index, on_progress=on_progress)
 
     def _research_from(
         self,
@@ -191,7 +202,6 @@ class ExaEvidenceResearcher:
         start_index: int,
         on_progress: Callable[[EvidenceBundle], None] | None,
     ) -> EvidenceBundle:
-        """Execute unfinished searches from a validated zero-based catalog position."""
         requests = build_research_requests(company)
         if (
             isinstance(start_index, bool)
@@ -208,7 +218,7 @@ class ExaEvidenceResearcher:
         for request in requests[start_index:]:
             attempted += 1
             attempted_position = start_index + attempted
-            delta_request_count = 1 if on_progress is not None else attempted
+            request_count = 1 if on_progress is not None else attempted
             response = safe_transport_call(
                 lambda request=request: self._client.post(
                     _EXA_SEARCH_URL,
@@ -223,7 +233,7 @@ class ExaEvidenceResearcher:
                 provider="exa",
                 request_id=request.request_id,
                 operation="company_research",
-                request_count=delta_request_count,
+                request_count=request_count,
             )
             if not 200 <= response.status_code < 300:
                 kind, retryable = classify_http_status(response.status_code)
@@ -231,7 +241,7 @@ class ExaEvidenceResearcher:
                     provider="exa",
                     request_id=request.request_id,
                     operation="company_research",
-                    request_count=delta_request_count,
+                    request_count=request_count,
                     kind=kind,
                     retryable=retryable,
                     status_code=response.status_code,
@@ -247,7 +257,7 @@ class ExaEvidenceResearcher:
                     provider="exa",
                     request_id=request.request_id,
                     operation="company_research",
-                    request_count=delta_request_count,
+                    request_count=request_count,
                     kind="invalid_response",
                     retryable=False,
                     status_code=response.status_code,
@@ -263,7 +273,7 @@ class ExaEvidenceResearcher:
                     provider="exa",
                     request_id=request.request_id,
                     operation="company_research",
-                    request_count=delta_request_count,
+                    request_count=request_count,
                     kind="invalid_response",
                     retryable=False,
                     status_code=response.status_code,
@@ -279,7 +289,7 @@ class ExaEvidenceResearcher:
                     provider="exa",
                     request_id=request.request_id,
                     operation="company_research",
-                    request_count=delta_request_count,
+                    request_count=request_count,
                     kind="invalid_response",
                     retryable=False,
                     status_code=response.status_code,
@@ -298,7 +308,7 @@ class ExaEvidenceResearcher:
             call_cost = _exa_cost(
                 payload,
                 company.company_id,
-                delta_request_count,
+                request_count,
                 attempted_position,
             )
             raw_records.extend(call_raw_records)
@@ -307,24 +317,25 @@ class ExaEvidenceResearcher:
             result_counts.append(len(call_raw_records))
 
             if on_progress is not None:
-                delta_usage = UsageEvent(
-                    provider="exa",
-                    operation="company_research",
-                    request_count=1,
-                    estimated_cost_usd=call_cost,
-                    metadata={
-                        "company_id": company.company_id,
-                        "request_id": request.request_id,
-                        "query_family": request.query_family,
-                        "result_count": len(call_raw_records),
-                    },
-                )
                 on_progress(
                     build_evidence_bundle(
                         company=company,
                         items=call_items,
                         raw_records=call_raw_records,
-                        usage_events=[delta_usage],
+                        usage_events=[
+                            UsageEvent(
+                                provider="exa",
+                                operation="company_research",
+                                request_count=1,
+                                estimated_cost_usd=call_cost,
+                                metadata={
+                                    "company_id": company.company_id,
+                                    "request_id": request.request_id,
+                                    "query_family": request.query_family,
+                                    "result_count": len(call_raw_records),
+                                },
+                            )
+                        ],
                     )
                 )
 
@@ -333,27 +344,27 @@ class ExaEvidenceResearcher:
             if all(cost is not None for cost in costs)
             else None
         )
-        usage = UsageEvent(
-            provider="exa",
-            operation="company_research",
-            request_count=attempted,
-            estimated_cost_usd=estimated,
-            metadata={
-                "company_id": company.company_id,
-                "request_count": attempted,
-                "result_counts": result_counts,
-            },
-        )
         return build_evidence_bundle(
             company=company,
             items=items,
             raw_records=raw_records,
-            usage_events=[usage],
+            usage_events=[
+                UsageEvent(
+                    provider="exa",
+                    operation="company_research",
+                    request_count=attempted,
+                    estimated_cost_usd=estimated,
+                    metadata={
+                        "company_id": company.company_id,
+                        "request_count": attempted,
+                        "result_counts": result_counts,
+                    },
+                )
+            ],
         )
 
     @staticmethod
     def _to_evidence(raw: dict[str, Any], retrieved_at: str) -> EvidenceItem | None:
-        """Convert one valid Exa result into stable public evidence without invented excerpts."""
         url = raw.get("url")
         if not isinstance(url, str):
             return None
@@ -385,7 +396,6 @@ def _exa_cost(
     request_count: int,
     attempted: int,
 ) -> float | None:
-    """Read one finite nonnegative authenticated Exa research cost or reject malformed metadata."""
     cost = payload.get("costDollars")
     if cost is None:
         return None
