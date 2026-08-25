@@ -1,0 +1,61 @@
+name: Final scoped readiness validation
+
+on:
+  push:
+    branches:
+      - codex/production-readiness
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    if: ${{ github.event.head_commit.message == 'Run final scoped validation' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/production-readiness
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install package and dev tools
+        run: python -m pip install -e ".[dev]"
+      - name: Focused blocker regressions first
+        run: pytest -q tests/test_readiness_final_blockers.py
+      - name: Ruff
+        run: ruff check .
+      - name: Strict mypy
+        run: mypy src tests
+      - name: Full tests
+        run: pytest
+      - name: Build package
+        run: python -m build
+      - name: Offline dry run
+        run: python -m leads_discovery run --run-id final-blocker-dry --deepseek-budget-usd 0.01
+      - name: Production workflow static checks
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          text = Path('.github/workflows/generate-leads.yml').read_text(encoding='utf-8')
+          trigger = text.split('permissions:', 1)[0]
+          assert 'workflow_dispatch:' in trigger
+          assert 'push:' not in trigger
+          assert 'pull_request:' not in trigger
+          assert 'schedule:' not in trigger
+          assert 'inputs:' not in trigger
+          assert 'runs-on: ubuntu-latest' in text
+          assert 'actions/upload-artifact' not in text
+          assert 'python -m leads_discovery.production_canary' in text
+          assert 'generated-leads' in text
+          PY
+      - name: Remove temporary validation workflow
+        run: |
+          rm .github/workflows/final-readiness-validation.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .github/workflows/final-readiness-validation.yml
+          git commit -m "Remove final validation workflow" -m "Remove the temporary narrow-first validation workflow after all scoped and repository-wide readiness checks passed. The production tree returns to the permanent workflow set only."
+          git push origin HEAD:codex/production-readiness
