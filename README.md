@@ -42,6 +42,7 @@ python -m leads_discovery run \
   --max-candidates 100 \
   --max-evaluated 20 \
   --exa-budget-usd 1.00 \
+  --exa-request-reservation-usd 0.10 \
   --deepseek-budget-usd 1.00 \
   --include-apify \
   --apify-budget-usd 0.25 \
@@ -49,6 +50,8 @@ python -m leads_discovery run \
 ```
 
 The Exa, Apify, and DeepSeek ceilings are independent. There is no aggregate budget. Existing provider spend is replayed from M2's append-only usage ledger on resume, so restarting a run does not reset spend.
+
+`--exa-request-reservation-usd` is the operator-supplied conservative upper bound on the charge of **one Exa HTTP request**. It applies to Exa discovery and to each bounded Exa research request. Before every Exa dispatch, M2 requires `known Exa spend + request reservation <= Exa budget`. Live execution fails configuration if either the Exa budget or a positive finite reservation is missing; do not authorize live Exa work when you cannot choose a safe finite per-request upper bound.
 
 `--max-evaluated` is limited to `1..20` and is passed directly to M2 as the extraction cap. `--max-candidates` remains limited to `1..100`.
 
