@@ -258,8 +258,8 @@ def test_explicit_unknowns_are_accepted_exactly() -> None:
         lambda facts: facts["pvf_relevant"].__setitem__("evidence_ids", []),
     ],
 )
-def test_invalid_fact_schema_is_rejected_without_repair(mutate: Any) -> None:
-    """Missing/extra/type/confidence/citation violations fail after only one paid call."""
+def test_invalid_fact_schema_retries_within_the_fixed_bound(mutate: Any) -> None:
+    """Retryable schema-invalid model output is retried only within the fixed bound."""
     facts = _valid_facts()
     mutate(facts)
     calls = 0
@@ -279,7 +279,7 @@ def test_invalid_fact_schema_is_rejected_without_repair(mutate: Any) -> None:
         with pytest.raises(DiscoveryProviderError) as caught:
             extractor.extract(_company(), _bundle())
 
-    assert calls == 1
+    assert calls == 3
     assert caught.value.kind == "invalid_response"
     assert caught.value.retryable is False
 
@@ -341,17 +341,21 @@ def test_unknown_representation_must_be_exact(facts: dict[str, dict[str, Any]]) 
     assert caught.value.kind == "invalid_response"
 
 
-def test_invalid_json_and_truncated_output_make_no_automatic_repair_call() -> None:
-    """Malformed or truncated output fails once and is never repaired with a second call."""
-    responses = [
+@pytest.mark.parametrize(
+    "response",
+    [
         _response(content="{not-json"),
         _response(finish_reason="length"),
-    ]
+    ],
+)
+def test_invalid_json_and_truncated_output_retry_only_within_bound(
+    response: dict[str, Any],
+) -> None:
+    """Malformed or truncated model output retries exactly to the fixed attempt ceiling."""
     calls = 0
 
     def handler(_request: httpx.Request) -> httpx.Response:
         nonlocal calls
-        response = responses[calls]
         calls += 1
         return httpx.Response(200, json=response)
 
@@ -362,13 +366,11 @@ def test_invalid_json_and_truncated_output_make_no_automatic_repair_call() -> No
             model=MODEL,
             prices=PRICES,
         )
-        with pytest.raises(DiscoveryProviderError):
-            extractor.extract(_company(), _bundle())
-        with pytest.raises(DiscoveryProviderError):
+        with pytest.raises(DiscoveryProviderError) as caught:
             extractor.extract(_company(), _bundle())
 
-    assert calls == 2
-
+    assert calls == 3
+    assert caught.value.usage_event.request_count == 3
 
 def test_apply_extraction_updates_only_m2_fact_fields_and_preserves_m1_defaults() -> None:
     """Valid extraction populates evidence/features while leaving M3 fields untouched."""

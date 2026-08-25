@@ -196,7 +196,7 @@ class DeepSeekExtractor:
                     operation="structured_extraction",
                     request_count=attempt,
                     kind=kind,
-                    retryable=False if retryable else retryable,
+                    retryable=retryable,
                     status_code=response.status_code,
                     metadata={"company_id": company.company_id, "attempts": attempt},
                 ) from None
@@ -220,6 +220,10 @@ class DeepSeekExtractor:
             except DiscoveryProviderError as exc:
                 if exc.kind == "invalid_response" and attempt < _MAX_ATTEMPTS:
                     continue
+                if exc.kind == "invalid_response":
+                    raise self._invalid(
+                        company.company_id, response.status_code, attempt
+                    ) from None
                 raise
             return _account_retries(result, attempt, single_reservation)
         raise AssertionError("bounded DeepSeek retry loop is unreachable")

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import os
 import re
 from copy import deepcopy
 from dataclasses import dataclass
@@ -18,6 +19,7 @@ _EXA_SEARCH_URL = "https://api.exa.ai/search"
 _CLAY_BASE_URL = "https://api.clay.com/public/v0"
 _APOLLO_PEOPLE_URL = "https://api.apollo.io/api/v1/people/match"
 _INSTANTLY_VERIFY_URL = "https://api.instantly.ai/api/v2/email-verification"
+_DEFAULT_MAX_HTTP_RESPONSE_BYTES = 2 * 1024 * 1024
 _EMAIL = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 _PERSONAL_EMAIL_DOMAINS = {
     "aol.com",
@@ -167,6 +169,20 @@ class InstantlyVerificationClient(Protocol):
         ...
 
 
+def _http_response_limit() -> int:
+    """Return the configurable maximum contact-provider response bytes."""
+    raw = os.getenv("LEADS_MAX_HTTP_RESPONSE_BYTES")
+    if raw is None:
+        return _DEFAULT_MAX_HTTP_RESPONSE_BYTES
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError("LEADS_MAX_HTTP_RESPONSE_BYTES must be a positive integer") from exc
+    if value <= 0:
+        raise ValueError("LEADS_MAX_HTTP_RESPONSE_BYTES must be a positive integer")
+    return value
+
+
 def _status_kind(status_code: int) -> tuple[ErrorKind, bool]:
     """Map provider HTTP statuses to the established sanitized failure taxonomy."""
     if status_code in {401, 403}:
@@ -229,18 +245,51 @@ def _call(
     operation: str,
     metadata: dict[str, Any] | None = None,
 ) -> httpx.Response:
-    """Execute one caller-injected HTTP operation without retries and sanitize transport errors."""
+    """Execute one bounded HTTP call and preserve ambiguous paid outcomes."""
     try:
-        return cast(httpx.Response, call())
-    except httpx.HTTPError:
+        response = cast(httpx.Response, call())
+    except (httpx.ConnectError, httpx.ConnectTimeout):
         _raise(
             provider,
             operation,
             kind="transient",
             retryable=True,
+            metadata={**(metadata or {}), "safe_to_retry": True},
+        )
+    except httpx.HTTPError:
+        _raise(
+            provider,
+            operation,
+            kind="transient",
+            retryable=False,
+            metadata={**(metadata or {}), "outcome_unknown": True},
+        )
+    raw_length = response.headers.get("content-length")
+    if raw_length is not None:
+        try:
+            declared = int(raw_length)
+        except ValueError:
+            declared = 0
+        if declared > _http_response_limit():
+            response.close()
+            _raise(
+                provider,
+                operation,
+                kind="invalid_response",
+                retryable=False,
+                status_code=response.status_code,
+                metadata=metadata,
+            )
+    if response.is_stream_consumed and len(response.content) > _http_response_limit():
+        _raise(
+            provider,
+            operation,
+            kind="invalid_response",
+            retryable=False,
+            status_code=response.status_code,
             metadata=metadata,
         )
-    raise AssertionError("unreachable")
+    return response
 
 
 def _json_object(

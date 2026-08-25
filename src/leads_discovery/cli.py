@@ -262,7 +262,7 @@ def _run_live(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
     if config.include_apify and not apify_token:
         config = replace(config, include_apify=False)
 
-    with httpx.Client() as client:
+    with httpx.Client(timeout=httpx.Timeout(30.0, connect=5.0)) as client:
         discovery: dict[str, DiscoveryProvider] = {
             "exa": ExaDiscoveryProvider(api_key=exa_key, client=client),
         }
@@ -387,7 +387,7 @@ def _enrich_live(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
             },
             1,
         )
-    with httpx.Client() as client:
+    with httpx.Client(timeout=httpx.Timeout(30.0, connect=5.0)) as client:
         summary = run_contact_enrichment(
             config,
             exa=ExaPeopleProvider(api_key=credentials["EXA_API_KEY"], client=client),

@@ -139,7 +139,10 @@ def _resolve_paths(config: EvaluationConfig) -> _EvaluationPaths:
     ):
         raise ValueError("max_evaluated must be an integer in 1..20")
 
-    root = config.data_root.expanduser().resolve()
+    expanded_root = config.data_root.expanduser()
+    if expanded_root.is_symlink():
+        raise ValueError("data_root must not be a symlink")
+    root = expanded_root.resolve()
     candidate = root / config.run_id
     if candidate.is_symlink():
         raise ValueError("run directory must not be a symlink")

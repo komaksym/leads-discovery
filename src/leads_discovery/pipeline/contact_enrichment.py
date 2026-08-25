@@ -40,6 +40,7 @@ from leads_discovery.pipeline.state import (
 
 _RUN_ID: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 _FORMULA_PREFIXES: Final[frozenset[str]] = frozenset("=+-@")
+_EXA_PEOPLE_RESERVATION_USD: Final[float] = 0.017
 _ARTIFACTS: Final[tuple[str, ...]] = (
     "contacts.jsonl",
     "leads.csv",
@@ -158,7 +159,10 @@ def _validate_config(config: ContactEnrichmentConfig) -> _Paths:
         _finite_nonnegative("exa_people_budget_usd", config.exa_people_budget_usd)
     _finite_nonnegative("apollo_credit_cap", config.apollo_credit_cap)
 
-    root = config.data_root.expanduser().resolve()
+    expanded_root = config.data_root.expanduser()
+    if expanded_root.is_symlink():
+        raise ValueError("data_root must not be a symlink")
+    root = expanded_root.resolve()
     candidate = root / config.run_id
     if candidate.is_symlink():
         raise ValueError("run directory must not be a symlink")
@@ -772,7 +776,10 @@ def run_contact_enrichment(
                     "paused_unknown",
                     "exa_usage_unknown",
                 )
-            if spend >= config.exa_people_budget_usd:
+            if (
+                spend + _EXA_PEOPLE_RESERVATION_USD
+                > config.exa_people_budget_usd + 1e-12
+            ):
                 return _pause(
                     config,
                     paths,

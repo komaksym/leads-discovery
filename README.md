@@ -227,3 +227,13 @@ Calibration is report-only. A human can use the report to propose a later versio
 Derived files are written atomically inside the validated run directory and pre-existing symlink targets are rejected. Run IDs cannot escape the configured data root.
 
 M4 adds contact discovery and work-email verification only. The project still does not add a database, frontend, CRM integration, autonomous SDR, phones, personal emails, lead creation in Instantly, campaigns, sequences, SuperSearch jobs, or outreach. Development and automated validation must use $0 provider spend.
+
+## Production canary
+
+Production execution does not depend on a local computer. The production entry point is the manual `Production lead canary` GitHub Actions workflow on a standard GitHub-hosted `ubuntu-latest` runner. Provider credentials live only in GitHub Actions repository secrets.
+
+The workflow has no safety-limit inputs: the application fixes the canary at one company, one paid contact, tiny provider quotas, and tiny spend/storage ceilings. Paid-operation barriers are written durably before dispatch so a runner restart cannot silently repeat an unresolved potentially billed operation.
+
+Only `leads.csv` and `contacts.jsonl` are published to the dedicated `generated-leads` Git branch. Checkpoints, usage ledgers, provider payloads, credentials, temporary files, and debug state are not published as branch files or Actions artifacts.
+
+A real credentialed one-company workflow run is the final external acceptance gate. Automated CI and development remain offline and do not prove live provider compatibility.

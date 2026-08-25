@@ -357,7 +357,11 @@ def _provider_budget_allows(
 
 def _exa_search_reservation(max_results: int) -> float:
     """Reserve the current published worst-case Exa Search+highlights cost for a bounded call."""
-    if isinstance(max_results, bool) or not isinstance(max_results, int) or not 1 <= max_results <= 100:
+    if (
+        isinstance(max_results, bool)
+        or not isinstance(max_results, int)
+        or not 1 <= max_results <= 100
+    ):
         raise ValueError("Exa reservation result cap must be in 1..100")
     search = 0.007 + max(0, max_results - 10) * 0.001
     highlights = max_results * 0.001
@@ -531,7 +535,11 @@ def _discovery_phase(
                 reason="exa_provider_unavailable",
                 stage="discovery",
             )
-        reservation = _exa_search_reservation(request.max_results_total) if request.provider == "exa" else request.max_cost_usd or 0.0
+        reservation = (
+            _exa_search_reservation(request.max_results_total)
+            if request.provider == "exa"
+            else request.max_cost_usd or 0.0
+        )
         if request.provider == "exa" and not _provider_budget_allows(
             tracker,
             "exa",
@@ -873,14 +881,16 @@ def _research_and_extract_phase(
             )
             progress_supported = _supports_research_progress(researcher)
             cumulative_items = [deepcopy(item) for item in company.evidence]
+            research_result_caps = tuple(item.max_results for item in research_requests)
 
             def persist_progress(
                 delta: EvidenceBundle,
                 operation_key: str = research_op,
                 query_count: int = len(research_requests),
                 budget_checked: bool = resumable_researcher,
+                result_caps: tuple[int, ...] = research_result_caps,
             ) -> None:
-                """Fsync one Exa call, reserve the next, then stop locally before over-budget work."""
+                """Persist one Exa result, reserve the next, and stop before over-budget work."""
                 nonlocal company, cumulative_items
                 if delta.company_id != company.company_id:
                     raise ValueError("research progress bundle company_id mismatch")
@@ -908,7 +918,7 @@ def _research_and_extract_phase(
                 entry["successful_calls"] = calls
                 has_next_query = calls < query_count
                 next_cost = (
-                    _exa_search_reservation(research_requests[calls].max_results)
+                    _exa_search_reservation(result_caps[calls])
                     if has_next_query
                     else 0.0
                 )

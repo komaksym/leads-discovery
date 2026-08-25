@@ -15,6 +15,7 @@ from leads_discovery.pipeline.git_journal import sync_checkpoint_barrier
 
 _DEFAULT_MAX_RECORD_BYTES = 256 * 1024
 _DEFAULT_MAX_FILE_BYTES = 16 * 1024 * 1024
+_DEFAULT_MAX_RUN_BYTES = 64 * 1024 * 1024
 _DEFAULT_MAX_RECORDS = 10_000
 
 
@@ -40,6 +41,11 @@ def _record_limit() -> int:
 def _file_limit() -> int:
     """Return the maximum bytes accepted for one persisted JSON/JSONL artifact."""
     return _positive_limit("LEADS_MAX_FILE_BYTES", _DEFAULT_MAX_FILE_BYTES)
+
+
+def _run_limit() -> int:
+    """Return the maximum total bytes allowed in one run directory."""
+    return _positive_limit("LEADS_MAX_RUN_BYTES", _DEFAULT_MAX_RUN_BYTES)
 
 
 def _record_count_limit() -> int:
@@ -76,6 +82,34 @@ def _ensure_write_target(path: Path) -> None:
         raise ValueError(f"artifact path must not be a symlink: {path.name}")
 
 
+def _directory_bytes(parent: Path, *, exclude: Path | None = None) -> int:
+    """Count regular run files while rejecting symlinks in persisted state."""
+    if not parent.exists():
+        return 0
+    _ensure_directory(parent)
+    total = 0
+    for child in parent.iterdir():
+        if exclude is not None and child == exclude:
+            continue
+        if child.is_symlink():
+            raise ValueError("run directory must not contain symlinks")
+        if child.is_file():
+            total += child.stat().st_size
+    return total
+
+
+def _ensure_existing_run_size(parent: Path) -> None:
+    """Reject persisted state whose aggregate run bytes exceed the configured ceiling."""
+    if _directory_bytes(parent) > _run_limit():
+        raise ValueError("persisted run exceeds LEADS_MAX_RUN_BYTES")
+
+
+def _ensure_run_size(path: Path, final_size: int) -> None:
+    """Reject a write before its final run-directory size would exceed the ceiling."""
+    if _directory_bytes(path.parent, exclude=path) + final_size > _run_limit():
+        raise ValueError("persisted run would exceed LEADS_MAX_RUN_BYTES")
+
+
 def _serialized_line(payload: dict[str, Any]) -> bytes:
     """Serialize one JSONL object and enforce the configured per-record bound."""
     text = json.dumps(
@@ -106,6 +140,8 @@ def append_jsonl(path: Path, payload: dict[str, Any]) -> None:
     _ensure_directory(path.parent)
     _ensure_write_target(path)
     _ensure_file_growth(path, len(data))
+    current = path.stat().st_size if path.exists() else 0
+    _ensure_run_size(path, current + len(data))
     is_new = not path.exists()
     flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0)
     fd = os.open(path, flags, 0o666)
@@ -122,6 +158,7 @@ def iter_jsonl(path: Path) -> Iterator[dict[str, Any]]:
     """Stream bounded JSONL rows, tolerating only one torn final append."""
     if not path.exists():
         return
+    _ensure_existing_run_size(path.parent)
     if path.is_symlink() or not path.is_file():
         raise ValueError("JSONL artifact must be a regular non-symlink file")
     size = path.stat().st_size
@@ -243,6 +280,7 @@ def write_text_atomic(path: Path, text: str) -> None:
     _ensure_write_target(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     _ensure_directory(path.parent)
+    _ensure_run_size(path, len(data))
     temp_path: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(
@@ -271,6 +309,7 @@ def write_jsonl_atomic(path: Path, payloads: Iterable[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     _ensure_directory(path.parent)
     temp_path: Path | None = None
+    base_run_bytes = _directory_bytes(path.parent, exclude=path)
     total = 0
     count = 0
     try:
@@ -290,6 +329,8 @@ def write_jsonl_atomic(path: Path, payloads: Iterable[dict[str, Any]]) -> None:
                 total += len(data)
                 if total > _file_limit():
                     raise ValueError("persisted artifact exceeds LEADS_MAX_FILE_BYTES")
+                if base_run_bytes + total > _run_limit():
+                    raise ValueError("persisted run would exceed LEADS_MAX_RUN_BYTES")
                 handle.write(data)
             handle.flush()
             os.fsync(handle.fileno())
@@ -318,6 +359,7 @@ def read_json(path: Path) -> dict[str, Any] | None:
     """Read one bounded JSON object, or return None when it does not exist."""
     if not path.exists():
         return None
+    _ensure_existing_run_size(path.parent)
     if path.is_symlink() or not path.is_file():
         raise ValueError("JSON artifact must be a regular non-symlink file")
     size = path.stat().st_size
