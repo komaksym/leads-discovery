@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
+import json
 import math
-import os
 import re
 from copy import deepcopy
 from dataclasses import dataclass
@@ -13,13 +13,14 @@ from urllib.parse import quote
 import httpx
 
 from leads_discovery.contacts.models import ContactRecord, VerificationStatus
+from leads_discovery.discovery.base import ResponseTooLargeError, read_bounded_response
 from leads_discovery.models import CompanyRecord, ErrorKind, UsageEvent
 
 _EXA_SEARCH_URL = "https://api.exa.ai/search"
 _CLAY_BASE_URL = "https://api.clay.com/public/v0"
 _APOLLO_PEOPLE_URL = "https://api.apollo.io/api/v1/people/match"
 _INSTANTLY_VERIFY_URL = "https://api.instantly.ai/api/v2/email-verification"
-_DEFAULT_MAX_HTTP_RESPONSE_BYTES = 2 * 1024 * 1024
+_EXA_TIMEOUT = httpx.Timeout(30.0, connect=5.0)
 _EMAIL = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 _PERSONAL_EMAIL_DOMAINS = {
     "aol.com",
@@ -169,20 +170,6 @@ class InstantlyVerificationClient(Protocol):
         ...
 
 
-def _http_response_limit() -> int:
-    """Return the configurable maximum contact-provider response bytes."""
-    raw = os.getenv("LEADS_MAX_HTTP_RESPONSE_BYTES")
-    if raw is None:
-        return _DEFAULT_MAX_HTTP_RESPONSE_BYTES
-    try:
-        value = int(raw)
-    except ValueError as exc:
-        raise ValueError("LEADS_MAX_HTTP_RESPONSE_BYTES must be a positive integer") from exc
-    if value <= 0:
-        raise ValueError("LEADS_MAX_HTTP_RESPONSE_BYTES must be a positive integer")
-    return value
-
-
 def _status_kind(status_code: int) -> tuple[ErrorKind, bool]:
     """Map provider HTTP statuses to the established sanitized failure taxonomy."""
     if status_code in {401, 403}:
@@ -245,9 +232,9 @@ def _call(
     operation: str,
     metadata: dict[str, Any] | None = None,
 ) -> httpx.Response:
-    """Execute one bounded HTTP call and preserve ambiguous paid outcomes."""
+    """Execute one streamed HTTP dispatch and preserve ambiguous paid outcomes."""
     try:
-        response = cast(httpx.Response, call())
+        return cast(httpx.Response, call())
     except (httpx.ConnectError, httpx.ConnectTimeout):
         _raise(
             provider,
@@ -264,32 +251,6 @@ def _call(
             retryable=False,
             metadata={**(metadata or {}), "outcome_unknown": True},
         )
-    raw_length = response.headers.get("content-length")
-    if raw_length is not None:
-        try:
-            declared = int(raw_length)
-        except ValueError:
-            declared = 0
-        if declared > _http_response_limit():
-            response.close()
-            _raise(
-                provider,
-                operation,
-                kind="invalid_response",
-                retryable=False,
-                status_code=response.status_code,
-                metadata=metadata,
-            )
-    if response.is_stream_consumed and len(response.content) > _http_response_limit():
-        _raise(
-            provider,
-            operation,
-            kind="invalid_response",
-            retryable=False,
-            status_code=response.status_code,
-            metadata=metadata,
-        )
-    return response
 
 
 def _json_object(
@@ -299,16 +260,17 @@ def _json_object(
     operation: str,
     metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Decode one provider response as a JSON object or raise a sanitized invalid response."""
+    """Decode one stream-bounded response as a JSON object or raise a sanitized error."""
+    status_code = response.status_code
     try:
-        payload = response.json()
-    except Exception:
+        payload = json.loads(read_bounded_response(response))
+    except (ResponseTooLargeError, json.JSONDecodeError, UnicodeDecodeError):
         _raise(
             provider,
             operation,
             kind="invalid_response",
             retryable=False,
-            status_code=response.status_code,
+            status_code=status_code,
             metadata=metadata,
         )
     if not isinstance(payload, dict):
@@ -317,7 +279,7 @@ def _json_object(
             operation,
             kind="invalid_response",
             retryable=False,
-            status_code=response.status_code,
+            status_code=status_code,
             metadata=metadata,
         )
     return cast(dict[str, Any], payload)
@@ -332,15 +294,17 @@ def _require_success(
     allow_202: bool = True,
 ) -> None:
     """Reject non-success statuses using only the shared safe taxonomy."""
-    if 200 <= response.status_code < 300 and (allow_202 or response.status_code != 202):
+    status_code = response.status_code
+    if 200 <= status_code < 300 and (allow_202 or status_code != 202):
         return
-    kind, retryable = _status_kind(response.status_code)
+    response.close()
+    kind, retryable = _status_kind(status_code)
     _raise(
         provider,
         operation,
         kind=kind,
         retryable=retryable,
-        status_code=response.status_code,
+        status_code=status_code,
         metadata=metadata,
     )
 
@@ -406,18 +370,21 @@ class ExaPeopleProvider:
             "Owner, President, CEO, COO, Managing Partner, General Manager, senior Sales, "
             "Operations, Commercial, Estimating, Inside Sales leaders, branch or regional managers"
         )
+        request = self._client.build_request(
+            "POST",
+            _EXA_SEARCH_URL,
+            headers={"x-api-key": self._api_key},
+            json={
+                "query": query,
+                "category": "people",
+                "type": "auto",
+                "numResults": 10,
+                "contents": {"highlights": True},
+            },
+            timeout=_EXA_TIMEOUT,
+        )
         response = _call(
-            lambda: self._client.post(
-                _EXA_SEARCH_URL,
-                headers={"x-api-key": self._api_key},
-                json={
-                    "query": query,
-                    "category": "people",
-                    "type": "auto",
-                    "numResults": 10,
-                    "contents": {"highlights": True},
-                },
-            ),
+            lambda: self._client.send(request, stream=True),
             provider="exa",
             operation="people_search",
             metadata=metadata,
@@ -521,12 +488,14 @@ class ClayContactProvider:
             for contact in contacts
         ]
         metadata = {"submitted_contacts": len(items)}
+        request = self._client.build_request(
+            "POST",
+            f"{_CLAY_BASE_URL}/routines/{quote(self._routine_id, safe=':')}/run",
+            headers={"clay-api-key": self._api_key},
+            json={"items": items},
+        )
         response = _call(
-            lambda: self._client.post(
-                f"{_CLAY_BASE_URL}/routines/{quote(self._routine_id, safe=':')}/run",
-                headers={"clay-api-key": self._api_key},
-                json={"items": items},
-            ),
+            lambda: self._client.send(request, stream=True),
             provider="clay",
             operation="work_email_routine_start",
             metadata=metadata,
@@ -565,11 +534,13 @@ class ClayContactProvider:
         if not routine_run_id.strip():
             raise ValueError("routine_run_id must be nonempty")
         metadata = {"routine_run_id": routine_run_id}
+        request = self._client.build_request(
+            "GET",
+            f"{_CLAY_BASE_URL}/routines/run/{quote(routine_run_id, safe=':')}/results",
+            headers={"clay-api-key": self._api_key},
+        )
         response = _call(
-            lambda: self._client.get(
-                f"{_CLAY_BASE_URL}/routines/run/{quote(routine_run_id, safe=':')}/results",
-                headers={"clay-api-key": self._api_key},
-            ),
+            lambda: self._client.send(request, stream=True),
             provider="clay",
             operation="work_email_routine_results",
             metadata=metadata,
@@ -582,6 +553,7 @@ class ClayContactProvider:
         )
         event = _usage("clay", "work_email_routine_results", metadata=metadata)
         if response.status_code == 202:
+            response.close()
             return ClayResults(status="pending", items=[], usage_event=event)
         payload = _json_object(
             response,
@@ -642,12 +614,14 @@ class ApolloContactProvider:
         if contact.linkedin_url is not None:
             body["linkedin_url"] = contact.linkedin_url
         metadata = {"contact_id": contact.contact_id, "credits_reserved": 1.0}
+        request = self._client.build_request(
+            "POST",
+            _APOLLO_PEOPLE_URL,
+            headers={"x-api-key": self._api_key},
+            json=body,
+        )
         response = _call(
-            lambda: self._client.post(
-                _APOLLO_PEOPLE_URL,
-                headers={"x-api-key": self._api_key},
-                json=body,
-            ),
+            lambda: self._client.send(request, stream=True),
             provider="apollo",
             operation="people_enrichment",
             metadata=metadata,
@@ -706,34 +680,40 @@ class InstantlyVerificationProvider:
 
     def create(self, email: str) -> VerificationResult:
         """Create one verification request for a work email that has not been submitted before."""
+        request = self._client.build_request(
+            "POST",
+            _INSTANTLY_VERIFY_URL,
+            headers={"Authorization": f"Bearer {self._api_key}"},
+            json={"email": email},
+        )
         return self._request(
             operation="email_verification_create",
-            call=lambda: self._client.post(
-                _INSTANTLY_VERIFY_URL,
-                headers={"Authorization": f"Bearer {self._api_key}"},
-                json={"email": email},
-            ),
+            request=request,
             email=email,
         )
 
     def get(self, email: str) -> VerificationResult:
         """Read the status of the same previously pending work-email verification."""
+        request = self._client.build_request(
+            "GET",
+            f"{_INSTANTLY_VERIFY_URL}/{quote(email, safe='')}",
+            headers={"Authorization": f"Bearer {self._api_key}"},
+        )
         return self._request(
             operation="email_verification_get",
-            call=lambda: self._client.get(
-                f"{_INSTANTLY_VERIFY_URL}/{quote(email, safe='')}",
-                headers={"Authorization": f"Bearer {self._api_key}"},
-            ),
+            request=request,
             email=email,
         )
 
-    def _request(self, *, operation: str, call: Any, email: str) -> VerificationResult:
+    def _request(
+        self, *, operation: str, request: httpx.Request, email: str
+    ) -> VerificationResult:
         """Execute one verification-only request and validate status and credit usage."""
         if usable_work_email(email) is None:
             raise ValueError("Instantly verification requires a syntactically valid work email")
         metadata = {"email": email.casefold()}
         response = _call(
-            call,
+            lambda: self._client.send(request, stream=True),
             provider="instantly",
             operation=operation,
             metadata=metadata,
