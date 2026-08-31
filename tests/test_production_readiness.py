@@ -35,7 +35,12 @@ from leads_discovery.pipeline.contact_enrichment import (
 )
 from leads_discovery.pipeline.costs import CostTracker
 from leads_discovery.pipeline.git_journal import sync_checkpoint_barrier
-from leads_discovery.pipeline.m2_batch import _provider_budget_allows
+from leads_discovery.pipeline.m2_batch import (
+    M2BatchConfig,
+    _provider_budget_allows,
+    _validate_artifact_paths,
+    _validate_config,
+)
 from leads_discovery.pipeline.state import (
     append_jsonl,
     iter_jsonl,
@@ -338,6 +343,22 @@ def test_m4_rejects_symlinked_data_root(tmp_path: Path) -> None:
             apollo=_BombApollo(),
             instantly=_BombInstantly(),
         )
+
+
+def test_m2_rejects_run_directory_replaced_by_symlink(tmp_path: Path) -> None:
+    """A validated M2 run directory cannot be swapped for a symlink before writing."""
+    root = tmp_path / "data"
+    root.mkdir()
+    run_dir = root / "run-link"
+    run_dir.mkdir()
+    paths = _validate_config(M2BatchConfig(run_id="run-link", data_root=root))
+    run_dir.rmdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    run_dir.symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="non-symlink"):
+        _validate_artifact_paths(paths)
 
 
 def test_atomic_write_rejects_symlink_target(tmp_path: Path) -> None:

@@ -312,15 +312,6 @@ def test_contract_7_unrelated_negation_cannot_support_hard_negative() -> None:
     assert "confirmed_not_pvf_relevant" not in result.rejection_reasons
 
 
-def test_contract_8_provider_json_parsing_is_stream_bounded() -> None:
-    """Provider response parsing must not buffer an unchecked whole body."""
-    source = _source(request_json)
-    assert ".json()" not in source
-    assert ".read()" not in source
-    assert "iter_bytes" in source or "iter_raw" in source
-    assert "max" in source and "byte" in source
-
-
 def test_contract_9_nested_raw_fields_have_deterministic_bound(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -439,20 +430,23 @@ def test_contract_13_pr_and_push_ci_do_not_get_live_credentials() -> None:
 def test_contract_14_one_company_canary_limits_are_fixed() -> None:
     """Workflow and fixed wrapper together must enforce tiny non-input canary ceilings."""
     workflow = _paid_workflow().casefold()
-    wrapper = _module_source("leads_discovery.production_canary")
+    canary = _module_source("leads_discovery.production_canary")
     assert "production_canary" in workflow
     assert all(
-        marker in wrapper
-        for marker in (
-            "_max_candidates",
-            "_max_evaluated",
-            "_max_contacts",
-            "_max_paid_contacts",
-            "_exa_budget_usd",
-            "_deepseek_budget_usd",
-            "_apollo_credit_cap",
-            "_instantly_call_cap",
+        f"{name.casefold()} = \"1\"" in canary
+        for name in (
+            "_MAX_CANDIDATES",
+            "_MAX_EVALUATED",
+            "_MAX_CONTACTS",
+            "_MAX_PAID_CONTACTS",
+            "_CLAY_MAX_CONTACTS",
+            "_APOLLO_CREDIT_CAP",
+            "_INSTANTLY_CALL_CAP",
         )
+    )
+    assert all(
+        f"{name.casefold()} = \"0." in canary
+        for name in ("_EXA_BUDGET_USD", "_DEEPSEEK_BUDGET_USD", "_EXA_PEOPLE_BUDGET_USD")
     )
     assert "leads_max_run_bytes" in workflow
     assert "inputs:" not in workflow

@@ -34,7 +34,7 @@ _MAX_TOKENS = 2048
 _MAX_ATTEMPTS = 3
 _REQUEST_TIMEOUT = httpx.Timeout(45.0, connect=5.0)
 _EXPLICIT_NEGATION = re.compile(
-    r"\b(no|not|none|never|without|does\s+not|doesn't|isn't|aren't|lacks?|lacking)\b",
+    r"\b(no|not|none|never|without|does\s+not|doesn't|don't|isn't|aren't|lacks?|lacking)\b",
     re.IGNORECASE,
 )
 _CLAUSE_BOUNDARY = re.compile(
@@ -46,6 +46,29 @@ _EXCLUSIONARY_FALSE_TERMS: dict[str, tuple[str, ...]] = {
     "inside_sales_or_estimating_presence": ("inside sales", "estimating", "estimator"),
     "rfq_or_quote_workflow_evidence": ("rfq", "request for quote", "quotation", "quote"),
 }
+_PVF_SALE_RELATION_TERMS = (
+    "sell",
+    "sells",
+    "selling",
+    "sold",
+    "distribute",
+    "distributes",
+    "distributed",
+    "distribution",
+    "offer",
+    "offers",
+    "offering",
+    "provide",
+    "provides",
+    "providing",
+    "supply",
+    "supplies",
+    "supplying",
+    "carry",
+    "carries",
+    "stock",
+    "stocks",
+)
 FACT_KEYS = (
     "pvf_relevant",
     "pvf_product_breadth",
@@ -554,6 +577,38 @@ def _negative_term_is_local(clause: str, term: str) -> bool:
     return False
 
 
+def _pvf_negative_is_local(clause: str) -> bool:
+    """Require negation, a sales relation, and a PVF target in one proposition."""
+    targets = tuple(
+        re.finditer(
+            r"\b(?:pvf|pipe|piping|valves?|fittings?)\b", clause, re.IGNORECASE
+        )
+    )
+    relations = tuple(
+        re.finditer(
+            rf"\b(?:{'|'.join(map(re.escape, _PVF_SALE_RELATION_TERMS))})\b",
+            clause,
+            re.IGNORECASE,
+        )
+    )
+    if not targets or not relations:
+        return False
+    for negation in _EXPLICIT_NEGATION.finditer(clause):
+        for relation in relations:
+            if relation.start() < negation.end():
+                continue
+            before_relation = clause[negation.end() : relation.start()]
+            if len(re.findall(r"\b[\w']+\b", before_relation)) > 4:
+                continue
+            for target in targets:
+                if target.start() < relation.end():
+                    continue
+                after_relation = clause[relation.end() : target.start()]
+                if len(re.findall(r"\b[\w']+\b", after_relation)) <= 5:
+                    return True
+    return False
+
+
 def _explicitly_supports_false(
     key: str,
     fact: ExtractedFact,
@@ -571,7 +626,12 @@ def _explicitly_supports_false(
             if not text:
                 continue
             for clause in _CLAUSE_BOUNDARY.split(text.casefold()):
-                if any(_negative_term_is_local(clause, term) for term in terms):
+                supported = (
+                    _pvf_negative_is_local(clause)
+                    if key == "pvf_relevant"
+                    else any(_negative_term_is_local(clause, term) for term in terms)
+                )
+                if supported:
                     return True
     return False
 

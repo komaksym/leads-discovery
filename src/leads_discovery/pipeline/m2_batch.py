@@ -175,6 +175,8 @@ def _validate_config(config: M2BatchConfig) -> _RunPaths:
 
 def _validate_artifact_paths(paths: _RunPaths) -> None:
     """Reject pre-existing artifact symlinks before any artifact read or write."""
+    if paths.run_dir.is_symlink() or not paths.run_dir.is_dir():
+        raise ValueError("run directory must be an existing non-symlink directory")
     for path in paths.artifacts():
         if path.is_symlink():
             raise ValueError(f"artifact path must not be a symlink: {path.name}")

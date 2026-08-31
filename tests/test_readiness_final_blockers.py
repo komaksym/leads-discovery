@@ -90,6 +90,8 @@ def _negative_result() -> ExtractionResult:
     [
         "We do not sell electrical equipment. We distribute pipe, valves, and fittings.",
         "We are not a manufacturer. We distribute industrial valves.",
+        "We do not manufacture pipe. We distribute industrial pipe, valves, and fittings.",
+        "We do not install pipe. We distribute industrial pipe, valves, and fittings.",
         "We do not serve residential customers. Our PVF products serve industrial facilities.",
     ],
 )
