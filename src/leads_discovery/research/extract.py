@@ -11,8 +11,6 @@ from typing import Any, cast
 import httpx
 
 from leads_discovery.discovery.base import classify_http_status, provider_error, safe_transport_call
-from leads_discovery.research.evidence_support import canonicalize_supported_fact
-
 from leads_discovery.models import (
     CompanyRecord,
     EvidenceBundle,
@@ -21,6 +19,7 @@ from leads_discovery.models import (
     FactValue,
     UsageEvent,
 )
+from leads_discovery.research.evidence_support import canonicalize_supported_fact
 
 _DEEPSEEK_URL = "https://api.deepseek.com/chat/completions"
 _MODEL = "deepseek-v4-flash"
