@@ -435,6 +435,36 @@ def test_apply_extraction_downgrades_an_uncited_positive_proposition_to_unknown(
     }
 
 
+def test_apply_extraction_rejects_a_nearby_unrelated_numeric_claim() -> None:
+    """A number near a branch word is not evidence that the company has that many branches."""
+    company = _company()
+    bundle = EvidenceBundle(
+        company_id=company.company_id,
+        items=[
+            EvidenceItem(
+                evidence_id="ev_branch_manager",
+                url="https://acme.com/news",
+                excerpt="Our branch manager won 3 awards for customer service.",
+                provider="exa",
+            )
+        ],
+        raw_records=[],
+        usage_events=[],
+    )
+    facts = {key: ExtractedFact(None, 0.0, []) for key in FACT_KEYS}
+    facts["branch_count"] = ExtractedFact(3, 0.9, ["ev_branch_manager"])
+    result = ExtractionResult(
+        company_id=company.company_id,
+        model=MODEL,
+        facts=facts,
+        usage_event=UsageEvent(provider="deepseek", operation="structured_extraction"),
+    )
+
+    updated = apply_extraction(company, bundle, result)
+
+    assert updated.features["branch_count"] is None
+
+
 def test_deepseek_http_failure_is_sanitized_and_counts_attempt() -> None:
     """DeepSeek failure text and usage never expose auth or full provider bodies."""
     unsafe_body = f"bad auth {API_KEY}"

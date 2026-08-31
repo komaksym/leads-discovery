@@ -76,6 +76,11 @@ _FACT_SUPPORT_TERMS: dict[str, tuple[str, ...]] = {
     "manual_workflow_evidence": ("manual", "spreadsheet", "workflow"),
     "explicit_process_bottleneck_evidence": ("bottleneck", "delay", "process"),
 }
+_NUMERIC_FACT_UNITS: dict[str, tuple[str, ...]] = {
+    "branch_count": ("branch", "branches", "location", "locations", "facility", "facilities"),
+    "employee_count": ("employee", "employees", "staff", "people", "team members"),
+    "manufacturer_count_or_breadth": ("manufacturer", "manufacturers", "brand", "brands"),
+}
 _PVF_SALE_RELATION_TERMS = (
     "sell",
     "sells",
@@ -681,25 +686,35 @@ def _citation_supports_fact(
                         for term in terms
                     ) and not any(
                         _negative_term_is_local(clause, term) for term in terms
-                    ) and _value_is_explicitly_supported(fact.value, clause)
+                    ) and _value_is_explicitly_supported(key, fact.value, clause)
                 if supported:
                     return True
     return False
 
 
-def _value_is_explicitly_supported(value: FactValue, clause: str) -> bool:
+def _value_is_explicitly_supported(key: str, value: FactValue, clause: str) -> bool:
     """Require scalar/list values to be stated by the cited proposition, not merely nearby."""
     if isinstance(value, bool):
         return True
     if isinstance(value, int):
-        return re.search(rf"(?<!\d){value}(?!\d)", clause) is not None
+        return _numeric_value_has_unit(key, str(value), clause)
     if isinstance(value, float):
-        return re.search(rf"(?<![\d.]){re.escape(str(value))}(?![\d.])", clause) is not None
+        return _numeric_value_has_unit(key, str(value), clause)
     if isinstance(value, str):
         return value.casefold() in clause
     if isinstance(value, list):
         return bool(value) and all(item.casefold() in clause for item in value)
     return False
+
+
+def _numeric_value_has_unit(key: str, value: str, clause: str) -> bool:
+    """Require a numeric value to be directly attached to its fact's domain unit."""
+    units = _NUMERIC_FACT_UNITS.get(key)
+    if units is None:
+        return False
+    number = rf"(?<![\d.]){re.escape(value)}(?![\d.])"
+    unit = "|".join(re.escape(item) for item in units)
+    return re.search(rf"{number}\s+(?:{unit})\b", clause, re.IGNORECASE) is not None
 
 
 def apply_extraction(
