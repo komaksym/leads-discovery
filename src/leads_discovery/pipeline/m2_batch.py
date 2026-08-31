@@ -35,17 +35,13 @@ from leads_discovery.models import (
     UsageEvent,
 )
 from leads_discovery.pipeline.costs import CostTracker
-from leads_discovery.pipeline.paid_operations import (
-    PaidOperationLifecycle,
-    find_unknown_in_flight,
-    reservation_fits,
-)
+from leads_discovery.pipeline.paid_operations import PaidOperationLifecycle
 from leads_discovery.pipeline.state import (
     append_company_snapshot,
     append_jsonl,
-    load_usage_events,
     load_checkpoint,
     load_jsonl,
+    load_usage_events,
     load_latest_company_records,
     read_json,
     write_checkpoint,
@@ -260,33 +256,6 @@ def _persist_checkpoint(path: Path, checkpoint: RunCheckpoint) -> None:
     write_checkpoint(path, checkpoint)
 
 
-def _mark_in_flight(
-    lifecycle: PaidOperationLifecycle,
-    *,
-    operation_id: str,
-    provider: str,
-    operation: str,
-    request_id: str | None = None,
-    company_id: str | None = None,
-    reservation_usd: float | None = None,
-    successful_calls: int | None = None,
-) -> None:
-    """Durably mark one paid operation in flight before any provider call occurs."""
-    fields: dict[str, Any] = {}
-    if successful_calls is not None:
-        fields["successful_calls"] = successful_calls
-    lifecycle.begin(
-        operation_id,
-        provider=provider,
-        operation=operation,
-        fields=fields,
-        request_id=request_id,
-        company_id=company_id,
-        reservation_usd=reservation_usd,
-        pending_stage=operation,
-    )
-
-
 def _finish_operation(
     lifecycle: PaidOperationLifecycle,
     operation_id: str,
@@ -334,18 +303,6 @@ def _replay_usage(paths: _RunPaths) -> CostTracker:
     return tracker
 
 
-def _provider_budget_allows(
-    tracker: CostTracker,
-    provider: str,
-    ceiling: float | None,
-    reservation: float = 0.0,
-) -> bool:
-    """Require committed spend plus the next reservation to remain under one hard ceiling."""
-    if ceiling is None:
-        return True
-    return reservation_fits(tracker.provider_estimated_spend(provider), ceiling, reservation)
-
-
 def _exa_search_reservation(max_results: int) -> float:
     """Reserve the current published worst-case Exa Search+highlights cost for a bounded call."""
     if (
@@ -374,15 +331,6 @@ def _append_research_raw(paths: _RunPaths, rows: Sequence[dict[str, Any]]) -> No
     """Persist complete Exa research rows outside the bounded model evidence bundle."""
     for row in rows:
         append_jsonl(paths.research_raw, deepcopy(row))
-
-
-def _unknown_in_flight(checkpoint: RunCheckpoint) -> tuple[str, dict[str, Any]] | None:
-    """Find the first provider operation whose previous paid outcome must not be repeated."""
-    return find_unknown_in_flight(
-        _operations(checkpoint),
-        replayable=lambda _operation_id, entry: entry.get("provider") == "apify"
-        and isinstance(entry.get("run_id"), str),
-    )
 
 
 def _resume_apify_if_needed(
@@ -582,13 +530,12 @@ def _discovery_phase(
                 error_kind=exc.kind,
             )
             if exc.kind == "budget_exhausted":
-                return _pause(
-                    checkpoint,
-                    paths.checkpoint,
+                lifecycle.pause(
                     status="paused_budget",
                     reason="exa_budget_exhausted",
                     stage="discovery",
                 )
+                return checkpoint
             if exc.kind in {
                 "authentication",
                 "invalid_request",
@@ -747,14 +694,13 @@ def _handle_research_error(
         error_kind=exc.kind,
     )
     if exc.kind == "budget_exhausted":
-        return _pause(
-            checkpoint,
-            paths.checkpoint,
+        lifecycle.pause(
             status="paused_budget",
             reason="exa_budget_exhausted",
             company_id=company_id,
             stage="research",
         )
+        return checkpoint
     if exc.kind in {"authentication", "invalid_request", "invalid_response", "permanent"}:
         return _pause(
             checkpoint,
@@ -1000,14 +946,13 @@ def _research_and_extract_phase(
                 error_kind=exc.kind,
             )
             if exc.kind == "budget_exhausted":
-                return _pause(
-                    checkpoint,
-                    paths.checkpoint,
+                lifecycle.pause(
                     status="paused_budget",
                     reason="deepseek_budget_exhausted",
                     company_id=company.company_id,
                     stage="extraction",
                 )
+                return checkpoint
             if exc.kind in {
                 "authentication",
                 "invalid_request",
