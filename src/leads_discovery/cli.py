@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Final, Never, cast
 
 from leads_discovery.calibration import CalibrationSummary, calibrate_run
+from leads_discovery.discovery import normalize_discovery_configuration
 from leads_discovery.models import RunCheckpoint
 from leads_discovery.pipeline.evaluation import (
     EvaluationConfig,
@@ -46,6 +47,24 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--apify-budget-usd", type=float, default=0.25)
     run.add_argument("--deepseek-budget-usd", type=float, required=True)
     run.add_argument("--exa-budget-usd", type=float)
+    run.add_argument("--market", default="PVF")
+    run.add_argument(
+        "--search-term",
+        "--search-query",
+        "--search-terms",
+        dest="search_terms",
+        action="append",
+        default=None,
+    )
+    run.add_argument(
+        "--target-geography",
+        "--target-country",
+        "--target-geographies",
+        "--target-countries",
+        dest="target_geographies",
+        action="append",
+        default=None,
+    )
     run.add_argument("--execute-live", action="store_true")
 
     score = commands.add_parser("score")
@@ -116,6 +135,23 @@ def _validate_run_inputs(args: argparse.Namespace) -> None:
     _validate_number("deepseek_budget_usd", args.deepseek_budget_usd)
     if args.exa_budget_usd is not None:
         _validate_number("exa_budget_usd", args.exa_budget_usd)
+    normalize_discovery_configuration(
+        market=args.market,
+        search_terms=tuple(args.search_terms or ()),
+        target_geographies=tuple(args.target_geographies or ("US", "CA")),
+    )
+
+
+def _run_search_configuration(
+    args: argparse.Namespace,
+) -> tuple[str, tuple[str, ...], tuple[str, ...]]:
+    """Return normalized operator search criteria shared by dry and live run paths."""
+    market, terms, geographies = normalize_discovery_configuration(
+        market=args.market,
+        search_terms=tuple(args.search_terms or ()),
+        target_geographies=tuple(args.target_geographies or ("US", "CA")),
+    )
+    return market, terms, geographies
 
 
 def _validate_enrich_inputs(args: argparse.Namespace) -> None:
@@ -203,6 +239,7 @@ def _mark_m3_completed(path: Path, checkpoint: RunCheckpoint) -> RunCheckpoint:
 def _run_dry(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
     """Return an M2/M3 dry-run summary without filesystem, credentials, or provider imports."""
     _validate_run_inputs(args)
+    market, search_terms, target_geographies = _run_search_configuration(args)
     return (
         {
             "command": "run",
@@ -211,6 +248,9 @@ def _run_dry(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
             "reason": "live_execution_not_authorized",
             "max_candidates": args.max_candidates,
             "max_evaluated": args.max_evaluated,
+            "market": market,
+            "search_terms": list(search_terms),
+            "target_geographies": list(target_geographies),
         },
         0,
     )
@@ -219,6 +259,7 @@ def _run_dry(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
 def _run_live(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
     """Compose existing M2 providers only after explicit live authorization."""
     _validate_run_inputs(args)
+    market, search_terms, target_geographies = _run_search_configuration(args)
     if args.deepseek_budget_usd <= 0:
         raise ValueError("live extraction requires a positive explicit DeepSeek budget")
 
@@ -244,6 +285,9 @@ def _run_live(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
         deepseek_budget_usd=args.deepseek_budget_usd,
         exa_budget_usd=args.exa_budget_usd,
         execute_live=True,
+        market=market,
+        search_terms=search_terms,
+        target_geographies=target_geographies,
     )
     paths = m2_batch._validate_config(config)
     exa_key = os.environ.get("EXA_API_KEY", "")

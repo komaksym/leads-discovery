@@ -175,11 +175,11 @@ def test_stale_contacts_cannot_authorize_enrichment_after_m3_rejection(
         json.dumps(evaluated[0], sort_keys=True, ensure_ascii=False) + "\n",
         encoding="utf-8",
     )
-    (run_dir / "contact_checkpoint.json").unlink()
     request_count = len(stub.requests)
 
     assert call_enrich_live(tmp_path, "stale-contact") == 0
     assert len(stub.requests) == request_count
+    assert read_jsonl(run_dir / "contacts.jsonl") == []
 
 
 def test_decision_proximity_caps_candidates_contacts_and_paid_enrichment(

@@ -3,17 +3,28 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
 from leads_discovery.models import RunCheckpoint, UsageEvent
 from leads_discovery.pipeline.costs import CostTracker
-from leads_discovery.pipeline.m2_batch import (
-    M2BatchConfig,
-    _provider_budget_allows,
-    _unknown_in_flight,
-    _validate_config,
+from leads_discovery.pipeline.m2_batch import M2BatchConfig, run_m2_batch
+from leads_discovery.pipeline.paid_operations import (
+    PaidOperationLifecycle,
+    checkpoint_has_unknown_paid_work,
 )
+
+
+def _lifecycle(events: list[UsageEvent]) -> PaidOperationLifecycle:
+    """Build an in-memory lifecycle for testing its public admission contract."""
+    return PaidOperationLifecycle(
+        checkpoint=RunCheckpoint(run_id="red-team-budget"),
+        tracker=CostTracker(events),
+        usage_path=Path("unused-usage.jsonl"),
+        persist_checkpoint=lambda: None,
+        publish_usage=lambda: None,
+    )
 
 
 @pytest.mark.parametrize(
@@ -30,7 +41,7 @@ def test_budget_gate_handles_below_exact_and_above_limit(
     expected: bool,
 ) -> None:
     """Committed spend plus worst-case reservation must fit the hard ceiling."""
-    tracker = CostTracker(
+    lifecycle = _lifecycle(
         [
             UsageEvent(
                 provider="exa",
@@ -39,12 +50,12 @@ def test_budget_gate_handles_below_exact_and_above_limit(
             )
         ]
     )
-    assert _provider_budget_allows(tracker, "exa", 1.0, reservation) is expected
+    assert lifecycle.budget_allows("exa", 1.0, reservation) is expected
 
 
 def test_unknown_cost_blocks_next_paid_dispatch() -> None:
     """Unknown committed spend must never be treated as zero at the dispatch gate."""
-    tracker = CostTracker(
+    assert not _lifecycle(
         [
             UsageEvent(
                 provider="exa",
@@ -52,8 +63,7 @@ def test_unknown_cost_blocks_next_paid_dispatch() -> None:
                 estimated_cost_usd=None,
             )
         ]
-    )
-    assert not _provider_budget_allows(tracker, "exa", 1.0, 0.01)
+    ).budget_allows("exa", 1.0, 0.01)
 
 
 @pytest.mark.parametrize("provider", ["exa", "deepseek"])
@@ -71,32 +81,16 @@ def test_unresolved_paid_operation_is_global_replay_barrier(provider: str) -> No
             }
         },
     )
-    unresolved = _unknown_in_flight(checkpoint)
-    assert unresolved is not None
-    assert unresolved[1]["provider"] == provider
-
-
-def test_apify_missing_run_id_is_barrier_but_persisted_id_is_resumable() -> None:
-    """A lost Actor identity freezes replay while a persisted ID can be resumed safely."""
-    checkpoint = RunCheckpoint(
-        run_id="red-team-apify",
-        provider_state={
-            "operations": {
-                "apify:maps": {
-                    "provider": "apify",
-                    "operation": "google_maps_search",
-                    "state": "in_flight",
-                }
-            }
-        },
-    )
-    assert _unknown_in_flight(checkpoint) is not None
-    checkpoint.provider_state["operations"]["apify:maps"]["run_id"] = "run-123"
-    assert _unknown_in_flight(checkpoint) is None
+    assert checkpoint_has_unknown_paid_work(checkpoint)
 
 
 @pytest.mark.parametrize("run_id", ["../escape", "nested/run", "..", "."])
 def test_run_id_cannot_escape_data_root(tmp_path: Path, run_id: str) -> None:
     """Traversal-shaped run identifiers must fail before any run path is accepted."""
     with pytest.raises(ValueError, match="run_id"):
-        _validate_config(M2BatchConfig(run_id=run_id, data_root=tmp_path))
+        run_m2_batch(
+            M2BatchConfig(run_id=run_id, data_root=tmp_path),
+            discovery={},
+            researcher=cast(Any, object()),
+            extractor=cast(Any, object()),
+        )

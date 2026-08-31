@@ -33,9 +33,7 @@ from leads_discovery.pipeline.contact_enrichment import (
     ContactEnrichmentConfig,
     run_contact_enrichment,
 )
-from leads_discovery.pipeline.costs import CostTracker
 from leads_discovery.pipeline.git_journal import sync_checkpoint_barrier
-from leads_discovery.pipeline.m2_batch import _provider_budget_allows
 from leads_discovery.pipeline.state import (
     append_jsonl,
     iter_jsonl,
@@ -178,14 +176,6 @@ def test_ambiguous_paid_operation_cannot_redispatch_after_remote_restart_barrier
     sync_checkpoint_barrier(checkpoint, None)
     with pytest.raises(RuntimeError, match="durable non-retryable"):
         sync_checkpoint_barrier(checkpoint, None)
-
-
-def test_budget_reservation_blocks_call_that_could_cross_ceiling() -> None:
-    """Committed spend plus next worst-case cost must fit before dispatch."""
-    tracker = CostTracker(
-        [UsageEvent(provider="exa", operation="search", estimated_cost_usd=0.99)]
-    )
-    assert not _provider_budget_allows(tracker, "exa", 1.0, 0.017)
 
 
 def test_deepseek_empty_and_malformed_json_retry_within_fixed_bound() -> None:
@@ -451,12 +441,13 @@ def test_canary_limits_are_not_cli_inputs(monkeypatch: pytest.MonkeyPatch) -> No
     run, enrich = calls
     assert run[run.index("--max-candidates") + 1] == "1"
     assert run[run.index("--max-evaluated") + 1] == "1"
+    assert run[run.index("--exa-budget-usd") + 1] == "0.15"
+    assert run[run.index("--deepseek-budget-usd") + 1] == "0.01"
     assert enrich[enrich.index("--max-contacts-per-company") + 1] == "1"
     assert enrich[enrich.index("--max-paid-contacts-per-company") + 1] == "1"
+    assert enrich[enrich.index("--exa-people-budget-usd") + 1] == "0.02"
     with pytest.raises(SystemExit):
-        production_canary._parser().parse_args(
-            ["--run-id", "canary-one", "--max-candidates", "2"]
-        )
+        production_canary.main(["--run-id", "canary-one", "--max-candidates", "2"])
 
 
 def test_paid_workflow_is_manual_only_and_publishes_only_approved_outputs() -> None:

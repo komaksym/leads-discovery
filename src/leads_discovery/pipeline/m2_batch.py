@@ -24,6 +24,7 @@ from leads_discovery.discovery import (
     DiscoveryProviderError,
     ExaDiscoveryProvider,
     build_discovery_requests,
+    normalize_discovery_configuration,
 )
 from leads_discovery.models import (
     CompanyRecord,
@@ -88,6 +89,14 @@ class M2BatchConfig:
     deepseek_budget_usd: float | None = None
     exa_budget_usd: float | None = None
     execute_live: bool = False
+    market: str = "PVF"
+    search_terms: tuple[str, ...] = ()
+    target_geographies: tuple[str, ...] = ("US", "CA")
+
+    def __post_init__(self) -> None:
+        """Freeze caller-provided search collections so a run config cannot drift in memory."""
+        object.__setattr__(self, "search_terms", tuple(self.search_terms))
+        object.__setattr__(self, "target_geographies", tuple(self.target_geographies))
 
 
 @dataclass(frozen=True, slots=True)
@@ -155,6 +164,11 @@ def _validate_config(config: M2BatchConfig) -> _RunPaths:
         config.deepseek_budget_usd is None or config.deepseek_budget_usd <= 0
     ):
         raise ValueError("live extraction requires a positive explicit DeepSeek budget")
+    normalize_discovery_configuration(
+        market=config.market,
+        search_terms=config.search_terms,
+        target_geographies=config.target_geographies,
+    )
 
     original_root = config.data_root.expanduser()
     if original_root.is_symlink():
@@ -466,6 +480,9 @@ def _discovery_phase(
         include_apify=config.include_apify and discovery.get("apify") is not None,
         max_candidates=config.max_candidates,
         apify_budget_usd=config.apify_budget_usd,
+        market=config.market,
+        search_terms=config.search_terms,
+        target_geographies=config.target_geographies,
     )
     apify = discovery.get("apify")
     if apify is not None:
@@ -1187,6 +1204,24 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--apify-budget-usd", type=float, default=0.25)
     parser.add_argument("--deepseek-budget-usd", type=float, required=True)
     parser.add_argument("--exa-budget-usd", type=float)
+    parser.add_argument("--market", default="PVF")
+    parser.add_argument(
+        "--search-term",
+        "--search-query",
+        "--search-terms",
+        dest="search_terms",
+        action="append",
+        default=None,
+    )
+    parser.add_argument(
+        "--target-geography",
+        "--target-country",
+        "--target-geographies",
+        "--target-countries",
+        dest="target_geographies",
+        action="append",
+        default=None,
+    )
     parser.add_argument("--execute-live", action="store_true")
     return parser
 
@@ -1204,6 +1239,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         deepseek_budget_usd=args.deepseek_budget_usd,
         exa_budget_usd=args.exa_budget_usd,
         execute_live=args.execute_live,
+        market=args.market,
+        search_terms=tuple(args.search_terms or ()),
+        target_geographies=tuple(args.target_geographies or ("US", "CA")),
     )
     paths = _validate_config(config)
     if not config.execute_live:

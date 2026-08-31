@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any, cast
+
 import pytest
 
 from leads_discovery.discovery.queries import build_discovery_requests
@@ -185,3 +187,55 @@ def test_maximum_plan_never_exceeds_one_hundred_rows() -> None:
 
     assert sum(request.max_results_total for request in requests) == 100
     assert all(1 <= request.max_results_total <= 100 for request in requests)
+
+
+def test_operator_search_configuration_targets_selected_geographies() -> None:
+    """Custom market criteria are included in every bounded request for selected countries."""
+    requests = build_discovery_requests(
+        include_apify=True,
+        max_candidates=12,
+        market="industrial pumps",
+        search_terms=("regional distributors", "RFQ workflow"),
+        target_geographies=("CA",),
+    )
+
+    assert requests
+    assert {request.target_country_code for request in requests} == {"CA"}
+    assert sum(request.max_results_total for request in requests) == 12
+    assert all(
+        "industrial pumps" in query
+        and "regional distributors" in query
+        and "RFQ workflow" in query
+        for request in requests
+        for query in request.queries
+    )
+    assert all(
+        request.request_id.startswith("exa:ca:")
+        for request in requests
+        if request.provider == "exa"
+    )
+    assert all(
+        request.request_id.startswith("apify:ca:")
+        for request in requests
+        if request.provider == "apify"
+    )
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"market": "   "}, "market"),
+        ({"market": "industrial\npumps"}, "market"),
+        ({"search_terms": ("",)}, "search_terms"),
+        ({"search_terms": ("term",) * 6}, "search_terms"),
+        ({"target_geographies": ("MX",)}, "target_geographies"),
+        ({"target_geographies": ("US", "US")}, "target_geographies"),
+        ({"target_geographies": ()}, "target_geographies"),
+    ],
+)
+def test_operator_search_configuration_rejects_unsafe_or_unsupported_values(
+    kwargs: dict[str, object], message: str
+) -> None:
+    """Invalid operator criteria fail before a provider request can be planned."""
+    with pytest.raises(ValueError, match=message):
+        build_discovery_requests(include_apify=False, **cast(Any, kwargs))

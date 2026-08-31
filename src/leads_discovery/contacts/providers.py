@@ -7,7 +7,7 @@ import math
 import re
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Any, Literal, Never, Protocol, cast
+from typing import Any, Literal, Never, cast
 from urllib.parse import quote
 
 import httpx
@@ -132,46 +132,6 @@ class VerificationResult:
     def __post_init__(self) -> None:
         """Detach usage metadata from caller-owned state."""
         self.usage_event = UsageEvent.from_dict(self.usage_event.to_dict())
-
-
-class ExaPeopleClient(Protocol):
-    """Define the people-discovery interface consumed by the M4 orchestrator."""
-
-    def search(self, company: CompanyRecord) -> ExaPeopleResult:
-        """Search for at most ten people at one accepted company."""
-        ...
-
-
-class ClayContactClient(Protocol):
-    """Define the async Clay routine interface consumed by the M4 orchestrator."""
-
-    def start(self, contacts: list[ContactRecord]) -> ClayStartResult:
-        """Start one bounded work-email routine run."""
-        ...
-
-    def results(self, routine_run_id: str) -> ClayResults:
-        """Read progress/results for one previously persisted routine run."""
-        ...
-
-
-class ApolloContactClient(Protocol):
-    """Define synchronous work-email fallback consumed by the M4 orchestrator."""
-
-    def enrich(self, contact: ContactRecord) -> ApolloResult:
-        """Attempt work-email enrichment for one contact without personal or phone data."""
-        ...
-
-
-class InstantlyVerificationClient(Protocol):
-    """Define the verification-only Instantly interface consumed by M4."""
-
-    def create(self, email: str) -> VerificationResult:
-        """Create one verification job for a previously unsubmitted work email."""
-        ...
-
-    def get(self, email: str) -> VerificationResult:
-        """Read a previously pending verification for the same work email."""
-        ...
 
 
 def _status_kind(status_code: int) -> tuple[ErrorKind, bool]:

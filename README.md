@@ -57,6 +57,22 @@ python -m leads_discovery run \
   --execute-live
 ```
 
+Normal discovery is batch-oriented. Set a market, repeat `--search-term` for additional
+criteria, and restrict the target geography with `--target-geography`; none of these options
+identifies a single company:
+
+```bash
+python -m leads_discovery run \
+  --run-id RUN \
+  --market "industrial pumps" \
+  --search-term "regional distributors" \
+  --search-term "RFQ workflow" \
+  --target-geography CA \
+  --max-candidates 50 \
+  --max-evaluated 20 \
+  --deepseek-budget-usd 1.00
+```
+
 The Exa, Apify, and DeepSeek ceilings are independent. There is no aggregate budget. Existing provider spend is replayed from M2's append-only usage ledger on resume, so restarting a run does not reset spend.
 
 `--max-evaluated` is limited to `1..20` and is passed directly to M2 as the extraction cap. `--max-candidates` remains limited to `1..100`.

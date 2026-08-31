@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import io
+import json
 import math
 import re
 from dataclasses import dataclass
@@ -13,11 +15,7 @@ from typing import Any, Final, cast
 
 from leads_discovery.contacts.models import ContactRecord
 from leads_discovery.contacts.providers import (
-    ApolloContactClient,
-    ClayContactClient,
     ContactProviderError,
-    ExaPeopleClient,
-    InstantlyVerificationClient,
     clay_item_email,
 )
 from leads_discovery.contacts.selection import (
@@ -42,8 +40,13 @@ from leads_discovery.pipeline.state import (
 )
 
 _RUN_ID: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+_SHA256: Final[re.Pattern[str]] = re.compile(r"^[0-9a-f]{64}$")
 _FORMULA_PREFIXES: Final[frozenset[str]] = frozenset("=+-@")
 _EXA_PEOPLE_RESERVATION_USD: Final[float] = 0.017
+_M3_INPUT_FINGERPRINT_KEY: Final[str] = "m3_input_fingerprint"
+_TIMESTAMP_KEYS: Final[frozenset[str]] = frozenset(
+    {"created_at", "updated_at", "retrieved_at", "recorded_at"}
+)
 _ARTIFACTS: Final[tuple[str, ...]] = (
     "contacts.jsonl",
     "leads.csv",
@@ -209,6 +212,42 @@ def _load_accepted(path: Path) -> tuple[CompanyRecord, ...]:
     return tuple(accepted)
 
 
+def _without_timestamps(value: Any) -> Any:
+    """Return a JSON-like value with volatile timestamp fields removed recursively."""
+    if isinstance(value, dict):
+        return {
+            key: _without_timestamps(nested)
+            for key, nested in value.items()
+            if key not in _TIMESTAMP_KEYS
+        }
+    if isinstance(value, list):
+        return [_without_timestamps(item) for item in value]
+    return value
+
+
+def _m3_input_fingerprint(accepted: tuple[CompanyRecord, ...]) -> str:
+    """Hash the current accepted M3 snapshot while ignoring only volatile timestamps."""
+    canonical = _without_timestamps([company.to_dict() for company in accepted])
+    encoded = json.dumps(
+        canonical,
+        sort_keys=True,
+        ensure_ascii=False,
+        allow_nan=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _stored_m3_input_fingerprint(checkpoint: RunCheckpoint) -> str | None:
+    """Read and validate the optional M3 snapshot binding from an M4 checkpoint."""
+    value = checkpoint.provider_state.get(_M3_INPUT_FINGERPRINT_KEY)
+    if value is None:
+        return None
+    if not isinstance(value, str) or _SHA256.fullmatch(value) is None:
+        raise ValueError("contact checkpoint M3 input fingerprint is malformed")
+    return value
+
+
 def _accepted_ids(path: Path) -> frozenset[str]:
     """Reload the latest canonical M3 state and return only currently accepted company IDs."""
     return frozenset(company.company_id for company in _load_accepted(path))
@@ -335,6 +374,7 @@ def _load_checkpoint(paths: _Paths, run_id: str) -> RunCheckpoint:
     raw = checkpoint.provider_state.get("operations", {})
     if not isinstance(raw, dict):
         raise ValueError("contact checkpoint operations must be an object")
+    _stored_m3_input_fingerprint(checkpoint)
     _validate_operations(cast(dict[str, Any], raw))
     return checkpoint
 
@@ -797,13 +837,33 @@ def _m2_paid_work_is_frozen(paths: _Paths) -> bool:
     return checkpoint_has_unknown_paid_work(checkpoint)
 
 
+def _reset_for_current_m3(
+    paths: _Paths,
+    checkpoint: RunCheckpoint,
+    operations: dict[str, Any],
+    contacts: dict[str, ContactRecord],
+    fingerprint: str,
+) -> None:
+    """Discard stale M4 selections before binding the checkpoint to a new M3 snapshot."""
+    operations.clear()
+    contacts.clear()
+    # Publish the empty contact snapshot before persisting the new binding.  If the
+    # process stops between these writes, the old checkpoint still mismatches and
+    # cannot authorize the now-empty (or any stale) contact set.
+    _publish_contacts(paths, contacts)
+    checkpoint.provider_state[_M3_INPUT_FINGERPRINT_KEY] = fingerprint
+    checkpoint.status = "running"
+    checkpoint.pause_reason = None
+    _persist_checkpoint(paths.checkpoint, checkpoint)
+
+
 def run_contact_enrichment(
     config: ContactEnrichmentConfig,
     *,
-    exa: ExaPeopleClient,
-    clay: ClayContactClient,
-    apollo: ApolloContactClient,
-    instantly: InstantlyVerificationClient,
+    exa: Any,
+    clay: Any,
+    apollo: Any,
+    instantly: Any,
 ) -> ContactEnrichmentSummary:
     """Run or safely resume the artifact-only M4 contact-enrichment stage."""
     if not config.execute_live:
@@ -817,6 +877,25 @@ def run_contact_enrichment(
             contacts,
             "paused_unknown",
             "m2_unknown_in_flight",
+        )
+    current_fingerprint = _m3_input_fingerprint(accepted)
+    if _stored_m3_input_fingerprint(checkpoint) != current_fingerprint:
+        unfinished = any(
+            isinstance(value, dict)
+            and value.get("state") in {"in_flight", "pending"}
+            for value in operations.values()
+        )
+        # Existing asynchronous/unknown work cannot be safely re-associated with
+        # a different M3 input snapshot.  Leave its durable evidence intact and
+        # fail closed without polling or dispatching any provider.
+        if checkpoint.status in {"paused_unknown", "paused_pending"} or unfinished:
+            return _summary(config, paths, "paused_unknown", contacts)
+        _reset_for_current_m3(
+            paths,
+            checkpoint,
+            operations,
+            contacts,
+            current_fingerprint,
         )
     if checkpoint.status == "completed":
         _repair_usage_summary(paths, events)
