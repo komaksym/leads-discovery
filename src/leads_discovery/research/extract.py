@@ -11,6 +11,8 @@ from typing import Any, cast
 import httpx
 
 from leads_discovery.discovery.base import classify_http_status, provider_error, safe_transport_call
+from leads_discovery.research.evidence_support import canonicalize_supported_fact
+
 from leads_discovery.models import (
     CompanyRecord,
     EvidenceBundle,
@@ -449,7 +451,7 @@ def _parse_usage(raw: Any, prices: DeepSeekPriceSchedule, company_id: str) -> Us
 def apply_extraction(
     company: CompanyRecord, bundle: EvidenceBundle, result: ExtractionResult
 ) -> CompanyRecord:
-    """Apply facts/evidence without touching M1 scoring or decision fields."""
+    """Canonicalize evidence-supported facts before they can affect deterministic scoring."""
     if bundle.company_id != company.company_id or result.company_id != company.company_id:
         raise ValueError("company, evidence bundle, and extraction result IDs must match")
     updated = CompanyRecord.from_dict(company.to_dict())
@@ -457,7 +459,7 @@ def apply_extraction(
     for key in FACT_KEYS:
         if key not in result.facts:
             raise ValueError("extraction result is missing a required fact")
-        fact = result.facts[key]
+        fact = canonicalize_supported_fact(key, result.facts[key], bundle)
         updated.features[key] = deepcopy(fact.value)
         updated.feature_confidence[key] = {
             "confidence": fact.confidence,
