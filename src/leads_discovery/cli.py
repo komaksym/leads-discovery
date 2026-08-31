@@ -116,7 +116,7 @@ def _validate_run_id(run_id: object) -> str:
     return run_id
 
 
-def _validate_run_inputs(args: argparse.Namespace) -> None:
+def _validate_run_inputs(args: argparse.Namespace) -> tuple[str, tuple[str, ...], tuple[str, ...]]:
     """Validate dry/live M2/M3 run controls without provider imports or credentials."""
     _validate_run_id(args.run_id)
     if (
@@ -135,17 +135,6 @@ def _validate_run_inputs(args: argparse.Namespace) -> None:
     _validate_number("deepseek_budget_usd", args.deepseek_budget_usd)
     if args.exa_budget_usd is not None:
         _validate_number("exa_budget_usd", args.exa_budget_usd)
-    normalize_discovery_configuration(
-        market=args.market,
-        search_terms=tuple(args.search_terms or ()),
-        target_geographies=tuple(args.target_geographies or ("US", "CA")),
-    )
-
-
-def _run_search_configuration(
-    args: argparse.Namespace,
-) -> tuple[str, tuple[str, ...], tuple[str, ...]]:
-    """Return normalized operator search criteria shared by dry and live run paths."""
     market, terms, geographies = normalize_discovery_configuration(
         market=args.market,
         search_terms=tuple(args.search_terms or ()),
@@ -238,8 +227,7 @@ def _mark_m3_completed(path: Path, checkpoint: RunCheckpoint) -> RunCheckpoint:
 
 def _run_dry(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
     """Return an M2/M3 dry-run summary without filesystem, credentials, or provider imports."""
-    _validate_run_inputs(args)
-    market, search_terms, target_geographies = _run_search_configuration(args)
+    market, search_terms, target_geographies = _validate_run_inputs(args)
     return (
         {
             "command": "run",
@@ -258,8 +246,7 @@ def _run_dry(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
 
 def _run_live(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
     """Compose existing M2 providers only after explicit live authorization."""
-    _validate_run_inputs(args)
-    market, search_terms, target_geographies = _run_search_configuration(args)
+    market, search_terms, target_geographies = _validate_run_inputs(args)
     if args.deepseek_budget_usd <= 0:
         raise ValueError("live extraction requires a positive explicit DeepSeek budget")
 

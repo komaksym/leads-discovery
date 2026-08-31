@@ -48,13 +48,27 @@ def checkpoint_has_unknown_paid_work(checkpoint: RunCheckpoint) -> bool:
     """Fail closed when a run checkpoint records an unresolved paid outcome."""
     if checkpoint.status == "paused_unknown":
         return True
-    raw = checkpoint.provider_state.get("operations", {})
-    if not isinstance(raw, dict):
+    try:
+        operations = _operation_map(checkpoint)
+    except ValueError:
         return True
-    if any(not isinstance(key, str) or not isinstance(value, dict) for key, value in raw.items()):
-        return True
-    operations = cast(dict[str, dict[str, Any]], raw)
     return find_unknown_in_flight(operations) is not None
+
+
+def _operation_map(checkpoint: RunCheckpoint) -> dict[str, dict[str, Any]]:
+    """Return the mutable operation mapping after validating its persisted container shape."""
+    raw = checkpoint.provider_state.setdefault("operations", {})
+    if not isinstance(raw, dict):
+        raise ValueError("checkpoint operations must be an object")
+    operations: dict[str, dict[str, Any]] = {}
+    for operation_id, value in raw.items():
+        if not isinstance(operation_id, str) or not operation_id:
+            raise ValueError("checkpoint operation names must be nonblank strings")
+        if not isinstance(value, dict):
+            raise ValueError("checkpoint operation entries must be objects")
+        operations[operation_id] = cast(dict[str, Any], value)
+    checkpoint.provider_state["operations"] = operations
+    return operations
 
 
 @dataclass(slots=True)
@@ -69,20 +83,11 @@ class PaidOperationLifecycle:
 
     def operations(self) -> dict[str, dict[str, Any]]:
         """Return the shared mutable operation map after validating its basic shape."""
-        raw = self.checkpoint.provider_state.setdefault("operations", {})
-        if not isinstance(raw, dict):
-            raise ValueError("checkpoint operations must be an object")
-        operations: dict[str, dict[str, Any]] = {}
-        for operation_id, value in raw.items():
-            if not isinstance(operation_id, str) or not operation_id:
-                raise ValueError("checkpoint operation names must be nonblank strings")
-            if not isinstance(value, dict):
-                raise ValueError("checkpoint operation entries must be objects")
+        operations = _operation_map(self.checkpoint)
+        for value in operations.values():
             state = value.get("state")
             if state not in _OPERATION_STATES:
                 raise ValueError("checkpoint operation has an invalid state")
-            operations[operation_id] = cast(dict[str, Any], value)
-        self.checkpoint.provider_state["operations"] = operations
         return operations
 
     def budget_allows(
