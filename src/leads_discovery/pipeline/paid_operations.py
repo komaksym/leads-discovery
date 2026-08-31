@@ -2,17 +2,81 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+import math
+from collections.abc import Callable, Iterable, Mapping
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from leads_discovery.models import RunCheckpoint, UsageEvent
 from leads_discovery.pipeline.costs import CostTracker
 from leads_discovery.pipeline.state import append_usage_event
 
 _OPERATION_STATES = frozenset({"in_flight", "completed", "failed", "pending"})
+QuotaUnit = Literal["credits", "requests"]
+
+
+def _finite_nonnegative(value: object, *, field_name: str) -> float:
+    """Validate one persisted quota amount without accepting malformed numbers."""
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+        or value < 0
+    ):
+        raise ValueError(f"{field_name} must be a finite nonnegative number")
+    return float(value)
+
+
+def _event_quota_amount(
+    event: UsageEvent,
+    provider: str,
+    *,
+    operation: str | None,
+    unit: QuotaUnit,
+) -> float:
+    """Return one event's contribution to a provider quota dimension."""
+    if event.provider != provider:
+        return 0.0
+    if operation is not None and event.operation != operation:
+        return 0.0
+    if unit == "requests":
+        return _finite_nonnegative(event.request_count, field_name="request_count")
+
+    raw = event.metadata.get("credits_used")
+    if raw is None and provider == "apollo":
+        raw = event.metadata.get("credits_reserved", 1.0)
+    if raw is None:
+        return 0.0
+    return _finite_nonnegative(raw, field_name=f"{provider} credits")
+
+
+def replay_quota_totals(events: Iterable[UsageEvent]) -> tuple[float, int, float]:
+    """Replay Apollo credits and Instantly create/credit totals from usage events."""
+    apollo = 0.0
+    instantly_create_calls = 0.0
+    instantly_credits = 0.0
+    for event in events:
+        apollo += _event_quota_amount(
+            event,
+            "apollo",
+            operation=None,
+            unit="credits",
+        )
+        instantly_create_calls += _event_quota_amount(
+            event,
+            "instantly",
+            operation="email_verification_create",
+            unit="requests",
+        )
+        instantly_credits += _event_quota_amount(
+            event,
+            "instantly",
+            operation=None,
+            unit="credits",
+        )
+    return apollo, int(instantly_create_calls), instantly_credits
 
 
 def reservation_fits(
@@ -80,6 +144,14 @@ class PaidOperationLifecycle:
     usage_path: Path
     persist_checkpoint: Callable[[], None]
     publish_usage: Callable[[], None]
+    usage_events: Iterable[UsageEvent] = ()
+    _usage_events: list[UsageEvent] = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        """Own a defensive replay snapshot of the authoritative usage ledger."""
+        self._usage_events = [
+            UsageEvent.from_dict(event.to_dict()) for event in self.usage_events
+        ]
 
     def operations(self) -> dict[str, dict[str, Any]]:
         """Return the shared mutable operation map after validating its basic shape."""
@@ -103,12 +175,48 @@ class PaidOperationLifecycle:
 
     def quota_allows(
         self,
-        committed: float,
+        provider: str,
         ceiling: float | None,
         reservation: float = 0.0,
+        *,
+        operation: str | None = None,
+        unit: QuotaUnit | None = None,
     ) -> bool:
-        """Apply one replayed non-dollar quota admission through the shared lifecycle."""
-        return reservation_fits(committed, ceiling, reservation)
+        """Apply admission against replayed provider quota owned by this lifecycle."""
+        return reservation_fits(
+            self.quota_used(provider, operation=operation, unit=unit),
+            ceiling,
+            reservation,
+        )
+
+    def quota_used(
+        self,
+        provider: str,
+        *,
+        operation: str | None = None,
+        unit: QuotaUnit | None = None,
+    ) -> float:
+        """Return committed quota from replayed and newly recorded usage events."""
+        if unit is None:
+            unit = "credits" if provider == "apollo" else "requests"
+        if unit not in {"credits", "requests"}:
+            raise ValueError("quota unit must be credits or requests")
+        return sum(
+            _event_quota_amount(
+                event,
+                provider,
+                operation=operation,
+                unit=unit,
+            )
+            for event in self._usage_events
+        )
+
+    @classmethod
+    def replay_quota_totals(
+        cls, events: Iterable[UsageEvent]
+    ) -> tuple[float, int, float]:
+        """Replay the stable M4 quota summary through the lifecycle boundary."""
+        return replay_quota_totals(events)
 
     def begin(
         self,
@@ -176,8 +284,10 @@ class PaidOperationLifecycle:
 
     def record_usage(self, event: UsageEvent) -> None:
         """Append one authoritative usage event and refresh its derived summary."""
-        append_usage_event(self.usage_path, event)
-        self.tracker.record(event)
+        stored = UsageEvent.from_dict(event.to_dict())
+        append_usage_event(self.usage_path, stored)
+        self.tracker.record(stored)
+        self._usage_events.append(stored)
         self.publish_usage()
 
     def unknown_in_flight(
@@ -193,5 +303,6 @@ __all__ = [
     "PaidOperationLifecycle",
     "checkpoint_has_unknown_paid_work",
     "find_unknown_in_flight",
+    "replay_quota_totals",
     "reservation_fits",
 ]

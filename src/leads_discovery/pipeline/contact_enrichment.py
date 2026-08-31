@@ -28,6 +28,7 @@ from leads_discovery.pipeline.costs import CostTracker
 from leads_discovery.pipeline.paid_operations import (
     PaidOperationLifecycle,
     checkpoint_has_unknown_paid_work,
+    replay_quota_totals,
 )
 from leads_discovery.pipeline.state import (
     load_jsonl,
@@ -559,25 +560,6 @@ def _record_event(lifecycle: PaidOperationLifecycle, event: UsageEvent) -> None:
     lifecycle.record_usage(event)
 
 
-def _quota_totals(events: list[UsageEvent]) -> tuple[float, int, float]:
-    """Replay Apollo credits plus Instantly calls and credits from M4 usage metadata."""
-    apollo = 0.0
-    instantly_calls = 0
-    instantly_credits = 0.0
-    for event in events:
-        if event.provider == "apollo":
-            raw = event.metadata.get("credits_used")
-            if raw is None:
-                raw = event.metadata.get("credits_reserved", 1.0)
-            apollo += _finite_nonnegative("apollo credits", raw)
-        elif event.provider == "instantly":
-            instantly_calls += event.request_count
-            raw = event.metadata.get("credits_used")
-            if raw is not None:
-                instantly_credits += _finite_nonnegative("instantly credits", raw)
-    return apollo, instantly_calls, instantly_credits
-
-
 def _clay_submitted(events: list[UsageEvent]) -> int:
     """Replay the exact number of contacts submitted to Clay from validated M4 events."""
     total = 0
@@ -593,7 +575,7 @@ def _clay_submitted(events: list[UsageEvent]) -> int:
 
 def _usage_payload(events: list[UsageEvent]) -> dict[str, Any]:
     """Build the deterministic derived M4 usage summary from authoritative events."""
-    apollo, instantly_calls, instantly_credits = _quota_totals(events)
+    apollo, instantly_calls, instantly_credits = replay_quota_totals(events)
     return {
         **CostTracker(events).summary(),
         "quotas": {
@@ -625,6 +607,7 @@ def _make_lifecycle(
     paths: _Paths,
     checkpoint: RunCheckpoint,
     tracker: CostTracker,
+    events: list[UsageEvent],
 ) -> PaidOperationLifecycle:
     """Build the shared M4 paid-operation lifecycle over its dedicated artifacts."""
     return PaidOperationLifecycle(
@@ -633,6 +616,7 @@ def _make_lifecycle(
         usage_path=paths.usage_events,
         persist_checkpoint=lambda: _persist_checkpoint(paths.checkpoint, checkpoint),
         publish_usage=lambda: _publish_usage(paths),
+        usage_events=events,
     )
 
 
@@ -904,7 +888,7 @@ def run_contact_enrichment(
         return _summary(config, paths, "paused_unknown", contacts)
 
     tracker = CostTracker(events)
-    lifecycle = _make_lifecycle(paths, checkpoint, tracker)
+    lifecycle = _make_lifecycle(paths, checkpoint, tracker, events)
     unknown = lifecycle.unknown_in_flight()
     if unknown is not None:
         operation_id, _entry = unknown
@@ -1093,8 +1077,6 @@ def run_contact_enrichment(
     paid = _current_paid_candidates(paths, contacts, config)
     clay_cap_exhausted = any(not _has_attempt(item, "clay", "completed") for item in paid)
 
-    events = load_usage_events(paths.usage_events)
-    apollo_used, _, _ = _quota_totals(events)
     for contact in paid:
         if contact.work_email is not None or not _has_attempt(contact, "clay", "completed"):
             continue
@@ -1109,7 +1091,12 @@ def run_contact_enrichment(
             raise AssertionError("validated Apollo state is unreachable")
         if contact.company_id not in _accepted_ids(paths.evaluated):
             continue
-        if not lifecycle.quota_allows(apollo_used, config.apollo_credit_cap, 1.0):
+        if not lifecycle.quota_allows(
+            "apollo",
+            config.apollo_credit_cap,
+            1.0,
+            unit="credits",
+        ):
             return _pause(
                 config,
                 paths,
@@ -1143,7 +1130,6 @@ def run_contact_enrichment(
         if apollo_result.credits_used is None:
             apollo_result.usage_event.metadata["credits_reserved"] = 1.0
         _record_event(lifecycle, apollo_result.usage_event)
-        apollo_used += used
         if apollo_result.work_email is not None:
             contact.work_email = apollo_result.work_email
             contact.email_source = "apollo"
@@ -1152,8 +1138,6 @@ def run_contact_enrichment(
         _finish_operation(lifecycle, key, fields={"credits_used": used})
 
     paid = _current_paid_candidates(paths, contacts, config)
-    events = load_usage_events(paths.usage_events)
-    _, instantly_calls, _ = _quota_totals(events)
     for contact in paid:
         if contact.work_email is None:
             continue
@@ -1171,9 +1155,11 @@ def run_contact_enrichment(
             continue
         is_pending = state is not None and cast(str, state["state"]) == "pending"
         if not is_pending and not lifecycle.quota_allows(
-            float(instantly_calls),
+            "instantly",
             float(config.instantly_verification_call_cap),
             1.0,
+            operation="email_verification_create",
+            unit="requests",
         ):
             return _pause(
                 config,
@@ -1212,7 +1198,6 @@ def run_contact_enrichment(
                 status = "paused_unknown"
             return _pause(config, paths, checkpoint, contacts, status, key)
         _record_event(lifecycle, verification.usage_event)
-        instantly_calls += verification.usage_event.request_count
         contact.email_verification_status = verification.status
         if verification.status == "pending":
             _attempt(contact, "instantly", "email_verification", "pending")

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from pathlib import Path
 
 from leads_discovery.models import RunCheckpoint, UsageEvent
@@ -9,10 +10,14 @@ from leads_discovery.pipeline.costs import CostTracker
 from leads_discovery.pipeline.paid_operations import PaidOperationLifecycle, reservation_fits
 
 
-def _lifecycle(tmp_path: Path) -> tuple[PaidOperationLifecycle, list[int]]:
+def _lifecycle(
+    tmp_path: Path,
+    events: Iterable[UsageEvent] = (),
+) -> tuple[PaidOperationLifecycle, list[int]]:
     """Build a lifecycle with observable durable callback invocations."""
     checkpoint = RunCheckpoint(run_id="paid")
-    tracker = CostTracker()
+    replayed = list(events)
+    tracker = CostTracker(replayed)
     persisted: list[int] = []
     lifecycle = PaidOperationLifecycle(
         checkpoint=checkpoint,
@@ -20,6 +25,7 @@ def _lifecycle(tmp_path: Path) -> tuple[PaidOperationLifecycle, list[int]]:
         usage_path=tmp_path / "usage.jsonl",
         persist_checkpoint=lambda: persisted.append(1),
         publish_usage=lambda: None,
+        usage_events=replayed,
     )
     return lifecycle, persisted
 
@@ -65,3 +71,48 @@ def test_lifecycle_usage_is_authoritative_for_budget_replay(tmp_path: Path) -> N
     assert len(lifecycle.usage_path.read_text(encoding="utf-8").splitlines()) == 1
     assert not reservation_fits(1.0, 1.0, 0.01)
     assert reservation_fits(0.99, 1.0, 0.01)
+
+
+def test_lifecycle_replays_provider_quotas_and_excludes_instantly_gets(
+    tmp_path: Path,
+) -> None:
+    """Quota admission counts Apollo credits and Instantly creates from the ledger only."""
+    events = [
+        UsageEvent(
+            provider="apollo",
+            operation="people_enrichment",
+            metadata={"credits_used": 2.0},
+        ),
+        UsageEvent(
+            provider="instantly",
+            operation="email_verification_create",
+            metadata={"credits_used": 1.0},
+        ),
+        UsageEvent(
+            provider="instantly",
+            operation="email_verification_get",
+            metadata={"credits_used": 0.0},
+        ),
+    ]
+    lifecycle, _ = _lifecycle(tmp_path, events)
+
+    assert lifecycle.quota_used("apollo") == 2.0
+    assert not lifecycle.quota_allows("apollo", 2.0, 1.0)
+    assert lifecycle.quota_used(
+        "instantly", operation="email_verification_create"
+    ) == 1.0
+    assert lifecycle.quota_allows(
+        "instantly",
+        2.0,
+        1.0,
+        operation="email_verification_create",
+    )
+
+    lifecycle.record_usage(
+        UsageEvent(
+            provider="instantly",
+            operation="email_verification_get",
+            metadata={"credits_used": 0.0},
+        )
+    )
+    assert lifecycle.quota_used("instantly", operation="email_verification_create") == 1.0
