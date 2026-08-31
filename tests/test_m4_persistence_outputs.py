@@ -141,7 +141,7 @@ def test_m4_artifacts_are_separate_and_completed_rerun_is_idempotent(
     )
 
     names = {path.name for path in run_dir.iterdir() if path.is_file()}
-    assert M4_ARTIFACTS <= names
+    assert names >= M4_ARTIFACTS
     contacts = read_jsonl(run_dir / "contacts.jsonl")
     assert len(contacts) == 1
     assert "pat owner" in row_text(contacts[0]).casefold()
