@@ -43,7 +43,7 @@ from leads_discovery.pipeline.paid_operations import (
 from leads_discovery.pipeline.state import (
     append_company_snapshot,
     append_jsonl,
-    iter_usage_events,
+    load_usage_events,
     load_checkpoint,
     load_jsonl,
     load_latest_company_records,
@@ -323,7 +323,7 @@ def _record_usage(lifecycle: PaidOperationLifecycle, event: UsageEvent) -> None:
 
 def _replay_usage(paths: _RunPaths) -> CostTracker:
     """Rebuild provider budgets by streaming the bounded append-only usage ledger."""
-    tracker = CostTracker(iter_usage_events(paths.usage_events))
+    tracker = CostTracker(load_usage_events(paths.usage_events))
     expected = cast(dict[str, Any], tracker.summary())
     try:
         current = read_json(paths.usage)
