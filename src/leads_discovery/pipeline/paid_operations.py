@@ -119,6 +119,23 @@ def checkpoint_has_unknown_paid_work(checkpoint: RunCheckpoint) -> bool:
     return find_unknown_in_flight(operations) is not None
 
 
+def transition_checkpoint(
+    checkpoint: RunCheckpoint,
+    persist: Callable[[], None],
+    *,
+    status: str,
+    reason: str | None,
+    company_id: str | None = None,
+    stage: str | None = None,
+) -> None:
+    """Persist one shared run-state transition through the paid lifecycle boundary."""
+    checkpoint.status = status
+    checkpoint.pause_reason = reason
+    checkpoint.pending_company_id = company_id
+    checkpoint.pending_stage = stage
+    persist()
+
+
 def _operation_map(checkpoint: RunCheckpoint) -> dict[str, dict[str, Any]]:
     """Return the mutable operation mapping after validating its persisted container shape."""
     raw = checkpoint.provider_state.setdefault("operations", {})
@@ -305,4 +322,5 @@ __all__ = [
     "find_unknown_in_flight",
     "replay_quota_totals",
     "reservation_fits",
+    "transition_checkpoint",
 ]

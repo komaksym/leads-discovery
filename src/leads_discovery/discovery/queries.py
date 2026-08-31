@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 from collections.abc import Sequence
 
@@ -124,6 +126,24 @@ def _allocate(total: int, count: int) -> tuple[int, ...]:
     return tuple(quotient + (1 if index < remainder else 0) for index in range(count))
 
 
+def _configured_request_suffix(
+    market: str,
+    terms: tuple[str, ...],
+    countries: tuple[CountryCode, ...],
+    *,
+    use_default_catalog: bool,
+) -> str:
+    """Bind custom discovery operation IDs to the normalized operator criteria."""
+    if use_default_catalog:
+        return ""
+    payload = json.dumps(
+        {"market": market, "search_terms": terms, "target_geographies": countries},
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return f":c{hashlib.sha256(payload.encode("utf-8")).hexdigest()[:12]}"
+
+
 def build_discovery_requests(
     *,
     include_apify: bool,
@@ -165,6 +185,12 @@ def build_discovery_requests(
     use_default_catalog = (
         normalized_market.casefold() == _DEFAULT_MARKET.casefold() and not normalized_terms
     )
+    configured_suffix = _configured_request_suffix(
+        normalized_market,
+        normalized_terms,
+        countries,
+        use_default_catalog=use_default_catalog,
+    )
     for country_code in countries:
         country_name = country_names[country_code]
         for family, template in _EXA_FAMILIES:
@@ -178,7 +204,7 @@ def build_discovery_requests(
                 query = f"{criteria} distributor prospects in {country_name}; {query}"
             requests.append(
                 DiscoveryRequest(
-                    request_id=f"exa:{country_code.lower()}:{family}:v1",
+                    request_id=f"exa:{country_code.lower()}:{family}:v1{configured_suffix}",
                     provider="exa",
                     query_family=family,
                     target_country_code=country_code,
@@ -201,7 +227,7 @@ def build_discovery_requests(
                 continue
             requests.append(
                 DiscoveryRequest(
-                    request_id=f"apify:{country_code.lower()}:maps-pvf:v1",
+                    request_id=f"apify:{country_code.lower()}:maps-pvf:v1{configured_suffix}",
                     provider="apify",
                     query_family="maps-pvf",
                     target_country_code=country_code,

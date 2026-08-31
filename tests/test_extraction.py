@@ -435,6 +435,38 @@ def test_apply_extraction_downgrades_an_uncited_positive_proposition_to_unknown(
     }
 
 
+def test_apply_extraction_rejects_a_positive_boolean_without_its_predicate() -> None:
+    """A topical word alone cannot make a positive boolean fact canonical."""
+    company = _company()
+    bundle = EvidenceBundle(
+        company_id=company.company_id,
+        items=[
+            EvidenceItem(
+                evidence_id="ev_industrial_word",
+                url="https://acme.com/news",
+                excerpt="Our industrial design award recognizes excellent customer service.",
+                provider="exa",
+            )
+        ],
+        raw_records=[],
+        usage_events=[],
+    )
+    facts = {key: ExtractedFact(None, 0.0, []) for key in FACT_KEYS}
+    facts["industrial_or_process_customer_focus"] = ExtractedFact(
+        True, 0.9, ["ev_industrial_word"]
+    )
+    result = ExtractionResult(
+        company_id=company.company_id,
+        model=MODEL,
+        facts=facts,
+        usage_event=UsageEvent(provider="deepseek", operation="structured_extraction"),
+    )
+
+    updated = apply_extraction(company, bundle, result)
+
+    assert updated.features["industrial_or_process_customer_focus"] is None
+
+
 def test_apply_extraction_rejects_a_nearby_unrelated_numeric_claim() -> None:
     """A number near a branch word is not evidence that the company has that many branches."""
     company = _company()
@@ -463,6 +495,38 @@ def test_apply_extraction_rejects_a_nearby_unrelated_numeric_claim() -> None:
     updated = apply_extraction(company, bundle, result)
 
     assert updated.features["branch_count"] is None
+
+
+def test_apply_extraction_keeps_a_directly_stated_revenue_value() -> None:
+    """A normalized currency amount remains supported when paired with a revenue term."""
+    company = _company()
+    bundle = EvidenceBundle(
+        company_id=company.company_id,
+        items=[
+            EvidenceItem(
+                evidence_id="ev_revenue",
+                url="https://acme.com/about",
+                excerpt="Acme reported revenue of $5,000,000 in 2025.",
+                provider="exa",
+            )
+        ],
+        raw_records=[],
+        usage_events=[],
+    )
+    facts = {key: ExtractedFact(None, 0.0, []) for key in FACT_KEYS}
+    facts["revenue_if_reliably_available"] = ExtractedFact(
+        5_000_000, 0.9, ["ev_revenue"]
+    )
+    result = ExtractionResult(
+        company_id=company.company_id,
+        model=MODEL,
+        facts=facts,
+        usage_event=UsageEvent(provider="deepseek", operation="structured_extraction"),
+    )
+
+    updated = apply_extraction(company, bundle, result)
+
+    assert updated.features["revenue_if_reliably_available"] == 5_000_000
 
 
 def test_deepseek_http_failure_is_sanitized_and_counts_attempt() -> None:

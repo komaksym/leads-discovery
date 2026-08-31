@@ -221,6 +221,25 @@ def test_operator_search_configuration_targets_selected_geographies() -> None:
     )
 
 
+def test_custom_criteria_get_a_distinct_stable_operation_identity() -> None:
+    """A resumed M2 run cannot mistake results from changed criteria for current output."""
+    pumps = build_discovery_requests(
+        include_apify=False,
+        market="industrial pumps",
+        target_geographies=("US",),
+    )
+    compressors = build_discovery_requests(
+        include_apify=False,
+        market="industrial compressors",
+        target_geographies=("US",),
+    )
+
+    assert [request.request_id for request in pumps] != [
+        request.request_id for request in compressors
+    ]
+    assert all(":c" in request.request_id for request in pumps)
+
+
 @pytest.mark.parametrize(
     ("kwargs", "message"),
     [

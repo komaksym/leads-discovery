@@ -7,7 +7,11 @@ from pathlib import Path
 
 from leads_discovery.models import RunCheckpoint, UsageEvent
 from leads_discovery.pipeline.costs import CostTracker
-from leads_discovery.pipeline.paid_operations import PaidOperationLifecycle, reservation_fits
+from leads_discovery.pipeline.paid_operations import (
+    PaidOperationLifecycle,
+    reservation_fits,
+    transition_checkpoint,
+)
 
 
 def _lifecycle(
@@ -71,6 +75,26 @@ def test_lifecycle_usage_is_authoritative_for_budget_replay(tmp_path: Path) -> N
     assert len(lifecycle.usage_path.read_text(encoding="utf-8").splitlines()) == 1
     assert not reservation_fits(1.0, 1.0, 0.01)
     assert reservation_fits(0.99, 1.0, 0.01)
+
+
+def test_lifecycle_transition_persists_the_complete_run_state(tmp_path: Path) -> None:
+    """Pause and completion state use the same durable lifecycle transition boundary."""
+    lifecycle, persisted = _lifecycle(tmp_path)
+
+    transition_checkpoint(
+        lifecycle.checkpoint,
+        lifecycle.persist_checkpoint,
+        status="paused_unknown",
+        reason="apollo:contact-1",
+        company_id="company-1",
+        stage="people_enrichment",
+    )
+
+    assert lifecycle.checkpoint.status == "paused_unknown"
+    assert lifecycle.checkpoint.pause_reason == "apollo:contact-1"
+    assert lifecycle.checkpoint.pending_company_id == "company-1"
+    assert lifecycle.checkpoint.pending_stage == "people_enrichment"
+    assert len(persisted) == 1
 
 
 def test_lifecycle_replays_provider_quotas_and_excludes_instantly_gets(

@@ -197,6 +197,10 @@ def test_structurally_valid_exa_paused_unknown_is_global_provider_barrier(
     assert summary is not None
     assert summary.status == "paused_unknown"
 
+    resumed = _assert_zero_provider_calls(_run_probe(tmp_path, run_id))
+    assert resumed is not None
+    assert resumed.status == "paused_unknown"
+
 
 def test_m2_unknown_outcome_freezes_m4_before_any_provider_dispatch(tmp_path: Path) -> None:
     """An unresolved upstream paid outcome bars every downstream M4 paid edge."""

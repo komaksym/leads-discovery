@@ -38,8 +38,7 @@ from leads_discovery.models import (
 from leads_discovery.pipeline.costs import CostTracker
 from leads_discovery.pipeline.paid_operations import (
     PaidOperationLifecycle,
-    find_unknown_in_flight,
-    reservation_fits,
+    transition_checkpoint,
 )
 from leads_discovery.pipeline.state import (
     append_company_snapshot,
@@ -322,11 +321,14 @@ def _pause(
     stage: str | None = None,
 ) -> RunCheckpoint:
     """Persist and return a durable pause/failure checkpoint without discarding completed work."""
-    checkpoint.status = status
-    checkpoint.pause_reason = reason
-    checkpoint.pending_company_id = company_id
-    checkpoint.pending_stage = stage
-    _persist_checkpoint(path, checkpoint)
+    transition_checkpoint(
+        checkpoint,
+        lambda: _persist_checkpoint(path, checkpoint),
+        status=status,
+        reason=reason,
+        company_id=company_id,
+        stage=stage,
+    )
     return checkpoint
 
 
@@ -346,18 +348,6 @@ def _replay_usage(paths: _RunPaths) -> CostTracker:
     if current != expected:
         write_json_atomic(paths.usage, expected)
     return tracker
-
-
-def _provider_budget_allows(
-    tracker: CostTracker,
-    provider: str,
-    ceiling: float | None,
-    reservation: float = 0.0,
-) -> bool:
-    """Require committed spend plus the next reservation to remain under one hard ceiling."""
-    if ceiling is None:
-        return True
-    return reservation_fits(tracker.provider_estimated_spend(provider), ceiling, reservation)
 
 
 def _exa_search_reservation(max_results: int) -> float:
@@ -388,15 +378,6 @@ def _append_research_raw(paths: _RunPaths, rows: Sequence[dict[str, Any]]) -> No
     """Persist complete Exa research rows outside the bounded model evidence bundle."""
     for row in rows:
         append_jsonl(paths.research_raw, deepcopy(row))
-
-
-def _unknown_in_flight(checkpoint: RunCheckpoint) -> tuple[str, dict[str, Any]] | None:
-    """Find the first provider operation whose previous paid outcome must not be repeated."""
-    return find_unknown_in_flight(
-        _operations(checkpoint),
-        replayable=lambda _operation_id, entry: entry.get("provider") == "apify"
-        and isinstance(entry.get("run_id"), str),
-    )
 
 
 def _resume_apify_if_needed(
@@ -447,9 +428,12 @@ def _resume_apify_if_needed(
         except DiscoveryProviderError as exc:
             _record_usage(lifecycle, exc.usage_event)
             if exc.retryable:
-                entry["state"] = "pending"
-                entry["error_kind"] = exc.kind
-                _persist_checkpoint(paths.checkpoint, checkpoint)
+                _finish_operation(
+                    lifecycle,
+                    operation_id,
+                    state="pending",
+                    error_kind=exc.kind,
+                )
                 continue
             _finish_operation(lifecycle, operation_id, state="failed", error_kind=exc.kind)
             continue
@@ -490,7 +474,10 @@ def _discovery_phase(
         if paused is not None:
             return paused
 
-    unknown = _unknown_in_flight(checkpoint)
+    unknown = lifecycle.unknown_in_flight(
+        replayable=lambda _operation_id, entry: entry.get("provider") == "apify"
+        and isinstance(entry.get("run_id"), str)
+    )
     if unknown is not None:
         operation_id, entry = unknown
         return _pause(
@@ -517,14 +504,19 @@ def _discovery_phase(
         provider = discovery.get(request.provider)
         if provider is None:
             if request.provider == "apify":
-                _operations(checkpoint)[operation_id] = {
-                    "provider": "apify",
-                    "operation": "google_maps_search",
-                    "request_id": request.request_id,
-                    "state": "failed",
-                    "error_kind": "unavailable",
-                }
-                _persist_checkpoint(paths.checkpoint, checkpoint)
+                _mark_in_flight(
+                    lifecycle,
+                    operation_id=operation_id,
+                    provider="apify",
+                    operation="google_maps_search",
+                    request_id=request.request_id,
+                )
+                _finish_operation(
+                    lifecycle,
+                    operation_id,
+                    state="failed",
+                    error_kind="unavailable",
+                )
                 continue
             return _pause(
                 checkpoint,
@@ -578,11 +570,12 @@ def _discovery_phase(
                 apify_entry = _operations(checkpoint)[operation_id]
                 run_id = _entry_str(apify_entry, "run_id")
                 if exc.retryable and run_id is not None:
-                    apify_entry["state"] = "pending"
-                    apify_entry["error_kind"] = exc.kind
-                    checkpoint.pending_company_id = None
-                    checkpoint.pending_stage = None
-                    _persist_checkpoint(paths.checkpoint, checkpoint)
+                    _finish_operation(
+                        lifecycle,
+                        operation_id,
+                        state="pending",
+                        error_kind=exc.kind,
+                    )
                     continue
                 if exc.retryable:
                     return _pause(
@@ -944,10 +937,7 @@ def _research_and_extract_phase(
                 else:
                     bundle = researcher.research(company)
             except _ResearchBudgetPause:
-                entry = _operations(checkpoint)[research_op]
-                entry["state"] = "pending"
-                entry.pop("error_kind", None)
-                _persist_checkpoint(paths.checkpoint, checkpoint)
+                _finish_operation(lifecycle, research_op, state="pending")
                 return _pause(
                     checkpoint,
                     paths.checkpoint,
@@ -992,11 +982,14 @@ def _research_and_extract_phase(
             )
 
         if not bundle.items:
-            checkpoint.status = "completed"
-            checkpoint.pause_reason = "empty_evidence"
-            checkpoint.pending_company_id = company.company_id
-            checkpoint.pending_stage = "extraction"
-            _persist_checkpoint(paths.checkpoint, checkpoint)
+            transition_checkpoint(
+                checkpoint,
+                lambda: _persist_checkpoint(paths.checkpoint, checkpoint),
+                status="completed",
+                reason="empty_evidence",
+                company_id=company.company_id,
+                stage="extraction",
+            )
             return checkpoint
 
         extraction_op = f"extraction:{company.company_id}"
@@ -1132,8 +1125,11 @@ def run_m2_batch(
     )
     _persist_checkpoint(paths.checkpoint, checkpoint)
 
-    unknown = _unknown_in_flight(checkpoint)
-    if unknown is not None and unknown[1].get("provider") != "apify":
+    unknown = lifecycle.unknown_in_flight(
+        replayable=lambda _operation_id, entry: entry.get("provider") == "apify"
+        and isinstance(entry.get("run_id"), str)
+    )
+    if unknown is not None:
         operation_id, entry = unknown
         return _pause(
             checkpoint,
@@ -1161,12 +1157,13 @@ def run_m2_batch(
     )
     if paused is not None:
         return paused
-    checkpoint.status = "completed"
-    checkpoint.pending_company_id = None
-    checkpoint.pending_stage = None
-    checkpoint.pause_reason = None
     _stages(checkpoint)["m2_batch"] = "completed"
-    _persist_checkpoint(paths.checkpoint, checkpoint)
+    transition_checkpoint(
+        checkpoint,
+        lambda: _persist_checkpoint(paths.checkpoint, checkpoint),
+        status="completed",
+        reason=None,
+    )
     return checkpoint
 
 

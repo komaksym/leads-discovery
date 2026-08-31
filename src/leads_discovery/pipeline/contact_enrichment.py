@@ -15,7 +15,11 @@ from typing import Any, Final, cast
 
 from leads_discovery.contacts.models import ContactRecord
 from leads_discovery.contacts.providers import (
+    ApolloContactProvider,
+    ClayContactProvider,
     ContactProviderError,
+    ExaPeopleProvider,
+    InstantlyVerificationProvider,
     clay_item_email,
 )
 from leads_discovery.contacts.selection import (
@@ -29,6 +33,7 @@ from leads_discovery.pipeline.paid_operations import (
     PaidOperationLifecycle,
     checkpoint_has_unknown_paid_work,
     replay_quota_totals,
+    transition_checkpoint,
 )
 from leads_discovery.pipeline.state import (
     load_jsonl,
@@ -488,6 +493,8 @@ def _validate_checkpoint_consistency(
         raise ValueError("paused M4 checkpoint requires a nonblank pause reason")
 
     if checkpoint.status == "paused_unknown":
+        if reason == "m2_unknown_in_flight":
+            return
         if reason == "exa_usage_unknown":
             if CostTracker(events).provider_estimated_spend("exa") is not None:
                 raise ValueError("Exa usage-unknown pause lacks incomplete Exa usage evidence")
@@ -543,10 +550,12 @@ def _save_checkpoint(
     path: Path, checkpoint: RunCheckpoint, status: str, reason: str | None
 ) -> None:
     """Persist one M4 checkpoint transition with a fresh timestamp."""
-    checkpoint.status = status
-    checkpoint.pause_reason = reason
-    checkpoint.updated_at = datetime.now(UTC).isoformat()
-    write_checkpoint(path, checkpoint)
+    transition_checkpoint(
+        checkpoint,
+        lambda: _persist_checkpoint(path, checkpoint),
+        status=status,
+        reason=reason,
+    )
 
 
 def _persist_checkpoint(path: Path, checkpoint: RunCheckpoint) -> None:
@@ -836,18 +845,21 @@ def _reset_for_current_m3(
     # cannot authorize the now-empty (or any stale) contact set.
     _publish_contacts(paths, contacts)
     checkpoint.provider_state[_M3_INPUT_FINGERPRINT_KEY] = fingerprint
-    checkpoint.status = "running"
-    checkpoint.pause_reason = None
-    _persist_checkpoint(paths.checkpoint, checkpoint)
+    transition_checkpoint(
+        checkpoint,
+        lambda: _persist_checkpoint(paths.checkpoint, checkpoint),
+        status="running",
+        reason=None,
+    )
 
 
 def run_contact_enrichment(
     config: ContactEnrichmentConfig,
     *,
-    exa: Any,
-    clay: Any,
-    apollo: Any,
-    instantly: Any,
+    exa: ExaPeopleProvider,
+    clay: ClayContactProvider,
+    apollo: ApolloContactProvider,
+    instantly: InstantlyVerificationProvider,
 ) -> ContactEnrichmentSummary:
     """Run or safely resume the artifact-only M4 contact-enrichment stage."""
     if not config.execute_live:
