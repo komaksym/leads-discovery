@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from datetime import UTC, datetime
 from typing import Any, Protocol, cast
 
@@ -16,6 +17,8 @@ from leads_discovery.models import (
     ErrorKind,
     UsageEvent,
 )
+
+_DEFAULT_MAX_HTTP_RESPONSE_BYTES = 2 * 1024 * 1024
 
 
 class DiscoveryProvider(Protocol):
@@ -50,9 +53,59 @@ class DiscoveryProviderError(RuntimeError):
         self.usage_event = UsageEvent.from_dict(usage_event.to_dict())
 
 
+class ResponseTooLargeError(ValueError):
+    """Signal that a provider response crossed the configured byte ceiling."""
+
+
+class ResponseReadError(RuntimeError):
+    """Signal a sanitized failure while streaming an already-received response."""
+
+
 def utc_timestamp() -> str:
     """Return one timezone-aware UTC timestamp for a provider operation."""
     return datetime.now(UTC).isoformat()
+
+
+def _http_response_limit() -> int:
+    """Return the configurable maximum provider response bytes."""
+    raw = os.getenv("LEADS_MAX_HTTP_RESPONSE_BYTES")
+    if raw is None:
+        return _DEFAULT_MAX_HTTP_RESPONSE_BYTES
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError("LEADS_MAX_HTTP_RESPONSE_BYTES must be a positive integer") from exc
+    if value <= 0:
+        raise ValueError("LEADS_MAX_HTTP_RESPONSE_BYTES must be a positive integer")
+    return value
+
+
+def read_bounded_response(response: httpx.Response) -> bytes:
+    """Read one response incrementally and abort as soon as its hard byte limit is exceeded."""
+    limit = _http_response_limit()
+    raw_length = response.headers.get("content-length")
+    if raw_length is not None:
+        try:
+            declared = int(raw_length)
+        except ValueError:
+            declared = 0
+        if declared > limit:
+            response.close()
+            raise ResponseTooLargeError("provider response exceeds byte limit")
+
+    chunks: list[bytes] = []
+    size = 0
+    try:
+        for chunk in response.iter_bytes():
+            size += len(chunk)
+            if size > limit:
+                raise ResponseTooLargeError("provider response exceeds byte limit")
+            chunks.append(chunk)
+    except httpx.HTTPError:
+        raise ResponseReadError("provider response read failed") from None
+    finally:
+        response.close()
+    return b"".join(chunks)
 
 
 def classify_http_status(status_code: int) -> tuple[ErrorKind, bool]:
@@ -156,10 +209,11 @@ def request_json(
     operation: str,
     request_count: int,
 ) -> dict[str, Any]:
-    """Decode a provider response as a JSON object or raise a sanitized invalid response."""
+    """Decode a stream-bounded provider response as one JSON object."""
     try:
-        payload = response.json()
-    except Exception:
+        body = read_bounded_response(response)
+        payload = json.loads(body)
+    except (ResponseTooLargeError, ResponseReadError, json.JSONDecodeError, UnicodeDecodeError):
         raise provider_error(
             provider=provider,
             request_id=request_id,
@@ -207,10 +261,10 @@ def safe_transport_call(
     operation: str,
     request_count: int,
 ) -> httpx.Response:
-    """Run one injected-client call and sanitize transport failures without chaining details."""
+    """Run one injected streamed-client dispatch and classify transport failures safely."""
     try:
-        response = call()
-    except httpx.HTTPError:
+        response = cast(httpx.Response, call())
+    except (httpx.ConnectError, httpx.ConnectTimeout):
         raise provider_error(
             provider=provider,
             request_id=request_id,
@@ -218,5 +272,33 @@ def safe_transport_call(
             request_count=request_count,
             kind="transient",
             retryable=True,
+            metadata={"request_id": request_id, "safe_to_retry": True},
         ) from None
-    return cast(httpx.Response, response)
+    except httpx.HTTPError:
+        raise provider_error(
+            provider=provider,
+            request_id=request_id,
+            operation=operation,
+            request_count=request_count,
+            kind="transient",
+            retryable=False,
+            metadata={"request_id": request_id, "outcome_unknown": True},
+        ) from None
+    raw_length = response.headers.get("content-length")
+    if raw_length is not None:
+        try:
+            declared = int(raw_length)
+        except ValueError:
+            declared = 0
+        if declared > _http_response_limit():
+            response.close()
+            raise provider_error(
+                provider=provider,
+                request_id=request_id,
+                operation=operation,
+                request_count=request_count,
+                kind="invalid_response",
+                retryable=False,
+                status_code=response.status_code,
+            ) from None
+    return response
