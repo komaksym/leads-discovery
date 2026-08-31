@@ -566,6 +566,14 @@ def _discovery_phase(
             batch = provider.search(request)
         except DiscoveryProviderError as exc:
             _record_usage(lifecycle, exc.usage_event)
+            if exc.kind == "transient" and not exc.retryable:
+                return _pause(
+                    checkpoint,
+                    paths.checkpoint,
+                    status="paused_unknown",
+                    reason=f"ambiguous_paid_outcome:{operation_id}",
+                    stage="discovery",
+                )
             if request.provider == "apify":
                 apify_entry = _operations(checkpoint)[operation_id]
                 run_id = _entry_str(apify_entry, "run_id")
@@ -591,14 +599,6 @@ def _discovery_phase(
                     error_kind=exc.kind,
                 )
                 continue
-            if exc.kind == "transient" and not exc.retryable:
-                return _pause(
-                    checkpoint,
-                    paths.checkpoint,
-                    status="paused_unknown",
-                    reason=f"ambiguous_paid_outcome:{operation_id}",
-                    stage="discovery",
-                )
             state = "pending" if exc.retryable or exc.kind == "budget_exhausted" else "failed"
             _finish_operation(
                 lifecycle,
