@@ -305,7 +305,7 @@ class ApifyDiscoveryProvider:
             ) from None
         try:
             raw_rows = json.loads(read_bounded_response(dataset_response))
-        except (ResponseTooLargeError, json.JSONDecodeError, UnicodeDecodeError):
+        except (ResponseTooLargeError, httpx.HTTPError, json.JSONDecodeError, UnicodeDecodeError):
             raise provider_error(
                 provider="apify",
                 request_id=request.request_id,

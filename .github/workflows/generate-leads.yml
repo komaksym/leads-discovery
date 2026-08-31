@@ -81,7 +81,8 @@ jobs:
           git rm -rf --ignore-unmatch .
           cp -- "$publish_dir/leads.csv" leads.csv
           cp -- "$publish_dir/contacts.jsonl" contacts.jsonl
-          git add --all
+          git add -- leads.csv contacts.jsonl
+          test "$(git diff --cached --name-only | sort)" = $'contacts.jsonl\nleads.csv'
 
           if git diff --cached --quiet; then
             exit 0

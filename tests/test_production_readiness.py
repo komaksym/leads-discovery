@@ -474,5 +474,7 @@ def test_paid_workflow_is_manual_only_and_publishes_only_approved_outputs() -> N
     assert "git rm -rf --ignore-unmatch ." in text
     assert 'cp -- "$run_dir/leads.csv"' in text
     assert 'cp -- "$run_dir/contacts.jsonl"' in text
+    assert "git add -- leads.csv contacts.jsonl" in text
+    assert "git add --all" not in text
     assert "contact_checkpoint.json" not in text
     assert "contact_usage_events.jsonl" not in text

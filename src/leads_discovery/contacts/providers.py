@@ -13,7 +13,11 @@ from urllib.parse import quote
 import httpx
 
 from leads_discovery.contacts.models import ContactRecord, VerificationStatus
-from leads_discovery.discovery.base import ResponseTooLargeError, read_bounded_response
+from leads_discovery.discovery.base import (
+    ResponseTooLargeError,
+    read_bounded_response,
+    validate_response_size_header,
+)
 from leads_discovery.models import CompanyRecord, ErrorKind, UsageEvent
 
 _EXA_SEARCH_URL = "https://api.exa.ai/search"
@@ -234,7 +238,7 @@ def _call(
 ) -> httpx.Response:
     """Execute one streamed HTTP dispatch and preserve ambiguous paid outcomes."""
     try:
-        return cast(httpx.Response, call())
+        response = cast(httpx.Response, call())
     except (httpx.ConnectError, httpx.ConnectTimeout):
         _raise(
             provider,
@@ -251,6 +255,18 @@ def _call(
             retryable=False,
             metadata={**(metadata or {}), "outcome_unknown": True},
         )
+    try:
+        validate_response_size_header(response)
+    except ResponseTooLargeError:
+        _raise(
+            provider,
+            operation,
+            kind="invalid_response",
+            retryable=False,
+            status_code=response.status_code,
+            metadata=metadata,
+        )
+    return response
 
 
 def _json_object(
@@ -264,6 +280,15 @@ def _json_object(
     status_code = response.status_code
     try:
         payload = json.loads(read_bounded_response(response))
+    except httpx.HTTPError:
+        _raise(
+            provider,
+            operation,
+            kind="transient",
+            retryable=False,
+            status_code=status_code,
+            metadata={**(metadata or {}), "outcome_unknown": True},
+        )
     except (ResponseTooLargeError, json.JSONDecodeError, UnicodeDecodeError):
         _raise(
             provider,

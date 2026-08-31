@@ -521,16 +521,19 @@ def _discovery_phase(
             if request.provider == "exa"
             else request.max_cost_usd or 0.0
         )
-        if request.provider == "exa" and not lifecycle.budget_allows(
-            "exa",
-            config.exa_budget_usd,
-            reservation,
-        ):
+        ceiling = (
+            config.exa_budget_usd if request.provider == "exa" else config.apify_budget_usd
+        )
+        if not lifecycle.budget_allows(request.provider, ceiling, reservation):
             return _pause(
                 checkpoint,
                 paths.checkpoint,
                 status="paused_budget",
-                reason="exa_budget_exhausted_or_unknown",
+                reason=(
+                    "exa_budget_exhausted_or_unknown"
+                    if request.provider == "exa"
+                    else "apify_budget_exhausted_or_unknown"
+                ),
                 stage="discovery",
             )
         operation = "company_search" if request.provider == "exa" else "google_maps_search"

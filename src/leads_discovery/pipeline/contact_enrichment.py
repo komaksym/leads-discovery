@@ -27,7 +27,10 @@ from leads_discovery.contacts.selection import (
 )
 from leads_discovery.models import CompanyRecord, RunCheckpoint, UsageEvent
 from leads_discovery.pipeline.costs import CostTracker
-from leads_discovery.pipeline.paid_operations import PaidOperationLifecycle, reservation_fits
+from leads_discovery.pipeline.paid_operations import (
+    PaidOperationLifecycle,
+    checkpoint_has_unknown_paid_work,
+)
 from leads_discovery.pipeline.state import (
     load_jsonl,
     load_usage_events,
@@ -785,6 +788,15 @@ def _authorized_contact_ids(
     return all(contacts[contact_id].company_id in accepted for contact_id in contact_ids)
 
 
+def _m2_paid_work_is_frozen(paths: _Paths) -> bool:
+    """Return whether M2 persisted an unresolved paid outcome for this same run."""
+    payload = read_json(paths.run_dir / "checkpoint.json")
+    if payload is None:
+        return False
+    checkpoint = RunCheckpoint.from_dict(payload)
+    return checkpoint_has_unknown_paid_work(checkpoint)
+
+
 def run_contact_enrichment(
     config: ContactEnrichmentConfig,
     *,
@@ -797,6 +809,15 @@ def run_contact_enrichment(
     if not config.execute_live:
         raise ValueError("run_contact_enrichment requires explicit live execution")
     paths, accepted, checkpoint, operations, contacts, events = _load_runtime_state(config)
+    if _m2_paid_work_is_frozen(paths):
+        return _pause(
+            config,
+            paths,
+            checkpoint,
+            contacts,
+            "paused_unknown",
+            "m2_unknown_in_flight",
+        )
     if checkpoint.status == "completed":
         _repair_usage_summary(paths, events)
         return _summary(config, paths, "completed", contacts)
@@ -1009,7 +1030,7 @@ def run_contact_enrichment(
             raise AssertionError("validated Apollo state is unreachable")
         if contact.company_id not in _accepted_ids(paths.evaluated):
             continue
-        if not reservation_fits(float(apollo_used), float(config.apollo_credit_cap), 1.0):
+        if not lifecycle.quota_allows(apollo_used, config.apollo_credit_cap, 1.0):
             return _pause(
                 config,
                 paths,
@@ -1069,7 +1090,8 @@ def run_contact_enrichment(
                 raise AssertionError("validated Instantly state is unreachable")
         if contact.company_id not in _accepted_ids(paths.evaluated):
             continue
-        if not reservation_fits(
+        is_pending = state is not None and cast(str, state["state"]) == "pending"
+        if not is_pending and not lifecycle.quota_allows(
             float(instantly_calls),
             float(config.instantly_verification_call_cap),
             1.0,
@@ -1083,7 +1105,6 @@ def run_contact_enrichment(
                 "instantly_call_cap",
             )
         email = contact.work_email
-        is_pending = state is not None and cast(str, state["state"]) == "pending"
         try:
             if is_pending:
                 persisted_state = cast(dict[str, Any], state)

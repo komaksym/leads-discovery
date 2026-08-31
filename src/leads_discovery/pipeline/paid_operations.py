@@ -44,6 +44,19 @@ def find_unknown_in_flight(
     return None
 
 
+def checkpoint_has_unknown_paid_work(checkpoint: RunCheckpoint) -> bool:
+    """Fail closed when a run checkpoint records an unresolved paid outcome."""
+    if checkpoint.status == "paused_unknown":
+        return True
+    raw = checkpoint.provider_state.get("operations", {})
+    if not isinstance(raw, dict):
+        return True
+    if any(not isinstance(key, str) or not isinstance(value, dict) for key, value in raw.items()):
+        return True
+    operations = cast(dict[str, dict[str, Any]], raw)
+    return find_unknown_in_flight(operations) is not None
+
+
 @dataclass(slots=True)
 class PaidOperationLifecycle:
     """Own intent, usage, transition, and replay-barrier mechanics for paid operations."""
@@ -82,6 +95,15 @@ class PaidOperationLifecycle:
         return reservation_fits(
             self.tracker.provider_estimated_spend(provider), ceiling, reservation
         )
+
+    def quota_allows(
+        self,
+        committed: float,
+        ceiling: float | None,
+        reservation: float = 0.0,
+    ) -> bool:
+        """Apply one replayed non-dollar quota admission through the shared lifecycle."""
+        return reservation_fits(committed, ceiling, reservation)
 
     def begin(
         self,
@@ -162,4 +184,9 @@ class PaidOperationLifecycle:
         return find_unknown_in_flight(self.operations(), replayable=replayable)
 
 
-__all__ = ["PaidOperationLifecycle", "find_unknown_in_flight", "reservation_fits"]
+__all__ = [
+    "PaidOperationLifecycle",
+    "checkpoint_has_unknown_paid_work",
+    "find_unknown_in_flight",
+    "reservation_fits",
+]

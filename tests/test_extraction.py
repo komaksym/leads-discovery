@@ -9,7 +9,14 @@ import httpx
 import pytest
 
 from leads_discovery.discovery.base import DiscoveryProviderError
-from leads_discovery.models import CompanyRecord, EvidenceBundle, EvidenceItem, UsageEvent
+from leads_discovery.models import (
+    CompanyRecord,
+    EvidenceBundle,
+    EvidenceItem,
+    ExtractedFact,
+    ExtractionResult,
+    UsageEvent,
+)
 from leads_discovery.research.extract import (
     DeepSeekExtractor,
     DeepSeekPriceSchedule,
@@ -402,6 +409,30 @@ def test_apply_extraction_updates_only_m2_fact_fields_and_preserves_m1_defaults(
     assert updated.final_score is None
     assert updated.final_decision is None
     assert updated.rejection_reasons == []
+
+
+def test_apply_extraction_downgrades_an_uncited_positive_proposition_to_unknown() -> None:
+    """A cited ID alone cannot make an unrelated numeric fact canonical."""
+    company = _company()
+    bundle = _bundle()
+    facts = {key: ExtractedFact(None, 0.0, []) for key in FACT_KEYS}
+    facts["branch_count"] = ExtractedFact(
+        12, 0.9, ["ev_000000000000000000000001"]
+    )
+    result = ExtractionResult(
+        company_id=company.company_id,
+        model=MODEL,
+        facts=facts,
+        usage_event=UsageEvent(provider="deepseek", operation="structured_extraction"),
+    )
+
+    updated = apply_extraction(company, bundle, result)
+
+    assert updated.features["branch_count"] is None
+    assert updated.feature_confidence["branch_count"] == {
+        "confidence": 0.0,
+        "evidence_ids": [],
+    }
 
 
 def test_deepseek_http_failure_is_sanitized_and_counts_attempt() -> None:

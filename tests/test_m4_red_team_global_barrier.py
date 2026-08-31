@@ -198,6 +198,25 @@ def test_structurally_valid_exa_paused_unknown_is_global_provider_barrier(
     assert summary.status == "paused_unknown"
 
 
+def test_m2_unknown_outcome_freezes_m4_before_any_provider_dispatch(tmp_path: Path) -> None:
+    """An unresolved upstream paid outcome bars every downstream M4 paid edge."""
+    run_id = "m2-unknown-barrier"
+    run_dir = _prepare_run(tmp_path, run_id)
+    checkpoint = RunCheckpoint(
+        run_id=run_id,
+        status="paused_unknown",
+        pause_reason="unknown_in_flight:extraction:cmp_replay",
+        provider_state={
+            "operations": {"extraction:cmp_replay": {"state": "in_flight"}}
+        },
+    )
+    _write_json(run_dir / "checkpoint.json", checkpoint.to_dict())
+
+    summary = _assert_zero_provider_calls(_run_probe(tmp_path, run_id))
+    assert summary is not None
+    assert summary.status == "paused_unknown"
+
+
 @pytest.mark.parametrize("later_stage", ["clay", "instantly"])
 @pytest.mark.parametrize("exa_evidence", ["missing", "torn-selection"])
 def test_paused_pending_with_missing_exa_prerequisite_never_replays(

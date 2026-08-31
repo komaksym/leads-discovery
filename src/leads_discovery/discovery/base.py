@@ -79,15 +79,7 @@ def _http_response_limit() -> int:
 def read_bounded_response(response: httpx.Response) -> bytes:
     """Read one response incrementally and abort as soon as its hard byte limit is exceeded."""
     limit = _http_response_limit()
-    raw_length = response.headers.get("content-length")
-    if raw_length is not None:
-        try:
-            declared = int(raw_length)
-        except ValueError:
-            declared = 0
-        if declared > limit:
-            response.close()
-            raise ResponseTooLargeError("provider response exceeds byte limit")
+    validate_response_size_header(response)
 
     chunks: list[bytes] = []
     size = 0
@@ -100,6 +92,20 @@ def read_bounded_response(response: httpx.Response) -> bytes:
     finally:
         response.close()
     return b"".join(chunks)
+
+
+def validate_response_size_header(response: httpx.Response) -> None:
+    """Reject an oversized declared response before any status-specific body handling."""
+    raw_length = response.headers.get("content-length")
+    if raw_length is None:
+        return
+    try:
+        declared = int(raw_length)
+    except ValueError:
+        return
+    if declared > _http_response_limit():
+        response.close()
+        raise ResponseTooLargeError("provider response exceeds byte limit")
 
 
 def classify_http_status(status_code: int) -> tuple[ErrorKind, bool]:
@@ -207,6 +213,17 @@ def request_json(
     try:
         body = read_bounded_response(response)
         payload = json.loads(body)
+    except httpx.HTTPError:
+        raise provider_error(
+            provider=provider,
+            request_id=request_id,
+            operation=operation,
+            request_count=request_count,
+            kind="transient",
+            retryable=False,
+            status_code=response.status_code,
+            metadata={"request_id": request_id, "outcome_unknown": True},
+        ) from None
     except (ResponseTooLargeError, json.JSONDecodeError, UnicodeDecodeError):
         raise provider_error(
             provider=provider,
@@ -278,21 +295,16 @@ def safe_transport_call(
             retryable=False,
             metadata={"request_id": request_id, "outcome_unknown": True},
         ) from None
-    raw_length = response.headers.get("content-length")
-    if raw_length is not None:
-        try:
-            declared = int(raw_length)
-        except ValueError:
-            declared = 0
-        if declared > _http_response_limit():
-            response.close()
-            raise provider_error(
-                provider=provider,
-                request_id=request_id,
-                operation=operation,
-                request_count=request_count,
-                kind="invalid_response",
-                retryable=False,
-                status_code=response.status_code,
-            ) from None
+    try:
+        validate_response_size_header(response)
+    except ResponseTooLargeError:
+        raise provider_error(
+            provider=provider,
+            request_id=request_id,
+            operation=operation,
+            request_count=request_count,
+            kind="invalid_response",
+            retryable=False,
+            status_code=response.status_code,
+        ) from None
     return response
