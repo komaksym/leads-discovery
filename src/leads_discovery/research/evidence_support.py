@@ -130,23 +130,12 @@ def _locally_negated(clause: str, concepts: tuple[str, ...]) -> bool:
 
 def _supports_pvf_boolean(clause: str, value: bool, spec: PropositionSpec) -> bool:
     targets = _matches(clause, spec.concepts)
-    relations = _matches(clause, spec.relations)
-    if not targets or not relations:
+    if not targets:
         return False
     if value:
-        for relation in relations:
-            for target in targets:
-                if target.start() < relation.end():
-                    continue
-                if _word_distance(clause, relation.end(), target.start()) > 6:
-                    continue
-                if any(
-                    negation.start() <= relation.start()
-                    and _word_distance(clause, negation.end(), relation.start()) <= 5
-                    for negation in _NEGATION.finditer(clause)
-                ):
-                    continue
-                return True
+        return not _locally_negated(clause, spec.concepts)
+    relations = _matches(clause, spec.relations)
+    if not relations:
         return False
     for negation in _NEGATION.finditer(clause):
         for relation in relations:
