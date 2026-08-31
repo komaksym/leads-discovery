@@ -763,7 +763,7 @@ def test_exa_budget_is_rechecked_between_paid_research_queries(tmp_path: Path) -
     run_dir = tmp_path / "exa-research-budget"
     with httpx.Client(transport=httpx.MockTransport(handler)) as client:
         checkpoint = run_m2_batch(
-            _config(tmp_path, "exa-research-budget", exa_budget_usd=0.01),
+            _config(tmp_path, "exa-research-budget", exa_budget_usd=0.021),
             discovery={"exa": FakeDiscovery()},
             researcher=ExaEvidenceResearcher(api_key="test-key", client=client),
             extractor=FakeExtractor(),

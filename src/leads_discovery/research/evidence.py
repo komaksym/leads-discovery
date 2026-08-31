@@ -17,6 +17,7 @@ from leads_discovery.dedup import _registrable_http_domain
 from leads_discovery.discovery.base import (
     classify_http_status,
     provider_error,
+    request_json,
     safe_transport_call,
     utc_timestamp,
 )
@@ -29,6 +30,7 @@ from leads_discovery.models import (
 )
 
 _EXA_SEARCH_URL = "https://api.exa.ai/search"
+_REQUEST_TIMEOUT = httpx.Timeout(30.0, connect=5.0)
 _RESEARCH_FAMILIES = (
     (
         "company-profile",
@@ -209,24 +211,29 @@ class ExaEvidenceResearcher:
             attempted += 1
             attempted_position = start_index + attempted
             delta_request_count = 1 if on_progress is not None else attempted
+            http_request = self._client.build_request(
+                "POST",
+                _EXA_SEARCH_URL,
+                headers={"x-api-key": self._api_key},
+                json={
+                    "query": request.query,
+                    "type": "auto",
+                    "numResults": request.max_results,
+                    "contents": {"highlights": True},
+                },
+                timeout=_REQUEST_TIMEOUT,
+            )
             response = safe_transport_call(
-                lambda request=request: self._client.post(
-                    _EXA_SEARCH_URL,
-                    headers={"x-api-key": self._api_key},
-                    json={
-                        "query": request.query,
-                        "type": "auto",
-                        "numResults": request.max_results,
-                        "contents": {"highlights": True},
-                    },
-                ),
+                lambda http_request=http_request: self._client.send(http_request, stream=True),
                 provider="exa",
                 request_id=request.request_id,
                 operation="company_research",
                 request_count=delta_request_count,
             )
             if not 200 <= response.status_code < 300:
-                kind, retryable = classify_http_status(response.status_code)
+                status_code = response.status_code
+                response.close()
+                kind, retryable = classify_http_status(status_code)
                 raise provider_error(
                     provider="exa",
                     request_id=request.request_id,
@@ -234,15 +241,20 @@ class ExaEvidenceResearcher:
                     request_count=delta_request_count,
                     kind=kind,
                     retryable=retryable,
-                    status_code=response.status_code,
+                    status_code=status_code,
                     metadata={
                         "company_id": company.company_id,
                         "attempted_requests": attempted_position,
                     },
                 ) from None
-            try:
-                payload_raw = response.json()
-            except Exception:
+            payload = request_json(
+                response,
+                provider="exa",
+                request_id=request.request_id,
+                operation="company_research",
+                request_count=delta_request_count,
+            )
+            if not isinstance(payload.get("results"), list):
                 raise provider_error(
                     provider="exa",
                     request_id=request.request_id,
@@ -256,23 +268,6 @@ class ExaEvidenceResearcher:
                         "attempted_requests": attempted_position,
                     },
                 ) from None
-            if not isinstance(payload_raw, dict) or not isinstance(
-                payload_raw.get("results"), list
-            ):
-                raise provider_error(
-                    provider="exa",
-                    request_id=request.request_id,
-                    operation="company_research",
-                    request_count=delta_request_count,
-                    kind="invalid_response",
-                    retryable=False,
-                    status_code=response.status_code,
-                    metadata={
-                        "company_id": company.company_id,
-                        "attempted_requests": attempted_position,
-                    },
-                ) from None
-            payload = cast(dict[str, Any], payload_raw)
             results = cast(list[Any], payload["results"])
             if any(not isinstance(row, dict) for row in results):
                 raise provider_error(
