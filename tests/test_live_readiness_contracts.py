@@ -15,17 +15,25 @@ from m3_factories import build_company
 from leads_discovery.discovery.apify import ApifyDiscoveryProvider
 from leads_discovery.discovery.base import DiscoveryProviderError, provider_error, request_json
 from leads_discovery.discovery.queries import build_discovery_requests
-from leads_discovery.models import CompanyRecord, EvidenceBundle, EvidenceItem
+from leads_discovery.models import (
+    CompanyRecord,
+    EvidenceBundle,
+    EvidenceItem,
+    ExtractedFact,
+    ExtractionResult,
+    UsageEvent,
+)
 from leads_discovery.pipeline.m2_batch import (
     M2BatchConfig,
     _validate_artifact_paths,
     _validate_config,
 )
-from leads_discovery.pipeline.state import load_jsonl
+from leads_discovery.pipeline.state import load_jsonl, write_jsonl_atomic, write_text_atomic
 from leads_discovery.research.extract import (
     FACT_KEYS,
     DeepSeekExtractor,
     DeepSeekPriceSchedule,
+    apply_extraction,
 )
 from leads_discovery.scoring import evaluate_company
 
@@ -56,7 +64,7 @@ def _paid_workflow() -> str:
     matches = [
         text
         for text in _workflow_texts().values()
-        if any(word in text.casefold() for word in ("canary", "live", "paid"))
+        if "name: production lead canary" in text.casefold()
     ]
     assert len(matches) == 1, "exactly one dedicated paid live/canary workflow is required"
     return matches[0]
@@ -110,6 +118,36 @@ def _valid_deepseek_content() -> str:
         for key in FACT_KEYS
     }
     return json.dumps({"facts": facts})
+
+
+def _evaluate_negative_relevance(excerpt: str) -> Any:
+    """Evaluate one extracted negative relevance claim through its evidence boundary."""
+    company = build_company(facts={"pvf_relevant": (False, 0.95)})
+    payload = company.evidence[0].to_dict()
+    payload["excerpt"] = excerpt
+    item = EvidenceItem.from_dict(payload)
+    bundle = EvidenceBundle(
+        company_id=company.company_id,
+        items=[item],
+        raw_records=[],
+        usage_events=[],
+    )
+    facts = {key: ExtractedFact(None, 0.0, []) for key in FACT_KEYS}
+    facts["pvf_relevant"] = ExtractedFact(False, 0.95, [item.evidence_id])
+    extracted = apply_extraction(
+        company,
+        bundle,
+        ExtractionResult(
+            company_id=company.company_id,
+            model="deepseek-v4-flash",
+            facts=facts,
+            usage_event=UsageEvent(
+                provider="deepseek",
+                operation="structured_extraction",
+            ),
+        ),
+    )
+    return evaluate_company(extracted)
 
 
 def test_contract_1_unknown_paid_work_is_global_replay_barrier() -> None:
@@ -248,13 +286,9 @@ def test_contract_6_deepseek_retry_exhaustion_is_bounded() -> None:
 
 def test_contract_7_unsupported_negative_cannot_hard_reject() -> None:
     """A cited false claim unsupported by its text must be treated as unknown."""
-    company = build_company(facts={"pvf_relevant": (False, 0.95)})
-    evidence = company.evidence[0]
-    payload = evidence.to_dict()
-    payload["excerpt"] = "We distribute industrial pipe, valves, and fittings."
-    company.evidence = [EvidenceItem.from_dict(payload)]
-
-    result = evaluate_company(company)
+    result = _evaluate_negative_relevance(
+        "We distribute industrial pipe, valves, and fittings."
+    )
 
     assert result.final_decision == "uncertain"
     assert "confirmed_not_pvf_relevant" not in result.rejection_reasons
@@ -262,32 +296,21 @@ def test_contract_7_unsupported_negative_cannot_hard_reject() -> None:
 
 def test_contract_7_explicit_negative_evidence_can_reject() -> None:
     """Explicit exclusionary evidence may support a normal negative hard fact."""
-    company = build_company(facts={"pvf_relevant": (False, 0.95)})
-    evidence = company.evidence[0]
-    payload = evidence.to_dict()
-    payload["excerpt"] = (
+    result = _evaluate_negative_relevance(
         "We sell electrical supplies only and do not distribute pipe, valves, or fittings."
     )
-    company.evidence = [EvidenceItem.from_dict(payload)]
-
-    result = evaluate_company(company)
 
     assert result.final_decision == "rejected"
     assert result.rejection_reasons == ["confirmed_not_pvf_relevant"]
 
 
-def test_contract_9_nested_raw_fields_have_deterministic_bound() -> None:
-    """Multi-megabyte raw/nested fields cannot be persisted unbounded."""
-    source = "\n".join(
-        _module_source(name)
-        for name in (
-            "leads_discovery.discovery.apify",
-            "leads_discovery.discovery.exa",
-            "leads_discovery.pipeline.m2_batch",
+def test_contract_9_nested_raw_fields_have_deterministic_bound(tmp_path: Path) -> None:
+    """Multi-megabyte raw/nested fields cannot cross the persisted-record ceiling."""
+    with pytest.raises(ValueError, match="record exceeds"):
+        write_jsonl_atomic(
+            tmp_path / "raw.jsonl",
+            [{"raw_metadata": {"nested": {"blob": "x" * (1024 * 1024)}}}],
         )
-    )
-    assert "raw_metadata" in source or "raw_records" in source
-    assert any(word in source for word in ("max_raw", "raw_byte", "sanitize_raw", "truncate"))
 
 
 def test_contract_10_jsonl_replay_is_incremental(
@@ -314,11 +337,16 @@ def test_contract_10_replay_has_three_hard_limits() -> None:
     assert source.count("max") >= 3
 
 
-def test_contract_11_per_run_storage_has_hard_ceiling() -> None:
-    """Persisted bytes must have a per-run hard ceiling."""
-    source = _source(M2BatchConfig) + _module_source("leads_discovery.pipeline.state")
-    markers = ("storage_budget", "persisted_byte", "max_storage", "disk_budget")
-    assert any(marker in source for marker in markers)
+def test_contract_11_per_run_storage_has_hard_ceiling(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Persisted bytes must be rejected before aggregate run storage exceeds its ceiling."""
+    monkeypatch.setenv("LEADS_MAX_FILE_BYTES", "100")
+    monkeypatch.setenv("LEADS_MAX_RUN_BYTES", "40")
+    write_text_atomic(tmp_path / "first.txt", "x" * 30)
+    with pytest.raises(ValueError, match="run would exceed"):
+        write_text_atomic(tmp_path / "second.txt", "y" * 20)
 
 
 def test_contract_12_data_root_symlink_is_rejected(tmp_path: Path) -> None:
@@ -389,10 +417,26 @@ def test_contract_13_pr_and_push_ci_do_not_get_live_credentials() -> None:
 def test_contract_14_one_company_canary_limits_are_fixed() -> None:
     """Canary scope, spend, calls, and storage must be hard-coded ceilings."""
     workflow = _paid_workflow().casefold()
-    one_company = ("max_companies: 1", "max-companies 1", "companies=1")
-    assert any(marker in workflow for marker in one_company)
-    assert "budget" in workflow
-    assert "max" in workflow and "call" in workflow
+    canary = _module_source("leads_discovery.production_canary")
+    assert "production_canary" in workflow
+    assert all(
+        f"{name.casefold()} = \"1\"" in canary
+        for name in (
+            "_MAX_CANDIDATES",
+            "_MAX_EVALUATED",
+            "_MAX_CONTACTS",
+            "_MAX_PAID_CONTACTS",
+            "_CLAY_MAX_CONTACTS",
+            "_APOLLO_CREDIT_CAP",
+            "_INSTANTLY_CALL_CAP",
+        )
+    )
+    assert all(
+        f"{name.casefold()} = \"0." in canary
+        for name in ("_EXA_BUDGET_USD", "_DEEPSEEK_BUDGET_USD", "_EXA_PEOPLE_BUDGET_USD")
+    )
+    assert "leads_max_run_bytes" in workflow
+    assert "_instantly_call_cap" in canary
     assert "storage" in workflow or "bytes" in workflow
     for name in ("max_companies", "budget", "max_calls"):
         assert f"inputs.{name}" not in workflow

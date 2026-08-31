@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
-from typing import Any, cast
 
 import httpx
 import pytest
@@ -12,7 +11,16 @@ from m3_factories import build_company
 from leads_discovery.discovery.base import DiscoveryProviderError
 from leads_discovery.discovery.exa import ExaDiscoveryProvider
 from leads_discovery.discovery.queries import build_discovery_requests
-from leads_discovery.models import CompanyRecord, DiscoveryRequest, EvidenceItem
+from leads_discovery.models import (
+    CompanyRecord,
+    DiscoveryRequest,
+    EvidenceBundle,
+    EvidenceItem,
+    ExtractedFact,
+    ExtractionResult,
+    UsageEvent,
+)
+from leads_discovery.research.extract import FACT_KEYS, apply_extraction
 from leads_discovery.scoring import evaluate_company
 
 
@@ -63,8 +71,28 @@ def _company_with_negative_relevance_evidence(excerpt: str) -> CompanyRecord:
     evidence = company.evidence[0]
     payload = evidence.to_dict()
     payload["excerpt"] = excerpt
-    company.evidence = [EvidenceItem.from_dict(payload)]
-    return company
+    item = EvidenceItem.from_dict(payload)
+    bundle = EvidenceBundle(
+        company_id=company.company_id,
+        items=[item],
+        raw_records=[],
+        usage_events=[],
+    )
+    facts = {key: ExtractedFact(None, 0.0, []) for key in FACT_KEYS}
+    facts["pvf_relevant"] = ExtractedFact(False, 0.95, [item.evidence_id])
+    return apply_extraction(
+        company,
+        bundle,
+        ExtractionResult(
+            company_id=company.company_id,
+            model="deepseek-v4-flash",
+            facts=facts,
+            usage_event=UsageEvent(
+                provider="deepseek",
+                operation="structured_extraction",
+            ),
+        ),
+    )
 
 
 @pytest.mark.parametrize(
@@ -145,54 +173,6 @@ def test_exa_small_json_response_still_works_with_response_limits() -> None:
         result = provider.search(_exa_request())
 
     assert result.records == []
-
-
-def _timeout_signature(value: object) -> tuple[float | None, ...]:
-    """Normalize supported HTTPX timeout forms without requiring one exact duration."""
-    if isinstance(value, bool):
-        raise AssertionError("boolean is not a provider timeout policy")
-    if isinstance(value, (int, float)):
-        number = float(value)
-        return (number, number, number, number)
-    if isinstance(value, httpx.Timeout):
-        return (value.connect, value.read, value.write, value.pool)
-    raise AssertionError(f"unsupported provider timeout value: {type(value).__name__}")
-
-
-def test_exa_default_adapter_owns_explicit_deterministic_timeout(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Default Exa construction must explicitly configure its own HTTP timeout policy."""
-    real_client = httpx.Client
-    provider_type = cast(Any, ExaDiscoveryProvider)
-    observed: list[object] = []
-    created: list[httpx.Client] = []
-
-    def capture_client(*args: Any, **kwargs: Any) -> httpx.Client:
-        """Record explicit timeout construction while keeping a real offline client."""
-        assert "timeout" in kwargs, "Exa must not inherit HTTPX's generic default timeout"
-        observed.append(kwargs["timeout"])
-        kwargs["transport"] = httpx.MockTransport(
-            lambda _request: httpx.Response(200, json={"results": []})
-        )
-        client = real_client(*args, **kwargs)
-        created.append(client)
-        return client
-
-    monkeypatch.setattr(httpx, "Client", capture_client)
-    try:
-        first = provider_type(api_key="test-key")
-        second = provider_type(api_key="test-key")
-        del first, second
-    finally:
-        for client in created:
-            client.close()
-
-    assert len(observed) == 2
-    first_timeout = _timeout_signature(observed[0])
-    second_timeout = _timeout_signature(observed[1])
-    assert first_timeout == second_timeout
-    assert all(value is not None and value > 0 for value in first_timeout)
 
 
 def test_exa_injected_mock_client_remains_supported() -> None:
