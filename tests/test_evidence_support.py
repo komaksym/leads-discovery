@@ -92,15 +92,15 @@ def test_genuine_negative_pvf_proposition_remains_canonical() -> None:
     assert extracted.features["pvf_relevant"] is False
 
 
-def test_positive_pvf_claim_requires_positive_sales_relation() -> None:
+def test_positive_pvf_claim_requires_direct_pvf_evidence() -> None:
     supported = apply_extraction(
         _company(),
-        _bundle("We distribute industrial valves and fittings."),
+        _bundle("Industrial pipe, valves, and fittings."),
         _result("pvf_relevant", True),
     )
     unsupported = apply_extraction(
         _company(),
-        _bundle("We install industrial valves for customers."),
+        _bundle("We build electrical control panels."),
         _result("pvf_relevant", True),
     )
 
