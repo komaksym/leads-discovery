@@ -91,7 +91,10 @@ def test_only_current_m3_accepted_companies_reach_people_search(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Uncertain/rejected companies cause zero M4 calls while current accepted gets one Exa request."""
+    """Uncertain/rejected companies cause zero M4 calls.
+
+    The current accepted company still receives one Exa request.
+    """
     rejected = deepcopy(accepted_facts())
     rejected["pvf_relevant"] = (False, 0.99)
     run_dir = prepare_evaluated_run(
