@@ -2,7 +2,7 @@
 
 A resumable Python pipeline for finding and ranking US/Canadian PVF distributor prospects from public evidence.
 
-M2 performs the paid discovery, research, and structured extraction work. M3 is a deterministic local derivation layer: it validates cited facts, computes score and evidence coverage separately, makes conservative accepted/rejected/uncertain decisions, exports reviewable artifacts, and compares manual A/B/C labels without changing policy automatically.
+M2 performs the paid discovery, research, and structured extraction work. M3 is a deterministic local derivation layer: it validates cited facts, computes score and evidence coverage separately, makes conservative accepted/rejected/uncertain decisions, exports reviewable artifacts, and compares manual A/B/C labels without changing policy automatically. M4 is an explicit, separate contact-enrichment stage that consumes only M3 `accepted` companies, finds current employees close to the software-buying decision, enriches at most the top two contacts, verifies work email, and produces artifacts only. It performs no outreach.
 
 ## Setup
 
@@ -18,6 +18,15 @@ For live M2-backed runs, provide credentials through the environment:
 EXA_API_KEY=
 DEEPSEEK_API_KEY=
 APIFY_TOKEN=        # optional; missing token disables optional Apify discovery
+```
+
+For explicit live M4 enrichment, additionally configure:
+
+```text
+CLAY_PUBLIC_API_KEY=
+CLAY_CONTACT_ROUTINE_ID=
+APOLLO_API_KEY=
+INSTANTLY_API_KEY=
 ```
 
 Do not put credentials on the command line or in committed files.
@@ -59,6 +68,44 @@ The existing narrow M2 entry point remains supported:
 ```bash
 python -m leads_discovery.pipeline.m2_batch --help
 ```
+
+### Contact enrichment
+
+M4 is a separate command. It never runs implicitly from `run`, `score`, or `calibrate`.
+
+Dry mode is the default and is intentionally side-effect free: it validates scalar arguments only and does not read provider credentials, construct live clients, touch run artifacts, or access the network.
+
+```bash
+python -m leads_discovery enrich --run-id RUN
+```
+
+Explicit live execution requires an Exa People Search USD ceiling and the configured Exa, Clay, Apollo, and Instantly credentials:
+
+```bash
+python -m leads_discovery enrich \
+  --run-id RUN \
+  --exa-people-budget-usd 1.00 \
+  --clay-max-contacts 10 \
+  --apollo-credit-cap 5 \
+  --instantly-verification-call-cap 5 \
+  --execute-live
+```
+
+M4 reads `companies_evaluated.jsonl` and only exact `accepted` companies can cause provider calls. `uncertain` and `rejected` companies cause zero Exa People, Clay, Apollo, and Instantly calls. It never expands the M3 universe beyond 20 evaluated companies.
+
+Selection is deterministic. Exa returns at most 10 people per accepted company; M4 requires structured evidence that a person currently works there, ranks by distance to the buying decision, exact-deduplicates, and retains at most three contacts. Direct owners/executives rank first, relevant Sales/Operations/Commercial/Estimating/Inside Sales leadership second, and credible operational deputies third. Rank 3 is retained for review but never enters paid enrichment.
+
+Only the first two retained contacts whose decision rank is 1 or 2 can enter the paid waterfall:
+
+```text
+Clay work-email Routine -> Apollo work-email fallback -> Instantly verification
+```
+
+Clay uses the configured asynchronous Routine and persists its `routine_run_id` before polling. Apollo is called only when Clay has no usable work email and always disables personal email, phones, and both waterfall flags. Instantly is used only for `/api/v2/email-verification`; a persisted `pending` result resumes with GET and never repeats POST. Missing email never removes a useful contact.
+
+The Exa People USD ceiling, Clay submitted-contact cap, Apollo credit cap, and Instantly verification-call cap are independent. Known budget exhaustion publishes the best partial artifacts. Unknown paid in-flight outcomes fail closed instead of being blindly replayed.
+
+M2 and M4 use one `PaidOperationLifecycle` boundary for paid dispatches: replayed budget admission happens before the call, intent is checkpointed before dispatch, usage is appended to the authoritative ledger, and only a known result can clear the replay barrier. A healthy completed rerun repairs a stale derived usage summary without re-calling providers or rewriting durable state.
 
 ### Local score
 
@@ -149,6 +196,18 @@ companies_calibrated.csv      # after calibrate
 run_summary.json
 ```
 
+M4 adds five separate files without mutating the M2/M3 ledgers:
+
+```text
+contacts.jsonl
+leads.csv
+contact_usage_events.jsonl
+contact_usage.json
+contact_checkpoint.json
+```
+
+`contacts.jsonl` is the canonical atomic M4 contact snapshot. `leads.csv` is the primary human-review artifact and includes company score, contact identity/title/rank, work email and verification status, profile URLs, and email source. Ordering is company score descending, decision rank ascending, normalized contact name, then contact ID. Existing CSV formula-injection protection is preserved.
+
 `companies_evaluated.jsonl` contains one complete evaluated snapshot per selected company and is atomically replaced on recomputation.
 
 CSV ranking is deterministic: accepted, uncertain, rejected; then final score descending; overall coverage descending; normalized name and company ID ascending. Missing category scores are blank. Externally sourced CSV text beginning, after whitespace, with `=`, `+`, `-`, or `@` is prefixed with an apostrophe to prevent spreadsheet formula execution. JSON keeps the original text.
@@ -169,4 +228,14 @@ Calibration is report-only. A human can use the report to propose a later versio
 
 Derived files are written atomically inside the validated run directory and pre-existing symlink targets are rejected. Run IDs cannot escape the configured data root.
 
-This project does not add a database, frontend, contact enrichment, outreach, CRM integration, autonomous agent, or LLM-based scoring. The LLM is used only by the existing M2 structured extraction stage; M3 scoring and decisions are deterministic local code.
+M4 adds contact discovery and work-email verification only. The project still does not add a database, frontend, CRM integration, autonomous SDR, phones, personal emails, lead creation in Instantly, campaigns, sequences, SuperSearch jobs, or outreach. Development and automated validation must use $0 provider spend.
+
+## Production canary
+
+Production execution does not depend on a local computer. The production entry point is the manual `Production lead canary` GitHub Actions workflow on a standard GitHub-hosted `ubuntu-latest` runner. Provider credentials live only in GitHub Actions repository secrets.
+
+The workflow has no safety-limit inputs: the application fixes the canary at one company, one paid contact, tiny provider quotas, and tiny spend/storage ceilings. Paid-operation barriers are written durably before dispatch so a runner restart cannot silently repeat an unresolved potentially billed operation.
+
+Only `leads.csv` and `contacts.jsonl` are published to the dedicated `generated-leads` Git branch. Checkpoints, usage ledgers, provider payloads, credentials, temporary files, and debug state are not published as branch files or Actions artifacts.
+
+A real credentialed one-company workflow run is the final external acceptance gate. Automated CI and development remain offline and do not prove live provider compatibility.
