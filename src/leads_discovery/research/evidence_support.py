@@ -39,6 +39,10 @@ _NO_RELATION_PREFIX: Final[re.Pattern[str]] = re.compile(
     r"(?:\bno\b|\bwithout\b)\s+$",
     re.IGNORECASE,
 )
+_NEGATED_RELATION_COORDINATION: Final[re.Pattern[str]] = re.compile(
+    r"\s*(?:,\s*(?:(?:or|nor)\s+)?|(?:or|nor)\s+)",
+    re.IGNORECASE,
+)
 _NEGATED_COORDINATED_PVF_PREFIX: Final[re.Pattern[str]] = re.compile(
     r"(?:\b(?:do|does|did)\s+not|\b(?:don't|doesn't|didn't)|\bnever)\s+"
     r"(?:manufactur(?:e|es|ing)|install(?:s|ing)?|fabricat(?:e|es|ing)|"
@@ -85,6 +89,8 @@ _PVF_RELATIONS: Final[tuple[str, ...]] = (
     "distributes",
     "distributed",
     "distribution",
+    "distributor",
+    "distributors",
     "offer",
     "offers",
     "offering",
@@ -204,15 +210,23 @@ def _relation_is_negated(
 ) -> bool:
     if _relation_is_directly_negated(clause, relation):
         return True
-    for previous in relations:
-        if previous.start() >= relation.start():
-            break
-        if not _relation_is_directly_negated(clause, previous):
-            continue
-        bridge = clause[previous.end() : relation.start()]
-        if re.fullmatch(r"\s*,?\s*(?:or|nor)\s+", bridge, re.IGNORECASE):
-            return True
-    return False
+
+    relation_index = next(
+        (
+            index
+            for index, candidate in enumerate(relations)
+            if candidate.start() == relation.start() and candidate.end() == relation.end()
+        ),
+        None,
+    )
+    if relation_index is None or relation_index == 0:
+        return False
+
+    previous = relations[relation_index - 1]
+    bridge = clause[previous.end() : relation.start()]
+    if _NEGATED_RELATION_COORDINATION.fullmatch(bridge) is None:
+        return False
+    return _relation_is_negated(clause, previous, relations[:relation_index])
 
 
 def _relation_concept_pairs(
