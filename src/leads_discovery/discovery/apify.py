@@ -79,18 +79,7 @@ class ApifyDiscoveryProvider:
             request_count=1,
         )
         if not 200 <= response.status_code < 300:
-            status_code = response.status_code
-            response.close()
-            kind, retryable = classify_http_status(status_code)
-            raise provider_error(
-                provider="apify",
-                request_id=request.request_id,
-                operation="google_maps_search",
-                request_count=1,
-                kind=kind,
-                retryable=retryable,
-                status_code=status_code,
-            ) from None
+            _raise_http_failure(response, request, 1)
         payload = request_json(
             response,
             provider="apify",
