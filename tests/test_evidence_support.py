@@ -133,6 +133,7 @@ def test_coordinated_unrelated_pvf_negation_does_not_bind_to_distribution() -> N
     evaluated = evaluate_company(extracted)
 
     assert extracted.features["pvf_relevant"] is None
+    assert evaluated.final_decision == "uncertain"
     assert "confirmed_not_pvf_relevant" not in evaluated.rejection_reasons
 
 
@@ -205,6 +206,7 @@ def test_genuine_negative_pvf_proposition_triggers_rejection() -> None:
     evaluated = evaluate_company(extracted)
 
     assert extracted.features["pvf_relevant"] is False
+    assert evaluated.final_decision == "rejected"
     assert "confirmed_not_pvf_relevant" in evaluated.rejection_reasons
 
 
@@ -216,3 +218,48 @@ def test_boolean_relation_negative_binds_to_fact_proposition() -> None:
     )
 
     assert extracted.features["industrial_or_process_customer_focus"] is False
+
+
+def test_supported_facts_can_reach_accepted_after_canonicalization() -> None:
+    supported_values: dict[str, Any] = {
+        "pvf_relevant": True,
+        "industrial_or_process_customer_focus": True,
+        "branch_count": 5,
+        "inside_sales_or_estimating_presence": True,
+        "rfq_or_quote_workflow_evidence": True,
+        "project_or_tender_business": True,
+        "bom_or_line_item_complexity": True,
+        "manufacturer_count_or_breadth": 20,
+        "relevant_hiring": True,
+        "employee_count": 50,
+        "regional_independent_signal": True,
+        "multi_location_signal": True,
+        "known_current_direct_competitor_customer": False,
+        "known_quote_automation_or_order_automation_relationship": False,
+        "direct_quotation_pain_evidence": True,
+        "manual_workflow_evidence": True,
+        "explicit_process_bottleneck_evidence": True,
+    }
+    facts = {name: ExtractedFact(None, 0.0, []) for name in FACT_KEYS}
+    for key, value in supported_values.items():
+        facts[key] = ExtractedFact(value, 0.99, [_EVIDENCE_ID])
+    result = ExtractionResult(
+        company_id="cmp_support",
+        model="deepseek-v4-flash",
+        facts=facts,
+        usage_event=UsageEvent(provider="deepseek", operation="structured_extraction"),
+    )
+    excerpt = (
+        "Industrial pipe, valves, and fittings. "
+        "We serve industrial customers. "
+        "Branch count 5. Inside sales team. RFQ workflow. "
+        "Project tender business. BOM line items. Manufacturer count 20. "
+        "Relevant hiring. Employee count 50. Regional independent distributor. "
+        "Multiple locations. No competitor customer. No quote automation. "
+        "Direct quotation pain. Manual workflow. Process bottleneck."
+    )
+
+    extracted = apply_extraction(_company(), _bundle(excerpt), result)
+    evaluated = evaluate_company(extracted)
+
+    assert evaluated.final_decision == "accepted"
