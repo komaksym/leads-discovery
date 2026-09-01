@@ -35,6 +35,12 @@ _NEGATED_RELATION_PREFIX: Final[re.Pattern[str]] = re.compile(
     r"(?:(?:currently|actively|directly|typically|normally)\s+)?$",
     re.IGNORECASE,
 )
+_NEGATED_NOMINAL_RELATION_PREFIX: Final[re.Pattern[str]] = re.compile(
+    r"\b(?:is|are|was|were)\s+not\s+"
+    r"(?:(?:a|an|any|the|our|their|its)\s+)?"
+    r"(?:(?:industrial|process|pvf|carbon|stainless|steel)\s+)*$",
+    re.IGNORECASE,
+)
 _NO_RELATION_PREFIX: Final[re.Pattern[str]] = re.compile(
     r"(?:\bno\b|\bwithout\b)\s+$",
     re.IGNORECASE,
@@ -77,6 +83,15 @@ class _PropositionSpec:
 
     concepts: tuple[str, ...]
     relations: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class _RelationMatches:
+    """Bundle relation matching state so negation decisions stay internally consistent."""
+
+    relations: tuple[re.Match[str], ...]
+    targets: tuple[re.Match[str], ...]
+    pairs: tuple[tuple[re.Match[str], re.Match[str]], ...]
 
 
 _PVF_RELEVANCE_KEY: Final = "pvf_relevant"
@@ -198,15 +213,20 @@ def _relation_is_directly_negated(clause: str, relation: re.Match[str]) -> bool:
     prefix = clause[: relation.start()]
     return (
         _NEGATED_RELATION_PREFIX.search(prefix) is not None
+        or _NEGATED_NOMINAL_RELATION_PREFIX.search(prefix) is not None
         or _NO_RELATION_PREFIX.search(prefix) is not None
         or _NEGATED_COORDINATED_PVF_PREFIX.search(prefix) is not None
     )
 
 
+def _same_match(left: re.Match[str], right: re.Match[str]) -> bool:
+    return left.start() == right.start() and left.end() == right.end()
+
+
 def _relation_is_negated(
     clause: str,
     relation: re.Match[str],
-    relations: tuple[re.Match[str], ...],
+    matches: _RelationMatches,
 ) -> bool:
     if _relation_is_directly_negated(clause, relation):
         return True
@@ -214,29 +234,45 @@ def _relation_is_negated(
     relation_index = next(
         (
             index
-            for index, candidate in enumerate(relations)
-            if candidate.start() == relation.start() and candidate.end() == relation.end()
+            for index, candidate in enumerate(matches.relations)
+            if _same_match(candidate, relation)
         ),
         None,
     )
     if relation_index is None or relation_index == 0:
         return False
 
-    previous = relations[relation_index - 1]
+    previous = matches.relations[relation_index - 1]
     bridge = clause[previous.end() : relation.start()]
-    if _NEGATED_RELATION_COORDINATION.fullmatch(bridge) is None:
+    coordinated = _NEGATED_RELATION_COORDINATION.fullmatch(bridge) is not None
+    if not coordinated:
+        coordinated = any(
+            _same_match(paired_relation, previous)
+            and target.end() <= relation.start()
+            and _NEGATED_RELATION_COORDINATION.fullmatch(
+                clause[target.end() : relation.start()]
+            )
+            is not None
+            for paired_relation, target in matches.pairs
+        )
+    if not coordinated:
         return False
-    return _relation_is_negated(clause, previous, relations[:relation_index])
+    previous_matches = _RelationMatches(
+        relations=matches.relations[:relation_index],
+        targets=matches.targets,
+        pairs=tuple(
+            pair
+            for pair in matches.pairs
+            if any(_same_match(pair[0], candidate) for candidate in matches.relations[:relation_index])
+        ),
+    )
+    return _relation_is_negated(clause, previous, previous_matches)
 
 
 def _relation_concept_pairs(
     clause: str,
     spec: _PropositionSpec,
-) -> tuple[
-    tuple[re.Match[str], ...],
-    tuple[re.Match[str], ...],
-    tuple[tuple[re.Match[str], re.Match[str]], ...],
-]:
+) -> _RelationMatches:
     relations = _matches(clause, spec.relations)
     targets = _matches(clause, spec.concepts)
     pairs: list[tuple[re.Match[str], re.Match[str]]] = []
@@ -248,25 +284,24 @@ def _relation_concept_pairs(
         bridge = clause[relation.end() : target.start()]
         if _RELATION_OBJECT_BRIDGE.fullmatch(bridge):
             pairs.append((relation, target))
-    return relations, targets, tuple(pairs)
+    return _RelationMatches(relations=relations, targets=targets, pairs=tuple(pairs))
 
 
 def _relation_pairs_support_value(
     clause: str,
-    relations: tuple[re.Match[str], ...],
-    pairs: tuple[tuple[re.Match[str], re.Match[str]], ...],
+    matches: _RelationMatches,
     *,
     value: bool,
 ) -> bool:
     """Return whether relation/concept pairs support the requested boolean value."""
     if value:
         return any(
-            not _relation_is_negated(clause, relation, relations)
-            for relation, _target in pairs
+            not _relation_is_negated(clause, relation, matches)
+            for relation, _target in matches.pairs
         )
     return any(
-        _relation_is_negated(clause, relation, relations)
-        for relation, _target in pairs
+        _relation_is_negated(clause, relation, matches)
+        for relation, _target in matches.pairs
     )
 
 
@@ -274,35 +309,33 @@ def _supports_explicit_positive_pvf_clause(
     clause: str,
     spec: _PropositionSpec,
 ) -> bool:
-    relations, _targets, pairs = _relation_concept_pairs(clause, spec)
+    matches = _relation_concept_pairs(clause, spec)
     return _relation_pairs_support_value(
         clause,
-        relations,
-        pairs,
+        matches,
         value=True,
     )
 
 
 def _supports_positive_pvf_clause(clause: str, spec: _PropositionSpec) -> bool:
-    relations, targets, pairs = _relation_concept_pairs(clause, spec)
-    if relations:
+    matches = _relation_concept_pairs(clause, spec)
+    if matches.relations:
         return _relation_pairs_support_value(
             clause,
-            relations,
-            pairs,
+            matches,
             value=True,
         )
     return any(
-        not _target_is_under_negated_predicate(clause, target) for target in targets
+        not _target_is_under_negated_predicate(clause, target)
+        for target in matches.targets
     )
 
 
 def _supports_negative_pvf_clause(clause: str, spec: _PropositionSpec) -> bool:
-    relations, _targets, pairs = _relation_concept_pairs(clause, spec)
+    matches = _relation_concept_pairs(clause, spec)
     return _relation_pairs_support_value(
         clause,
-        relations,
-        pairs,
+        matches,
         value=False,
     )
 
@@ -364,12 +397,11 @@ def _supports_boolean_clause(
     if not concepts:
         return False
     if spec.relations:
-        relations, _targets, pairs = _relation_concept_pairs(clause, spec)
-        if relations:
+        matches = _relation_concept_pairs(clause, spec)
+        if matches.relations:
             return _relation_pairs_support_value(
                 clause,
-                relations,
-                pairs,
+                matches,
                 value=value,
             )
     if value:
