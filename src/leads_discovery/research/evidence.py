@@ -222,37 +222,30 @@ class ExaEvidenceResearcher:
                 },
                 timeout=_REQUEST_TIMEOUT,
             )
-            response = safe_transport_call(
-                lambda http_request=http_request: self._client.send(http_request, stream=True),
-                provider="exa",
-                request_id=request.request_id,
-                operation="company_research",
-                request_count=delta_request_count,
+            context = ProviderRequestContext(
+                "exa",
+                request.request_id,
+                "company_research",
+                delta_request_count,
             )
-            if not 200 <= response.status_code < 300:
-                status_code = response.status_code
-                response.close()
-                kind, retryable = classify_http_status(status_code)
-                raise provider_error(
-                    provider="exa",
-                    request_id=request.request_id,
-                    operation="company_research",
-                    request_count=delta_request_count,
-                    kind=kind,
-                    retryable=retryable,
+            error_metadata = {
+                "company_id": company.company_id,
+                "attempted_requests": attempted_position,
+            }
+            payload_raw, status_code = request_json_at_boundary(
+                self._client,
+                http_request,
+                context=context,
+                metadata=error_metadata,
+            )
+            if not isinstance(payload_raw, dict):
+                raise context.error(
+                    kind="invalid_response",
+                    retryable=False,
                     status_code=status_code,
-                    metadata={
-                        "company_id": company.company_id,
-                        "attempted_requests": attempted_position,
-                    },
+                    metadata=error_metadata,
                 ) from None
-            payload = request_json(
-                response,
-                provider="exa",
-                request_id=request.request_id,
-                operation="company_research",
-                request_count=delta_request_count,
-            )
+            payload = cast(dict[str, Any], payload_raw)
             if not isinstance(payload.get("results"), list):
                 raise provider_error(
                     provider="exa",
@@ -261,7 +254,7 @@ class ExaEvidenceResearcher:
                     request_count=delta_request_count,
                     kind="invalid_response",
                     retryable=False,
-                    status_code=response.status_code,
+                    status_code=status_code,
                     metadata={
                         "company_id": company.company_id,
                         "attempted_requests": attempted_position,
@@ -276,7 +269,7 @@ class ExaEvidenceResearcher:
                     request_count=delta_request_count,
                     kind="invalid_response",
                     retryable=False,
-                    status_code=response.status_code,
+                    status_code=status_code,
                     metadata={
                         "company_id": company.company_id,
                         "attempted_requests": attempted_position,
