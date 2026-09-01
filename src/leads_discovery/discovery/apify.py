@@ -287,21 +287,6 @@ class ApifyDiscoveryProvider:
                 request_id=request.request_id,
                 operation="google_maps_search",
                 request_count=request_count,
-                kind="transient",
-                retryable=False,
-                status_code=status_code,
-                metadata={
-                    "request_id": request.request_id,
-                    "run_id": run_id,
-                    "outcome_unknown": True,
-                },
-            ) from None
-        except (ResponseTooLargeError, json.JSONDecodeError, UnicodeDecodeError):
-            raise provider_error(
-                provider="apify",
-                request_id=request.request_id,
-                operation="google_maps_search",
-                request_count=request_count,
                 kind="invalid_response",
                 retryable=False,
                 status_code=status_code,

@@ -17,7 +17,6 @@ from leads_discovery.dedup import _registrable_http_domain
 from leads_discovery.discovery.base import (
     ProviderRequestContext,
     provider_error,
-    request_json,
     request_json_at_boundary,
     utc_timestamp,
 )
