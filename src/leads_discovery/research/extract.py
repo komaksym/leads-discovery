@@ -172,7 +172,7 @@ class DeepSeekExtractor:
             )
             try:
                 response = safe_transport_call(
-                    lambda http_request=http_request: self._client.send(  # type: ignore[misc]
+                    lambda http_request=http_request: self._client.send(
                         http_request, stream=True
                     ),
                     provider="deepseek",
@@ -523,7 +523,7 @@ def _parse_usage(raw: Any, prices: DeepSeekPriceSchedule, company_id: str) -> Us
 def apply_extraction(
     company: CompanyRecord, bundle: EvidenceBundle, result: ExtractionResult
 ) -> CompanyRecord:
-    """Canonicalize evidence-supported facts before they can affect deterministic scoring."""
+    """Canonicalize every cited candidate fact before it can affect deterministic scoring."""
     if bundle.company_id != company.company_id or result.company_id != company.company_id:
         raise ValueError("company, evidence bundle, and extraction result IDs must match")
     updated = CompanyRecord.from_dict(company.to_dict())

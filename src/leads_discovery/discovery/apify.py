@@ -195,7 +195,7 @@ class ApifyDiscoveryProvider:
                     timeout=_CONTROL_TIMEOUT,
                 )
                 response = safe_transport_call(
-                    lambda http_request=http_request: self._client.send(  # type: ignore[misc]
+                    lambda http_request=http_request: self._client.send(
                         http_request, stream=True
                     ),
                     provider="apify",
@@ -282,6 +282,21 @@ class ApifyDiscoveryProvider:
         try:
             raw_rows = json.loads(read_bounded_response(dataset_response))
         except (ResponseReadError, ResponseTooLargeError, json.JSONDecodeError, UnicodeDecodeError):
+            raise provider_error(
+                provider="apify",
+                request_id=request.request_id,
+                operation="google_maps_search",
+                request_count=request_count,
+                kind="transient",
+                retryable=False,
+                status_code=status_code,
+                metadata={
+                    "request_id": request.request_id,
+                    "run_id": run_id,
+                    "outcome_unknown": True,
+                },
+            ) from None
+        except (ResponseTooLargeError, json.JSONDecodeError, UnicodeDecodeError):
             raise provider_error(
                 provider="apify",
                 request_id=request.request_id,

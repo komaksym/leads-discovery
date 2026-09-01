@@ -2,10 +2,7 @@
 
 ## Summary
 
-Build the complete PVF company-discovery pipeline in three reviewable milestones. M1 is
-complete; the remaining original scope is consolidated into one larger candidate-intelligence
-milestone and one final evaluation/calibration milestone. Each milestone must pass lint,
-typecheck, tests, and build/package checks before moving on.
+Build the complete PVF company-discovery pipeline in reviewable milestones. M1-M3 establish company discovery, evaluation, and calibration. M4 adds an explicit artifact-only contact discovery and work-email verification stage after M3. Every milestone must pass lint, typecheck, tests, and build/package checks before moving on.
 
 ## Milestones
 
@@ -27,7 +24,7 @@ typecheck, tests, and build/package checks before moving on.
   - explicit unknown/confidence/evidence links
   - narrow checkpointed/resumable batch runner
   - real discovery-to-extraction acceptance batch for up to 20 companies
-- [ ] **M3 — Evaluation and calibration**
+- [x] **M3 — Evaluation and calibration**
   - workload/economic/incumbent/direct-pain scoring
   - coverage-aware missing-value policy
   - hard rejection rules
@@ -39,6 +36,65 @@ typecheck, tests, and build/package checks before moving on.
   - usage/cost report
   - manual-label calibration workflow
   - documentation and final validation
+- [x] **M4 — Contact discovery and enrichment**
+  - consume only M3 accepted companies
+  - Exa People Search with current-employment validation
+  - deterministic buying-decision proximity ranking and exact deduplication
+  - retain at most three contacts per company
+  - Clay work-email Routine for only the top two rank-1/2 contacts
+  - Apollo work-email fallback with phones/personal/waterfall disabled
+  - Instantly verification only, with pending GET resume
+  - separate M4 checkpoint and usage ledgers
+  - deterministic `contacts.jsonl` and review-first `leads.csv`
+  - dry-by-default explicit `enrich` CLI and manual-only GitHub Action
+  - no outreach, CRM, phones, personal email, database, or frontend
+  - completion is covered by combined independent contracts and red-team validation
+
+M4 contract documents:
+
+- `docs/superpowers/specs/2026-08-24-m4-contact-discovery-enrichment-design.md`
+- `docs/superpowers/plans/2026-08-24-m4-contact-discovery-enrichment.md`
+
+## Production-readiness implementation
+
+Summary: keep the existing staged/file architecture, but make the live path fail closed around money, ambiguous provider outcomes, persisted state, and public output publication. The production runtime is a standard GitHub-hosted runner; no local machine or new infrastructure is introduced. The integrated tree now contains the permanent M1-M4 behavior and safety evidence.
+
+Milestones for this branch:
+
+1. Harden the existing persistence/accounting boundary with bounded incremental replay, resource limits, and Linux-safe no-symlink atomic writes.
+2. Make paid provider dispatches reserve worst-case budget and durable operation identity/state before dispatch; ambiguous potentially-billed outcomes pause instead of replaying.
+3. Split Apify start/persist/poll, add explicit provider timeouts, bounded DeepSeek retry handling, and conservative validation of decision-affecting negative facts.
+4. Add a manual-only GitHub-hosted production workflow that enforces a one-company canary, tiny non-bypassable spend/call/storage ceilings, and publishes only `leads.csv` plus `contacts.jsonl` to `generated-leads` with `GITHUB_TOKEN`.
+5. Add focused regression tests, run repository lint/type/test/build/offline/workflow checks, inspect CI, and leave the real credentialed one-company canary as the final external acceptance gate.
+
+## Integrated production contract
+
+The system-level flow is intentionally staged: only the accepted M3 set can cross into
+M4, and every paid edge shares the same durable intent/usage/replay boundary.
+
+```text
+bounded search plan
+        ↓
+M2 discovery → dedup/provenance → bounded research → evidence-linked extraction
+        ↓
+proposition support → deterministic M3 score/coverage → accepted companies only
+        ↓
+M4 people shortlist → Clay/Apollo work-email enrichment → Instantly verification
+        ↓
+                    leads.csv + contacts.jsonl
+
+M2 and M4 paid edges ──→ shared PaidOperationLifecycle
+                         (budget → intent → ledger → known result / freeze)
+```
+
+### Final blocker-fix slice
+
+Summary: fix only the three confirmed readiness defects without redesigning passing replay, budget, persistence, workflow, or publication behavior.
+
+1. Require a hard-negative citation to connect the negation to the target concept within the same bounded clause/proximity window; otherwise downgrade the negative fact to unknown.
+2. Read provider bodies through HTTPX streaming responses, reject oversized declared lengths before consumption, and stop incremental body reads immediately when the configured byte ceiling is crossed.
+3. Make Exa request timeout semantics explicit at the adapter request boundary while preserving injected clients and MockTransport tests.
+4. Add focused production regression tests for negative-evidence relation, true streamed byte enforcement, bounded JSON success, and Exa timeout behavior; then run the full existing validation gate.
 
 ## Native GitHub stacked pull requests
 
@@ -69,7 +125,7 @@ The implementation contract is
 `docs/superpowers/specs/2026-08-23-m2-discovery-deduplication-design.md`. M2 must not be
 split into sub-milestones, stack layers, or separately approved implementation sections.
 M3 consumes persisted M2 facts and finishes all original scoring, decision, full-runner,
-output, and calibration scope; no original M1–M5 capability is dropped.
+output, and calibration scope; no original M1-M5 capability is dropped.
 
 M3 is also delivered as one atomic implementation because it is the final integrated module:
 
@@ -82,6 +138,17 @@ Its implementation contract is
 `docs/superpowers/specs/2026-08-23-m3-evaluation-calibration-design.md`. Internal files retain
 clear scoring, orchestration, export, and calibration boundaries, but M3 is not split into
 separately approved sub-milestones or stacked product PRs.
+
+M4 is delivered as one isolated production PR because selection, provider resume semantics,
+separate M4 state, CLI authorization, and artifacts form one contract boundary:
+
+```text
+main
+└── M4 contact discovery and enrichment
+```
+
+The integrated tree retains the independent contract and red-team evidence as permanent tests;
+the separate production canary remains the only credentialed external acceptance gate.
 
 Rules, except where a milestone-specific exception above says otherwise:
 

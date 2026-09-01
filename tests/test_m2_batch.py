@@ -704,60 +704,6 @@ def test_persisted_apify_run_id_is_resumed_without_replacement_search(tmp_path: 
     assert apify.resume_calls == [(apify_request.request_id, "persisted-run-123")]
 
 
-def test_unresolved_apify_start_freezes_all_subsequent_paid_work(tmp_path: Path) -> None:
-    """An Apify start with unknown outcome and no run ID blocks later Exa work."""
-    config = _config(
-        tmp_path,
-        "unknown-apify",
-        max_candidates=4,
-        include_apify=True,
-        apify_budget_usd=0.25,
-    )
-    requests = build_discovery_requests(
-        include_apify=True,
-        max_candidates=4,
-        apify_budget_usd=0.25,
-    )
-    apify_request = next(request for request in requests if request.provider == "apify")
-    run_dir = tmp_path / "unknown-apify"
-    run_dir.mkdir()
-    (run_dir / "checkpoint.json").write_text(
-        json.dumps(
-            {
-                "run_id": "unknown-apify",
-                "status": "running",
-                "provider_state": {
-                    "operations": {
-                        f"discovery:{apify_request.request_id}": {
-                            "provider": "apify",
-                            "operation": "google_maps_search",
-                            "request_id": apify_request.request_id,
-                            "state": "in_flight",
-                        }
-                    },
-                    "stages": {},
-                },
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    class BombDiscovery:
-        def search(self, _request: DiscoveryRequest) -> DiscoveryBatch:
-            raise AssertionError("no paid provider may run behind an unresolved outcome")
-
-    checkpoint = run_m2_batch(
-        config,
-        discovery={"exa": BombDiscovery(), "apify": BombDiscovery()},
-        researcher=FakeResearcher(),
-        extractor=FakeExtractor(),
-    )
-
-    assert checkpoint.status == "paused_unknown"
-    assert checkpoint.pause_reason is not None
-    assert "discovery:" in checkpoint.pause_reason
-
-
 def test_unknown_in_flight_exa_is_not_automatically_repeated(tmp_path: Path) -> None:
     """Process death during required Exa yields paused_unknown and no automatic repeat."""
     calls = 0

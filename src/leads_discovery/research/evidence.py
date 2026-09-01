@@ -17,6 +17,7 @@ from leads_discovery.dedup import _registrable_http_domain
 from leads_discovery.discovery.base import (
     ProviderRequestContext,
     provider_error,
+    request_json,
     request_json_at_boundary,
     utc_timestamp,
 )
@@ -210,6 +211,18 @@ class ExaEvidenceResearcher:
             attempted += 1
             attempted_position = start_index + attempted
             delta_request_count = 1 if on_progress is not None else attempted
+            http_request = self._client.build_request(
+                "POST",
+                _EXA_SEARCH_URL,
+                headers={"x-api-key": self._api_key},
+                json={
+                    "query": request.query,
+                    "type": "auto",
+                    "numResults": request.max_results,
+                    "contents": {"highlights": True},
+                },
+                timeout=_REQUEST_TIMEOUT,
+            )
             http_request = self._client.build_request(
                 "POST",
                 _EXA_SEARCH_URL,

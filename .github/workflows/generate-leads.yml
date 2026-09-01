@@ -1,0 +1,92 @@
+name: Production lead canary
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: production-lead-canary
+  cancel-in-progress: false
+
+jobs:
+  canary:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out trusted main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install package
+        run: python -m pip install -e .
+
+      - name: Prepare durable Git operation journal
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git fetch origin generated-leads:refs/remotes/origin/generated-leads; then
+            exit 0
+          fi
+          empty_tree="$(git mktree < /dev/null)"
+          root_commit="$(git commit-tree "$empty_tree" -m "Initialize generated lead output")"
+          git push origin "$root_commit:refs/heads/generated-leads"
+          git update-ref refs/remotes/origin/generated-leads "$root_commit"
+
+      - name: Run fixed one-company live canary
+        env:
+          EXA_API_KEY: ${{ secrets.EXA_API_KEY }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          CLAY_PUBLIC_API_KEY: ${{ secrets.CLAY_PUBLIC_API_KEY }}
+          CLAY_CONTACT_ROUTINE_ID: ${{ secrets.CLAY_CONTACT_ROUTINE_ID }}
+          APOLLO_API_KEY: ${{ secrets.APOLLO_API_KEY }}
+          INSTANTLY_API_KEY: ${{ secrets.INSTANTLY_API_KEY }}
+          LEADS_GIT_JOURNAL_BRANCH: generated-leads
+          LEADS_GIT_JOURNAL_REMOTE: origin
+          LEADS_MAX_HTTP_RESPONSE_BYTES: "1048576"
+          LEADS_MAX_RECORD_BYTES: "131072"
+          LEADS_MAX_FILE_BYTES: "4194304"
+          LEADS_MAX_RUN_BYTES: "8388608"
+          LEADS_MAX_RECORDS: "500"
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m leads_discovery.production_canary \
+            --run-id "canary-${GITHUB_RUN_ID}" \
+            --data-root data
+
+      - name: Publish approved public outputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          run_dir="data/canary-${GITHUB_RUN_ID}"
+          test -f "$run_dir/leads.csv"
+          test -f "$run_dir/contacts.jsonl"
+          publish_dir="$(mktemp -d)"
+          cp -- "$run_dir/leads.csv" "$publish_dir/leads.csv"
+          cp -- "$run_dir/contacts.jsonl" "$publish_dir/contacts.jsonl"
+
+          git fetch origin generated-leads:refs/remotes/origin/generated-leads
+          git switch --force-create generated-leads refs/remotes/origin/generated-leads
+          git rm -rf --ignore-unmatch .
+          cp -- "$publish_dir/leads.csv" leads.csv
+          cp -- "$publish_dir/contacts.jsonl" contacts.jsonl
+          git add -- leads.csv contacts.jsonl
+          test "$(git diff --cached --name-only | sort)" = $'contacts.jsonl\nleads.csv'
+
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git commit -m "Update generated leads" \
+            -m "Publish only the approved bounded leads.csv and contacts.jsonl outputs from the one-company production canary."
+          git push origin HEAD:generated-leads

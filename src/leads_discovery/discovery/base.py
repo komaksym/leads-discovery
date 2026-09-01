@@ -98,7 +98,7 @@ class ResponseTooLargeError(ValueError):
     """Signal that a provider response crossed the configured byte ceiling."""
 
 
-class ResponseReadError(RuntimeError):
+class ResponseReadError(httpx.HTTPError):
     """Signal a sanitized failure while streaming an already-received response."""
 
 
@@ -138,6 +138,11 @@ def _enforce_declared_response_limit(response: httpx.Response, limit: int) -> No
     if declared is not None and declared > limit:
         response.close()
         raise ResponseTooLargeError("provider response exceeds byte limit")
+
+
+def validate_response_size_header(response: httpx.Response) -> None:
+    """Reject an oversized declared response before any body handling."""
+    _enforce_declared_response_limit(response, _http_response_limit())
 
 
 def read_bounded_response(response: httpx.Response) -> bytes:

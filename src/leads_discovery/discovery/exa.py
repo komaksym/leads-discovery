@@ -65,6 +65,13 @@ class ExaDiscoveryProvider:
             json=body,
             timeout=_REQUEST_TIMEOUT,
         )
+        http_request = self._client.build_request(
+            "POST",
+            _EXA_SEARCH_URL,
+            headers={"x-api-key": self._api_key},
+            json=body,
+            timeout=_REQUEST_TIMEOUT,
+        )
         context = ProviderRequestContext("exa", request.request_id, "company_search", 1)
         payload_raw, status_code = request_json_at_boundary(
             self._client,
