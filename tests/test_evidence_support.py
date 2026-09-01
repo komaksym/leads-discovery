@@ -122,3 +122,43 @@ def test_numeric_fact_requires_value_and_fact_concept_in_cited_evidence() -> Non
 
     assert supported.features["branch_count"] == 3
     assert unsupported.features["branch_count"] is None
+
+
+def test_coordinated_unrelated_pvf_negation_does_not_bind_to_distribution() -> None:
+    extracted = apply_extraction(
+        _company(),
+        _bundle("We do not manufacture pipe and distribute industrial valves."),
+        _result("pvf_relevant", False),
+    )
+    evaluated = evaluate_company(extracted)
+
+    assert extracted.features["pvf_relevant"] is None
+    assert "confirmed_not_pvf_relevant" not in evaluated.rejection_reasons
+
+
+def test_numeric_fact_requires_value_to_describe_fact_concept() -> None:
+    extracted = apply_extraction(
+        _company(),
+        _bundle("3 employees work at our branch."),
+        _result("branch_count", 3, 0.9),
+    )
+
+    assert extracted.features["branch_count"] is None
+    assert extracted.feature_confidence["branch_count"] == {
+        "confidence": 0.0,
+        "evidence_ids": [],
+    }
+
+
+def test_boolean_negative_requires_negation_of_fact_concept() -> None:
+    extracted = apply_extraction(
+        _company(),
+        _bundle("Our RFQ workflow is online, not manual."),
+        _result("rfq_or_quote_workflow_evidence", False),
+    )
+
+    assert extracted.features["rfq_or_quote_workflow_evidence"] is None
+    assert extracted.feature_confidence["rfq_or_quote_workflow_evidence"] == {
+        "confidence": 0.0,
+        "evidence_ids": [],
+    }
