@@ -595,7 +595,7 @@ def _supports_clause(key: str, fact: ExtractedFact, clause: str) -> bool:
     if terms is None or key not in _FACT_POSITIVE_PREDICATES:
         return False
     if value is False:
-        return any(_negative_term_is_local(clause, term) for term in terms)
+        return _supports_boolean_clause(clause, False, _SPECS[key])
     return (
         any(
             re.search(rf"\b{re.escape(term)}\b", clause, re.IGNORECASE)
