@@ -247,33 +247,19 @@ class ExaEvidenceResearcher:
                 ) from None
             payload = cast(dict[str, Any], payload_raw)
             if not isinstance(payload.get("results"), list):
-                raise provider_error(
-                    provider="exa",
-                    request_id=request.request_id,
-                    operation="company_research",
-                    request_count=delta_request_count,
+                raise context.error(
                     kind="invalid_response",
                     retryable=False,
                     status_code=status_code,
-                    metadata={
-                        "company_id": company.company_id,
-                        "attempted_requests": attempted_position,
-                    },
+                    metadata=error_metadata,
                 ) from None
             results = cast(list[Any], payload["results"])
             if any(not isinstance(row, dict) for row in results):
-                raise provider_error(
-                    provider="exa",
-                    request_id=request.request_id,
-                    operation="company_research",
-                    request_count=delta_request_count,
+                raise context.error(
                     kind="invalid_response",
                     retryable=False,
                     status_code=status_code,
-                    metadata={
-                        "company_id": company.company_id,
-                        "attempted_requests": attempted_position,
-                    },
+                    metadata=error_metadata,
                 ) from None
             bounded_results = results[: request.max_results]
             call_raw_records = [cast(dict[str, Any], raw) for raw in bounded_results]
