@@ -178,8 +178,8 @@ def test_ambiguous_paid_operation_cannot_redispatch_after_remote_restart_barrier
         sync_checkpoint_barrier(checkpoint, None)
 
 
-def test_deepseek_empty_and_malformed_json_retry_within_fixed_bound() -> None:
-    """Empty and malformed model content retry and the final success accounts all attempts."""
+def test_deepseek_malformed_2xx_is_terminal_without_replay() -> None:
+    """Malformed paid model output must stop before a later response can be requested."""
     contents = ["", "{", json.dumps({"facts": _facts()})]
     calls = 0
 
@@ -190,18 +190,22 @@ def test_deepseek_empty_and_malformed_json_retry_within_fixed_bound() -> None:
         return httpx.Response(200, json=_deepseek_response(content))
 
     with httpx.Client(transport=httpx.MockTransport(handler)) as client:
-        result = DeepSeekExtractor(
+        extractor = DeepSeekExtractor(
             api_key="test",
             client=client,
             model="deepseek-v4-flash",
             prices=DeepSeekPriceSchedule(0.0, 0.0, 0.0),
-        ).extract(_company(), _bundle())
-    assert calls == 3
-    assert result.usage_event.request_count == 3
+        )
+        with pytest.raises(DiscoveryProviderError) as captured:
+            extractor.extract(_company(), _bundle())
 
+    assert calls == 1
+    assert captured.value.kind == "invalid_response"
+    assert captured.value.retryable is False
+    assert captured.value.usage_event.request_count == 1
 
-def test_deepseek_schema_invalid_exhaustion_accounts_all_attempts() -> None:
-    """Schema-invalid model output exhausts exactly three attempts without poisoning attempt one."""
+def test_deepseek_schema_invalid_2xx_is_terminal() -> None:
+    """Schema-invalid paid model output is terminal after exactly one received response."""
     calls = 0
 
     def handler(_request: httpx.Request) -> httpx.Response:
@@ -218,10 +222,11 @@ def test_deepseek_schema_invalid_exhaustion_accounts_all_attempts() -> None:
         )
         with pytest.raises(DiscoveryProviderError) as captured:
             extractor.extract(_company(), _bundle())
-    assert calls == 3
-    assert captured.value.kind == "invalid_response"
-    assert captured.value.usage_event.request_count == 3
 
+    assert calls == 1
+    assert captured.value.kind == "invalid_response"
+    assert captured.value.retryable is False
+    assert captured.value.usage_event.request_count == 1
 
 def test_unsupported_hard_negative_becomes_unknown() -> None:
     """A cited ID without explicit negative support cannot reject PVF relevance."""

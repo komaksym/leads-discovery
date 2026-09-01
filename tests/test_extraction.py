@@ -265,8 +265,8 @@ def test_explicit_unknowns_are_accepted_exactly() -> None:
         lambda facts: facts["pvf_relevant"].__setitem__("evidence_ids", []),
     ],
 )
-def test_invalid_fact_schema_retries_within_the_fixed_bound(mutate: Any) -> None:
-    """Retryable schema-invalid model output is retried only within the fixed bound."""
+def test_invalid_fact_schema_is_terminal_after_received_2xx(mutate: Any) -> None:
+    """Schema-invalid paid 2xx output is terminal and must not be replayed."""
     facts = _valid_facts()
     mutate(facts)
     calls = 0
@@ -286,10 +286,10 @@ def test_invalid_fact_schema_retries_within_the_fixed_bound(mutate: Any) -> None
         with pytest.raises(DiscoveryProviderError) as caught:
             extractor.extract(_company(), _bundle())
 
-    assert calls == 3
+    assert calls == 1
     assert caught.value.kind == "invalid_response"
     assert caught.value.retryable is False
-
+    assert caught.value.usage_event.request_count == 1
 
 def test_boolean_fact_value_is_allowed_for_branch_count_without_integer_coercion() -> None:
     """The owner-defined FactValue union applies uniformly, so bool stays a bool for every key."""
@@ -355,10 +355,10 @@ def test_unknown_representation_must_be_exact(facts: dict[str, dict[str, Any]]) 
         _response(finish_reason="length"),
     ],
 )
-def test_invalid_json_and_truncated_output_retry_only_within_bound(
+def test_invalid_json_and_truncated_output_are_terminal_after_received_2xx(
     response: dict[str, Any],
 ) -> None:
-    """Malformed or truncated model output retries exactly to the fixed attempt ceiling."""
+    """Malformed or truncated paid 2xx output is terminal and is not replayed."""
     calls = 0
 
     def handler(_request: httpx.Request) -> httpx.Response:
@@ -376,8 +376,11 @@ def test_invalid_json_and_truncated_output_retry_only_within_bound(
         with pytest.raises(DiscoveryProviderError) as caught:
             extractor.extract(_company(), _bundle())
 
-    assert calls == 3
-    assert caught.value.usage_event.request_count == 3
+    assert calls == 1
+    assert caught.value.kind == "invalid_response"
+    assert caught.value.retryable is False
+    assert caught.value.usage_event.request_count == 1
+
 
 def test_apply_extraction_updates_only_m2_fact_fields_and_preserves_m1_defaults() -> None:
     """Valid extraction populates evidence/features while leaving M3 fields untouched."""

@@ -246,12 +246,12 @@ def test_contract_4_apify_exposes_run_id_before_polling_and_resumes_it() -> None
 
 
 @pytest.mark.parametrize("bad_content", ["", "{not-json", '{"facts": {}}'])
-def test_contract_6_deepseek_invalid_json_retries_then_succeeds(bad_content: str) -> None:
-    """Empty, malformed, and schema-invalid JSON must each get a bounded retry."""
+def test_contract_6_deepseek_invalid_2xx_is_not_replayed(bad_content: str) -> None:
+    """A malformed or schema-invalid paid 2xx is terminal even if a retry would succeed."""
     calls = 0
 
     def handler(_request: httpx.Request) -> httpx.Response:
-        """Return one retryable invalid result followed by a valid result."""
+        """Offer a valid second response so the test proves it is never requested."""
         nonlocal calls
         calls += 1
         content = bad_content if calls == 1 else _valid_deepseek_content()
@@ -264,21 +264,21 @@ def test_contract_6_deepseek_invalid_json_retries_then_succeeds(bad_content: str
             model="deepseek-v4-flash",
             prices=DeepSeekPriceSchedule(0, 0, 0),
         )
-        extractor.extract(_deepseek_company(), _deepseek_bundle())
+        with pytest.raises(DiscoveryProviderError) as caught:
+            extractor.extract(_deepseek_company(), _deepseek_bundle())
 
-    assert calls == 2
+    assert calls == 1
+    assert caught.value.kind == "invalid_response"
+    assert caught.value.retryable is False
+    assert caught.value.usage_event.request_count == 1
 
-
-def test_contract_6_deepseek_retry_exhaustion_is_bounded() -> None:
-    """Repeated malformed JSON must terminate deterministically without an infinite loop."""
+def test_contract_6_deepseek_malformed_2xx_is_terminal() -> None:
+    """Repeated malformed paid responses are prevented by stopping after the first 2xx."""
     calls = 0
 
     def handler(_request: httpx.Request) -> httpx.Response:
-        """Return malformed JSON while guarding against an unbounded retry loop."""
         nonlocal calls
         calls += 1
-        if calls > 10:
-            raise AssertionError("DeepSeek malformed-response retry is unbounded")
         return httpx.Response(200, json=_deepseek_response("{not-json"))
 
     with httpx.Client(transport=httpx.MockTransport(handler)) as client:
@@ -288,11 +288,12 @@ def test_contract_6_deepseek_retry_exhaustion_is_bounded() -> None:
             model="deepseek-v4-flash",
             prices=DeepSeekPriceSchedule(0, 0, 0),
         )
-        with pytest.raises(DiscoveryProviderError):
+        with pytest.raises(DiscoveryProviderError) as caught:
             extractor.extract(_deepseek_company(), _deepseek_bundle())
 
-    assert 1 < calls <= 10
-
+    assert calls == 1
+    assert caught.value.kind == "invalid_response"
+    assert caught.value.usage_event.request_count == 1
 
 def test_contract_7_unsupported_negative_cannot_hard_reject() -> None:
     """A cited false claim unsupported by its text must be treated as unknown."""

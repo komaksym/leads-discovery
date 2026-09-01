@@ -6,11 +6,13 @@ import json
 import math
 import time
 from collections.abc import Callable
+from functools import partial
 from typing import Any, cast
 
 import httpx
 
 from leads_discovery.discovery.base import (
+    ResponseReadError,
     ResponseTooLargeError,
     classify_http_status,
     provider_error,
@@ -78,18 +80,7 @@ class ApifyDiscoveryProvider:
             request_count=1,
         )
         if not 200 <= response.status_code < 300:
-            status_code = response.status_code
-            response.close()
-            kind, retryable = classify_http_status(status_code)
-            raise provider_error(
-                provider="apify",
-                request_id=request.request_id,
-                operation="google_maps_search",
-                request_count=1,
-                kind=kind,
-                retryable=retryable,
-                status_code=status_code,
-            ) from None
+            _raise_http_failure(response, request, 1)
         payload = request_json(
             response,
             provider="apify",
@@ -205,28 +196,19 @@ class ApifyDiscoveryProvider:
                     timeout=_CONTROL_TIMEOUT,
                 )
                 response = safe_transport_call(
-                    lambda http_request=http_request: self._client.send(
-                        http_request, stream=True
-                    ),
+                    partial(self._client.send, http_request, stream=True),
                     provider="apify",
                     request_id=request.request_id,
                     operation="google_maps_search",
                     request_count=request_count,
                 )
                 if not 200 <= response.status_code < 300:
-                    status_code = response.status_code
-                    response.close()
-                    kind, retryable = classify_http_status(status_code)
-                    raise provider_error(
-                        provider="apify",
-                        request_id=request.request_id,
-                        operation="google_maps_search",
-                        request_count=request_count,
-                        kind=kind,
-                        retryable=retryable,
-                        status_code=status_code,
+                    _raise_http_failure(
+                        response,
+                        request,
+                        request_count,
                         metadata={"request_id": request.request_id, "run_id": run_id},
-                    ) from None
+                    )
                 payload = request_json(
                     response,
                     provider="apify",
@@ -239,13 +221,12 @@ class ApifyDiscoveryProvider:
             if status == "SUCCEEDED":
                 break
             if status in _TERMINAL_ERROR:
-                kind = "budget_exhausted" if _is_credit_exhausted(data) else "permanent"
                 raise provider_error(
                     provider="apify",
                     request_id=request.request_id,
                     operation="google_maps_search",
                     request_count=request_count,
-                    kind=kind,
+                    kind="budget_exhausted" if _is_credit_exhausted(data) else "permanent",
                     retryable=False,
                     metadata={"request_id": request.request_id, "run_id": run_id, "status": status},
                 ) from None
@@ -291,36 +272,15 @@ class ApifyDiscoveryProvider:
         )
         status_code = dataset_response.status_code
         if not 200 <= status_code < 300:
-            dataset_response.close()
-            kind, retryable = classify_http_status(status_code)
-            raise provider_error(
-                provider="apify",
-                request_id=request.request_id,
-                operation="google_maps_search",
-                request_count=request_count,
-                kind=kind,
-                retryable=retryable,
-                status_code=status_code,
+            _raise_http_failure(
+                dataset_response,
+                request,
+                request_count,
                 metadata={"request_id": request.request_id, "run_id": run_id},
-            ) from None
+            )
         try:
             raw_rows = json.loads(read_bounded_response(dataset_response))
-        except httpx.HTTPError:
-            raise provider_error(
-                provider="apify",
-                request_id=request.request_id,
-                operation="google_maps_search",
-                request_count=request_count,
-                kind="transient",
-                retryable=False,
-                status_code=status_code,
-                metadata={
-                    "request_id": request.request_id,
-                    "run_id": run_id,
-                    "outcome_unknown": True,
-                },
-            ) from None
-        except (ResponseTooLargeError, json.JSONDecodeError, UnicodeDecodeError):
+        except (ResponseReadError, ResponseTooLargeError, json.JSONDecodeError, UnicodeDecodeError):
             raise provider_error(
                 provider="apify",
                 request_id=request.request_id,
@@ -429,6 +389,29 @@ class ApifyDiscoveryProvider:
             raw_metadata=raw,
             retrieved_at=retrieved_at,
         )
+
+
+def _raise_http_failure(
+    response: httpx.Response,
+    request: DiscoveryRequest,
+    request_count: int,
+    *,
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    """Close and classify one unexpected non-success Apify response."""
+    status_code = response.status_code
+    response.close()
+    kind, retryable = classify_http_status(status_code)
+    raise provider_error(
+        provider="apify",
+        request_id=request.request_id,
+        operation="google_maps_search",
+        request_count=request_count,
+        kind=kind,
+        retryable=retryable,
+        status_code=status_code,
+        metadata=metadata,
+    ) from None
 
 
 def _is_credit_exhausted(data: dict[str, Any]) -> bool:
