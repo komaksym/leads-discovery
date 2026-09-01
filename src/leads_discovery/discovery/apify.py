@@ -5,8 +5,8 @@ from __future__ import annotations
 import json
 import math
 import time
-from functools import partial
 from collections.abc import Callable
+from functools import partial
 from typing import Any, cast
 
 import httpx
