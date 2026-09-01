@@ -417,6 +417,29 @@ class ApifyDiscoveryProvider:
         )
 
 
+def _raise_http_failure(
+    response: httpx.Response,
+    request: DiscoveryRequest,
+    request_count: int,
+    *,
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    """Close and classify one unexpected non-success Apify response."""
+    status_code = response.status_code
+    response.close()
+    kind, retryable = classify_http_status(status_code)
+    raise provider_error(
+        provider="apify",
+        request_id=request.request_id,
+        operation="google_maps_search",
+        request_count=request_count,
+        kind=kind,
+        retryable=retryable,
+        status_code=status_code,
+        metadata=metadata,
+    ) from None
+
+
 def _is_credit_exhausted(data: dict[str, Any]) -> bool:
     """Detect an explicit safe Actor credit/balance exhaustion message without retaining it."""
     message = data.get("statusMessage")
