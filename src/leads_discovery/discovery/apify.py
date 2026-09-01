@@ -222,13 +222,12 @@ class ApifyDiscoveryProvider:
             if status == "SUCCEEDED":
                 break
             if status in _TERMINAL_ERROR:
-                kind = "budget_exhausted" if _is_credit_exhausted(data) else "permanent"
                 raise provider_error(
                     provider="apify",
                     request_id=request.request_id,
                     operation="google_maps_search",
                     request_count=request_count,
-                    kind=kind,
+                    kind="budget_exhausted" if _is_credit_exhausted(data) else "permanent",
                     retryable=False,
                     metadata={"request_id": request.request_id, "run_id": run_id, "status": status},
                 ) from None
