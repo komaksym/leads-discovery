@@ -11,14 +11,12 @@ from typing import Any, cast
 import httpx
 
 from leads_discovery.discovery.base import (
-    ProviderRequestContext,
     ResponseReadError,
     ResponseTooLargeError,
     classify_http_status,
     provider_error,
     read_bounded_response,
     request_json,
-    request_json_at_boundary,
     safe_transport_call,
     stable_raw_record_id,
     utc_timestamp,
