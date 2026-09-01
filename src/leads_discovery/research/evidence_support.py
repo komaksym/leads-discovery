@@ -237,23 +237,46 @@ def _relation_concept_pairs(
     return relations, targets, tuple(pairs)
 
 
+def _relation_pairs_support_value(
+    clause: str,
+    relations: tuple[re.Match[str], ...],
+    pairs: tuple[tuple[re.Match[str], re.Match[str]], ...],
+    *,
+    value: bool,
+) -> bool:
+    """Return whether relation/concept pairs support the requested boolean value."""
+    if value:
+        return any(
+            not _relation_is_negated(clause, relation, relations)
+            for relation, _target in pairs
+        )
+    return any(
+        _relation_is_negated(clause, relation, relations)
+        for relation, _target in pairs
+    )
+
+
 def _supports_explicit_positive_pvf_clause(
     clause: str,
     spec: _PropositionSpec,
 ) -> bool:
     relations, _targets, pairs = _relation_concept_pairs(clause, spec)
-    return any(
-        not _relation_is_negated(clause, relation, relations)
-        for relation, _target in pairs
+    return _relation_pairs_support_value(
+        clause,
+        relations,
+        pairs,
+        value=True,
     )
 
 
 def _supports_positive_pvf_clause(clause: str, spec: _PropositionSpec) -> bool:
     relations, targets, pairs = _relation_concept_pairs(clause, spec)
     if relations:
-        return any(
-            not _relation_is_negated(clause, relation, relations)
-            for relation, _target in pairs
+        return _relation_pairs_support_value(
+            clause,
+            relations,
+            pairs,
+            value=True,
         )
     return any(
         not _target_is_under_negated_predicate(clause, target) for target in targets
@@ -262,9 +285,11 @@ def _supports_positive_pvf_clause(clause: str, spec: _PropositionSpec) -> bool:
 
 def _supports_negative_pvf_clause(clause: str, spec: _PropositionSpec) -> bool:
     relations, _targets, pairs = _relation_concept_pairs(clause, spec)
-    return any(
-        _relation_is_negated(clause, relation, relations)
-        for relation, _target in pairs
+    return _relation_pairs_support_value(
+        clause,
+        relations,
+        pairs,
+        value=False,
     )
 
 
@@ -327,14 +352,11 @@ def _supports_boolean_clause(
     if spec.relations:
         relations, _targets, pairs = _relation_concept_pairs(clause, spec)
         if relations:
-            if value:
-                return any(
-                    not _relation_is_negated(clause, relation, relations)
-                    for relation, _target in pairs
-                )
-            return any(
-                _relation_is_negated(clause, relation, relations)
-                for relation, _target in pairs
+            return _relation_pairs_support_value(
+                clause,
+                relations,
+                pairs,
+                value=value,
             )
     if value:
         return any(not _concept_is_negated(clause, concept) for concept in concepts)
