@@ -39,12 +39,20 @@ _NO_RELATION_PREFIX: Final[re.Pattern[str]] = re.compile(
     r"(?:\bno\b|\bwithout\b)\s+$",
     re.IGNORECASE,
 )
+_NEGATED_COORDINATED_PVF_PREFIX: Final[re.Pattern[str]] = re.compile(
+    r"(?:\b(?:do|does|did)\s+not|\b(?:don't|doesn't|didn't)|\bnever)\s+"
+    r"(?:manufactur(?:e|es|ing)|install(?:s|ing)?|fabricat(?:e|es|ing)|"
+    r"mak(?:e|es|ing)|produc(?:e|es|ing))"
+    r"(?:\s+(?:a|an|any|the|industrial|process|pvf|carbon|stainless|steel|"
+    r"pipe|piping|valves?|fittings?)){0,4}\s+(?:or|nor)\s+$",
+    re.IGNORECASE,
+)
 _NEGATED_PREDICATE_PREFIX: Final[re.Pattern[str]] = re.compile(
     r"(?:\b(?:do|does|did)\s+not|\b(?:don't|doesn't|didn't)|\bnever)\s+"
     r"(?:[a-z][a-z'-]*\s+){1,3}$",
     re.IGNORECASE,
 )
-_PVF_OBJECT_BRIDGE: Final[re.Pattern[str]] = re.compile(
+_RELATION_OBJECT_BRIDGE: Final[re.Pattern[str]] = re.compile(
     r"^\s*(?:(?:a|an|any|the|industrial|process|pvf|carbon|stainless|steel)\s+)*"
     r"(?:of\s+)?$",
     re.IGNORECASE,
@@ -67,6 +75,7 @@ class _PropositionSpec:
     relations: tuple[str, ...] = ()
 
 
+_PVF_RELEVANCE_KEY: Final = "pvf_relevant"
 _PVF_RELATIONS: Final[tuple[str, ...]] = (
     "sell",
     "sells",
@@ -90,9 +99,15 @@ _PVF_RELATIONS: Final[tuple[str, ...]] = (
     "stock",
     "stocks",
 )
+_CUSTOMER_FOCUS_RELATIONS: Final[tuple[str, ...]] = (
+    "serve",
+    "serves",
+    "serving",
+    "served",
+)
 
 _SPECS: Final[dict[str, _PropositionSpec]] = {
-    "pvf_relevant": _PropositionSpec(
+    _PVF_RELEVANCE_KEY: _PropositionSpec(
         ("pvf", "pipe", "piping", "valve", "valves", "fitting", "fittings"),
         _PVF_RELATIONS,
     ),
@@ -100,7 +115,8 @@ _SPECS: Final[dict[str, _PropositionSpec]] = {
         ("pvf", "pipe", "valve", "fitting", "product")
     ),
     "industrial_or_process_customer_focus": _PropositionSpec(
-        ("industrial", "process", "customer", "facility")
+        ("industrial", "process", "customer", "facility"),
+        _CUSTOMER_FOCUS_RELATIONS,
     ),
     "branch_count": _PropositionSpec(("branch", "branches", "location", "locations")),
     "inside_sales_or_estimating_presence": _PropositionSpec(
@@ -177,6 +193,7 @@ def _relation_is_directly_negated(clause: str, relation: re.Match[str]) -> bool:
     return (
         _NEGATED_RELATION_PREFIX.search(prefix) is not None
         or _NO_RELATION_PREFIX.search(prefix) is not None
+        or _NEGATED_COORDINATED_PVF_PREFIX.search(prefix) is not None
     )
 
 
@@ -198,7 +215,7 @@ def _relation_is_negated(
     return False
 
 
-def _relation_target_pairs(
+def _relation_concept_pairs(
     clause: str,
     spec: _PropositionSpec,
 ) -> tuple[
@@ -215,13 +232,24 @@ def _relation_target_pairs(
             continue
         relation = preceding[-1]
         bridge = clause[relation.end() : target.start()]
-        if _PVF_OBJECT_BRIDGE.fullmatch(bridge):
+        if _RELATION_OBJECT_BRIDGE.fullmatch(bridge):
             pairs.append((relation, target))
     return relations, targets, tuple(pairs)
 
 
+def _supports_explicit_positive_pvf_clause(
+    clause: str,
+    spec: _PropositionSpec,
+) -> bool:
+    relations, _targets, pairs = _relation_concept_pairs(clause, spec)
+    return any(
+        not _relation_is_negated(clause, relation, relations)
+        for relation, _target in pairs
+    )
+
+
 def _supports_positive_pvf_clause(clause: str, spec: _PropositionSpec) -> bool:
-    relations, targets, pairs = _relation_target_pairs(clause, spec)
+    relations, targets, pairs = _relation_concept_pairs(clause, spec)
     if relations:
         return any(
             not _relation_is_negated(clause, relation, relations)
@@ -233,7 +261,7 @@ def _supports_positive_pvf_clause(clause: str, spec: _PropositionSpec) -> bool:
 
 
 def _supports_negative_pvf_clause(clause: str, spec: _PropositionSpec) -> bool:
-    relations, _targets, pairs = _relation_target_pairs(clause, spec)
+    relations, _targets, pairs = _relation_concept_pairs(clause, spec)
     return any(
         _relation_is_negated(clause, relation, relations)
         for relation, _target in pairs
@@ -288,22 +316,42 @@ def _value_binds_to_concept(
     return False
 
 
+def _supports_boolean_clause(
+    clause: str,
+    value: bool,
+    spec: _PropositionSpec,
+) -> bool:
+    concepts = _matches(clause, spec.concepts)
+    if not concepts:
+        return False
+    if spec.relations:
+        relations, _targets, pairs = _relation_concept_pairs(clause, spec)
+        if relations:
+            if value:
+                return any(
+                    not _relation_is_negated(clause, relation, relations)
+                    for relation, _target in pairs
+                )
+            return any(
+                _relation_is_negated(clause, relation, relations)
+                for relation, _target in pairs
+            )
+    if value:
+        return any(not _concept_is_negated(clause, concept) for concept in concepts)
+    return any(_concept_is_negated(clause, concept) for concept in concepts)
+
+
 def _supports_clause(key: str, fact: ExtractedFact, clause: str) -> bool:
     spec = _SPECS.get(key)
     if spec is None:
         return False
     value = fact.value
-    if key == "pvf_relevant" and isinstance(value, bool):
+    if key == _PVF_RELEVANCE_KEY and isinstance(value, bool):
         if value:
             return _supports_positive_pvf_clause(clause, spec)
         return _supports_negative_pvf_clause(clause, spec)
-    concepts = _matches(clause, spec.concepts)
-    if not concepts:
-        return False
     if isinstance(value, bool):
-        if value:
-            return any(not _concept_is_negated(clause, concept) for concept in concepts)
-        return any(_concept_is_negated(clause, concept) for concept in concepts)
+        return _supports_boolean_clause(clause, value, spec)
     return _value_binds_to_concept(clause, value, spec)
 
 
@@ -316,7 +364,7 @@ def evidence_supports(key: str, fact: ExtractedFact, bundle: EvidenceBundle) -> 
         return False
 
     support_found = False
-    pvf_negative = key == "pvf_relevant" and fact.value is False
+    pvf_negative = key == _PVF_RELEVANCE_KEY and fact.value is False
     for item in bundle.items:
         if item.evidence_id not in cited:
             continue
@@ -326,8 +374,8 @@ def evidence_supports(key: str, fact: ExtractedFact, bundle: EvidenceBundle) -> 
             for clause in _CLAUSE_BOUNDARY.split(text):
                 normalized = clause.casefold()
                 if pvf_negative:
-                    spec = _SPECS["pvf_relevant"]
-                    if _supports_positive_pvf_clause(normalized, spec):
+                    spec = _SPECS[_PVF_RELEVANCE_KEY]
+                    if _supports_explicit_positive_pvf_clause(normalized, spec):
                         return False
                     if _supports_negative_pvf_clause(normalized, spec):
                         support_found = True
