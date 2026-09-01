@@ -15,10 +15,9 @@ import httpx
 
 from leads_discovery.dedup import _registrable_http_domain
 from leads_discovery.discovery.base import (
-    classify_http_status,
+    ProviderRequestContext,
     provider_error,
-    request_json,
-    safe_transport_call,
+    request_json_at_boundary,
     utc_timestamp,
 )
 from leads_discovery.models import (
