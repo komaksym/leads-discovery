@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Protocol, cast
 
@@ -53,6 +55,45 @@ class DiscoveryProviderError(RuntimeError):
         self.usage_event = UsageEvent.from_dict(usage_event.to_dict())
 
 
+@dataclass(frozen=True, slots=True)
+class ProviderRequestContext:
+    """Carry stable sanitized identity and accounting for one provider request."""
+
+    provider: str
+    request_id: str
+    operation: str
+    request_count: int
+
+    def with_request_count(self, request_count: int) -> ProviderRequestContext:
+        """Return the same request identity with an updated attempted-call count."""
+        return ProviderRequestContext(
+            self.provider,
+            self.request_id,
+            self.operation,
+            request_count,
+        )
+
+    def error(
+        self,
+        *,
+        kind: ErrorKind,
+        retryable: bool,
+        status_code: int | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> DiscoveryProviderError:
+        """Build a sanitized error without repeating the request identity fields."""
+        return provider_error(
+            provider=self.provider,
+            request_id=self.request_id,
+            operation=self.operation,
+            request_count=self.request_count,
+            kind=kind,
+            retryable=retryable,
+            status_code=status_code,
+            metadata=metadata,
+        )
+
+
 class ResponseTooLargeError(ValueError):
     """Signal that a provider response crossed the configured byte ceiling."""
 
@@ -80,18 +121,29 @@ def _http_response_limit() -> int:
     return value
 
 
+def _declared_response_size(response: httpx.Response) -> int | None:
+    """Parse a declared response size, treating malformed lengths as unknown."""
+    raw_length = response.headers.get("content-length")
+    if raw_length is None:
+        return None
+    try:
+        return int(raw_length)
+    except ValueError:
+        return None
+
+
+def _enforce_declared_response_limit(response: httpx.Response, limit: int) -> None:
+    """Reject an oversized declared response before consuming body bytes."""
+    declared = _declared_response_size(response)
+    if declared is not None and declared > limit:
+        response.close()
+        raise ResponseTooLargeError("provider response exceeds byte limit")
+
+
 def read_bounded_response(response: httpx.Response) -> bytes:
     """Read one response incrementally and abort as soon as its hard byte limit is exceeded."""
     limit = _http_response_limit()
-    raw_length = response.headers.get("content-length")
-    if raw_length is not None:
-        try:
-            declared = int(raw_length)
-        except ValueError:
-            declared = 0
-        if declared > limit:
-            response.close()
-            raise ResponseTooLargeError("provider response exceeds byte limit")
+    _enforce_declared_response_limit(response, limit)
 
     chunks: list[bytes] = []
     size = 0
@@ -201,6 +253,25 @@ def provider_error(
     )
 
 
+def _decode_bounded_json(
+    response: httpx.Response,
+    context: ProviderRequestContext,
+    *,
+    metadata: dict[str, Any] | None = None,
+) -> Any:
+    """Read and decode bounded JSON without leaking provider-controlled text."""
+    try:
+        body = read_bounded_response(response)
+        return json.loads(body)
+    except (ResponseTooLargeError, ResponseReadError, json.JSONDecodeError, UnicodeDecodeError):
+        raise context.error(
+            kind="invalid_response",
+            retryable=False,
+            status_code=response.status_code,
+            metadata=metadata,
+        ) from None
+
+
 def request_json(
     response: httpx.Response,
     *,
@@ -210,25 +281,10 @@ def request_json(
     request_count: int,
 ) -> dict[str, Any]:
     """Decode a stream-bounded provider response as one JSON object."""
-    try:
-        body = read_bounded_response(response)
-        payload = json.loads(body)
-    except (ResponseTooLargeError, ResponseReadError, json.JSONDecodeError, UnicodeDecodeError):
-        raise provider_error(
-            provider=provider,
-            request_id=request_id,
-            operation=operation,
-            request_count=request_count,
-            kind="invalid_response",
-            retryable=False,
-            status_code=response.status_code,
-        ) from None
+    context = ProviderRequestContext(provider, request_id, operation, request_count)
+    payload = _decode_bounded_json(response, context)
     if not isinstance(payload, dict):
-        raise provider_error(
-            provider=provider,
-            request_id=request_id,
-            operation=operation,
-            request_count=request_count,
+        raise context.error(
             kind="invalid_response",
             retryable=False,
             status_code=response.status_code,
@@ -254,51 +310,56 @@ def stable_raw_record_id(
 
 
 def safe_transport_call(
-    call: Any,
+    call: Callable[[], httpx.Response],
     *,
-    provider: str,
-    request_id: str,
-    operation: str,
-    request_count: int,
+    context: ProviderRequestContext,
 ) -> httpx.Response:
     """Run one injected streamed-client dispatch and classify transport failures safely."""
     try:
-        response = cast(httpx.Response, call())
+        response = call()
     except (httpx.ConnectError, httpx.ConnectTimeout):
-        raise provider_error(
-            provider=provider,
-            request_id=request_id,
-            operation=operation,
-            request_count=request_count,
+        raise context.error(
             kind="transient",
             retryable=True,
-            metadata={"request_id": request_id, "safe_to_retry": True},
+            metadata={"request_id": context.request_id, "safe_to_retry": True},
         ) from None
     except httpx.HTTPError:
-        raise provider_error(
-            provider=provider,
-            request_id=request_id,
-            operation=operation,
-            request_count=request_count,
+        raise context.error(
             kind="transient",
             retryable=False,
-            metadata={"request_id": request_id, "outcome_unknown": True},
+            metadata={"request_id": context.request_id, "outcome_unknown": True},
         ) from None
-    raw_length = response.headers.get("content-length")
-    if raw_length is not None:
-        try:
-            declared = int(raw_length)
-        except ValueError:
-            declared = 0
-        if declared > _http_response_limit():
-            response.close()
-            raise provider_error(
-                provider=provider,
-                request_id=request_id,
-                operation=operation,
-                request_count=request_count,
-                kind="invalid_response",
-                retryable=False,
-                status_code=response.status_code,
-            ) from None
+    try:
+        _enforce_declared_response_limit(response, _http_response_limit())
+    except ResponseTooLargeError:
+        raise context.error(
+            kind="invalid_response",
+            retryable=False,
+            status_code=response.status_code,
+        ) from None
     return response
+
+
+def request_json_at_boundary(
+    client: httpx.Client,
+    request: httpx.Request,
+    *,
+    context: ProviderRequestContext,
+    metadata: dict[str, Any] | None = None,
+) -> tuple[Any, int]:
+    """Dispatch one streamed request and return bounded JSON plus its successful status."""
+    response = safe_transport_call(
+        lambda: client.send(request, stream=True),
+        context=context,
+    )
+    status_code = response.status_code
+    if not 200 <= status_code < 300:
+        response.close()
+        kind, retryable = classify_http_status(status_code)
+        raise context.error(
+            kind=kind,
+            retryable=retryable,
+            status_code=status_code,
+            metadata=metadata,
+        ) from None
+    return _decode_bounded_json(response, context, metadata=metadata), status_code
