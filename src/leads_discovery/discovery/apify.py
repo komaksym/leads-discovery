@@ -195,7 +195,7 @@ class ApifyDiscoveryProvider:
                     timeout=_CONTROL_TIMEOUT,
                 )
                 response = safe_transport_call(
-                    lambda http_request=http_request: self._client.send(
+                    lambda: self._client.send(
                         http_request, stream=True
                     ),
                     provider="apify",
