@@ -172,7 +172,7 @@ class DeepSeekExtractor:
             )
             try:
                 response = safe_transport_call(
-                    lambda: self._client.send(
+                    lambda http_request=http_request: self._client.send(  # type: ignore[misc]
                         http_request, stream=True
                     ),
                     provider="deepseek",
