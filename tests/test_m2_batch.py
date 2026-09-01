@@ -350,6 +350,24 @@ def test_preexisting_artifact_symlink_cannot_redirect_writes_outside_data_root(
     assert outside.read_text(encoding="utf-8") == "sentinel\n"
 
 
+def test_symlinked_data_root_preserves_existing_resolution_behavior(tmp_path: Path) -> None:
+    """Issue #30 must not change the base behavior of resolving a symlinked data root."""
+    real_root = tmp_path / "real-data"
+    real_root.mkdir()
+    linked_root = tmp_path / "linked-data"
+    linked_root.symlink_to(real_root, target_is_directory=True)
+
+    checkpoint = run_m2_batch(
+        _config(linked_root, "symlink-root"),
+        discovery={"exa": FakeDiscovery()},
+        researcher=FakeResearcher(),
+        extractor=FakeExtractor(),
+    )
+
+    assert checkpoint.status == "completed"
+    assert (real_root / "symlink-root" / "checkpoint.json").exists()
+
+
 def test_explicit_live_flag_is_required_before_provider_calls(tmp_path: Path) -> None:
     """Without explicit live authorization the runner returns dry-run state and makes no calls."""
     discovery = FakeDiscovery()
@@ -560,6 +578,29 @@ def test_conservative_deepseek_reservation_persists_paused_budget_without_call(
     assert extractor.calls == 0
     persisted = json.loads((tmp_path / "budget" / "checkpoint.json").read_text())
     assert persisted["status"] == "paused_budget"
+
+
+def test_unknown_exa_spend_freezes_without_configured_ceiling(tmp_path: Path) -> None:
+    """Unknown authoritative spend blocks fresh paid work even when Exa has no ceiling."""
+    run_dir = tmp_path / "unknown-spend-no-ceiling"
+    run_dir.mkdir()
+    event = UsageEvent(provider="exa", operation="company_search", request_count=1)
+    (run_dir / "usage_events.jsonl").write_text(
+        json.dumps(event.to_dict()) + "\n",
+        encoding="utf-8",
+    )
+    discovery = FakeDiscovery()
+
+    checkpoint = run_m2_batch(
+        _config(tmp_path, "unknown-spend-no-ceiling", exa_budget_usd=None),
+        discovery={"exa": discovery},
+        researcher=FakeResearcher(),
+        extractor=FakeExtractor(),
+    )
+
+    assert checkpoint.status == "paused_unknown"
+    assert checkpoint.pause_reason == "exa_usage_unknown"
+    assert discovery.calls == 0
 
 
 def test_usage_replay_prevents_budget_reset_and_second_model_call(tmp_path: Path) -> None:

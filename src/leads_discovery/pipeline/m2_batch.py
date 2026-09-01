@@ -35,7 +35,11 @@ from leads_discovery.models import (
     UsageEvent,
 )
 from leads_discovery.pipeline.costs import CostTracker
-from leads_discovery.pipeline.paid_operations import PaidOperationLifecycle
+from leads_discovery.pipeline.paid_operations import (
+    PaidAdmissionPolicy,
+    PaidOperationLifecycle,
+    classify_paid_error,
+)
 from leads_discovery.pipeline.state import (
     append_company_snapshot,
     append_jsonl,
@@ -152,10 +156,7 @@ def _validate_config(config: M2BatchConfig) -> _RunPaths:
     ):
         raise ValueError("live extraction requires a positive explicit DeepSeek budget")
 
-    original_root = config.data_root.expanduser()
-    if original_root.is_symlink():
-        raise ValueError("data_root must not be a symlink")
-    root = original_root.resolve()
+    root = config.data_root.expanduser().resolve()
     candidate = root / config.run_id
     if candidate.is_symlink():
         raise ValueError("run directory must not be a symlink")
@@ -256,17 +257,6 @@ def _persist_checkpoint(path: Path, checkpoint: RunCheckpoint) -> None:
     write_checkpoint(path, checkpoint)
 
 
-def _finish_operation(
-    lifecycle: PaidOperationLifecycle,
-    operation_id: str,
-    *,
-    state: str = "completed",
-    error_kind: str | None = None,
-) -> None:
-    """Atomically record a known operation outcome after usage and output are durable."""
-    lifecycle.finish(operation_id, state=state, error_kind=error_kind)
-
-
 def _pause(
     checkpoint: RunCheckpoint,
     path: Path,
@@ -283,11 +273,6 @@ def _pause(
     checkpoint.pending_stage = stage
     _persist_checkpoint(path, checkpoint)
     return checkpoint
-
-
-def _record_usage(lifecycle: PaidOperationLifecycle, event: UsageEvent) -> None:
-    """Append/fsync one usage event and rebuild the atomic usage summary from replayed state."""
-    lifecycle.record_usage(event)
 
 
 def _replay_usage(paths: _RunPaths) -> CostTracker:
@@ -379,7 +364,7 @@ def _resume_apify_if_needed(
         try:
             resumed = resume(request, run_id)
         except DiscoveryProviderError as exc:
-            _record_usage(lifecycle, exc.usage_event)
+            lifecycle.record_usage(exc.usage_event)
             if exc.retryable:
                 lifecycle.update_operation(
                     operation_id,
@@ -387,7 +372,7 @@ def _resume_apify_if_needed(
                     state="pending",
                 )
                 continue
-            _finish_operation(lifecycle, operation_id, state="failed", error_kind=exc.kind)
+            lifecycle.finish(operation_id, state="failed", error_kind=exc.kind)
             continue
         if not isinstance(resumed, DiscoveryBatch):
             return _pause(
@@ -398,9 +383,9 @@ def _resume_apify_if_needed(
                 stage="discovery",
             )
         for event in resumed.usage_events:
-            _record_usage(lifecycle, event)
+            lifecycle.record_usage(event)
         _append_discovery_batch(paths, resumed.records)
-        _finish_operation(lifecycle, operation_id)
+        lifecycle.finish(operation_id)
     return None
 
 
@@ -471,17 +456,20 @@ def _discovery_phase(
             if request.provider == "exa"
             else config.apify_budget_usd
         )
-        if not lifecycle.admit(
-            operation_id,
+        admission = PaidAdmissionPolicy(
             provider=request.provider,
-            operation=operation,
             ceiling=ceiling,
-            reservation_usd=reservation,
             budget_reason=f"{request.provider}_budget_exhausted",
             usage_unknown_reason=f"{request.provider}_usage_unknown",
+            pause_on_budget=request.provider != "apify",
+        )
+        if not lifecycle.admit(
+            operation_id,
+            operation=operation,
+            policy=admission,
+            reservation_usd=reservation,
             request_id=request.request_id,
             pending_stage="discovery",
-            pause_on_budget=request.provider != "apify",
         ):
             if request.provider == "apify" and checkpoint.status == "running":
                 continue
@@ -489,7 +477,7 @@ def _discovery_phase(
         try:
             batch = provider.search(request)
         except DiscoveryProviderError as exc:
-            _record_usage(lifecycle, exc.usage_event)
+            lifecycle.record_usage(exc.usage_event)
             if request.provider == "apify":
                 apify_entry = _operations(checkpoint)[operation_id]
                 run_id = _entry_str(apify_entry, "run_id")
@@ -508,62 +496,29 @@ def _discovery_phase(
                         stage="discovery",
                     )
                     return checkpoint
-                _finish_operation(
-                    lifecycle,
+                lifecycle.finish(
                     operation_id,
                     state="failed",
                     error_kind=exc.kind,
                 )
                 continue
-            if exc.kind == "transient" and not exc.retryable:
-                lifecycle.pause(
-                    status="paused_unknown",
-                    reason=f"ambiguous_paid_outcome:{operation_id}",
-                    stage="discovery",
-                )
-                return checkpoint
-            state = "pending" if exc.retryable or exc.kind == "budget_exhausted" else "failed"
-            _finish_operation(
-                lifecycle,
-                operation_id,
-                state=state,
-                error_kind=exc.kind,
-            )
-            if exc.kind == "budget_exhausted":
-                lifecycle.pause(
-                    status="paused_budget",
-                    reason="exa_budget_exhausted",
-                    stage="discovery",
-                )
-                return checkpoint
-            if exc.kind in {
-                "authentication",
-                "invalid_request",
-                "invalid_response",
-                "permanent",
-            }:
-                return _pause(
-                    checkpoint,
-                    paths.checkpoint,
-                    status="failed",
-                    reason=f"exa_{exc.kind}",
-                    stage="discovery",
-                )
-            return _pause(
-                checkpoint,
-                paths.checkpoint,
-                status="paused_retryable",
-                reason=f"exa_{exc.kind}",
+            return _handle_required_paid_error(
+                exc=exc,
+                checkpoint=checkpoint,
+                paths=paths,
+                lifecycle=lifecycle,
+                operation_id=operation_id,
+                company_id=None,
                 stage="discovery",
             )
         for event in batch.usage_events:
-            _record_usage(lifecycle, event)
+            lifecycle.record_usage(event)
         _append_discovery_batch(paths, batch.records)
         if request.provider == "apify" and batch.usage_events:
             run_id = batch.usage_events[-1].metadata.get("run_id")
             if isinstance(run_id, str):
                 lifecycle.update_operation(operation_id, fields={"run_id": run_id})
-        _finish_operation(lifecycle, operation_id)
+        lifecycle.finish(operation_id)
 
     pending_apify = [
         operation_id
@@ -573,13 +528,12 @@ def _discovery_phase(
         and isinstance(entry.get("run_id"), str)
     ]
     if pending_apify:
-        return _pause(
-            checkpoint,
-            paths.checkpoint,
+        lifecycle.pause(
             status="paused_retryable",
             reason=f"apify_pending:{pending_apify[0]}",
             stage="discovery",
         )
+        return checkpoint
     _stages(checkpoint)["discovery"] = "completed"
     _persist_checkpoint(paths.checkpoint, checkpoint)
     return None
@@ -667,56 +621,55 @@ def _deepseek_reservation(
     return float(value)
 
 
-def _handle_research_error(
+def _handle_required_paid_error(
     *,
     exc: DiscoveryProviderError,
     checkpoint: RunCheckpoint,
     paths: _RunPaths,
     lifecycle: PaidOperationLifecycle,
     operation_id: str,
-    company_id: str,
+    company_id: str | None,
+    stage: str,
 ) -> RunCheckpoint:
-    """Persist one Exa failure while retaining ambiguous paid work as unresolved."""
-    _record_usage(lifecycle, exc.usage_event)
-    if exc.kind == "transient" and not exc.retryable:
+    """Apply one lifecycle-owned error policy for required paid M2 providers."""
+    lifecycle.record_usage(exc.usage_event)
+    disposition = classify_paid_error(exc.kind, exc.retryable)
+    if disposition == "unknown":
         lifecycle.pause(
             status="paused_unknown",
             reason=f"ambiguous_paid_outcome:{operation_id}",
             company_id=company_id,
-            stage="research",
+            stage=stage,
         )
         return checkpoint
-    state = "pending" if exc.retryable or exc.kind == "budget_exhausted" else "failed"
-    _finish_operation(
-        lifecycle,
-        operation_id,
-        state=state,
-        error_kind=exc.kind,
-    )
-    if exc.kind == "budget_exhausted":
+
+    if disposition in {"budget", "retryable"}:
+        lifecycle.finish(operation_id, state="pending", error_kind=exc.kind)
+    else:
+        lifecycle.finish(operation_id, state="failed", error_kind=exc.kind)
+    if disposition == "budget":
         lifecycle.pause(
             status="paused_budget",
-            reason="exa_budget_exhausted",
+            reason=f"{exc.provider}_budget_exhausted",
             company_id=company_id,
-            stage="research",
+            stage=stage,
         )
         return checkpoint
-    if exc.kind in {"authentication", "invalid_request", "invalid_response", "permanent"}:
-        return _pause(
-            checkpoint,
-            paths.checkpoint,
-            status="failed",
-            reason=f"exa_{exc.kind}",
+    if disposition == "retryable":
+        lifecycle.pause(
+            status="paused_retryable",
+            reason=f"{exc.provider}_{exc.kind}",
             company_id=company_id,
-            stage="research",
+            stage=stage,
         )
+        return checkpoint
     return _pause(
         checkpoint,
         paths.checkpoint,
-        status="paused_retryable",
-        reason=f"exa_{exc.kind}",
+        status="failed",
+        reason=f"{exc.provider}_{exc.kind}",
         company_id=company_id,
-        stage="research",
+        stage=stage,
     )
 
 
@@ -731,6 +684,18 @@ def _research_and_extract_phase(
 ) -> RunCheckpoint | None:
     """Research and extract selected companies in order under independent budgets."""
     selected = select_research_companies(companies, limit=config.max_extracted)
+    exa_admission = PaidAdmissionPolicy(
+        provider="exa",
+        ceiling=config.exa_budget_usd,
+        budget_reason="exa_budget_exhausted",
+        usage_unknown_reason="exa_usage_unknown",
+    )
+    deepseek_admission = PaidAdmissionPolicy(
+        provider="deepseek",
+        ceiling=config.deepseek_budget_usd,
+        budget_reason="deepseek_budget_exhausted",
+        usage_unknown_reason="deepseek_usage_unknown",
+    )
     completed_count = 0
     for selected_company in selected:
         company = _latest_company(selected_company, paths)
@@ -772,12 +737,9 @@ def _research_and_extract_phase(
             ) if completed_queries < len(research_requests) else 0.0
             if not lifecycle.admit(
                 research_op,
-                provider="exa",
                 operation="company_research",
-                ceiling=config.exa_budget_usd,
+                policy=exa_admission,
                 reservation_usd=next_reservation,
-                budget_reason="exa_budget_exhausted",
-                usage_unknown_reason="exa_usage_unknown",
                 company_id=company.company_id,
                 fields={"successful_calls": completed_queries},
                 pending_stage="research",
@@ -799,7 +761,7 @@ def _research_and_extract_phase(
                 if delta.company_id != company.company_id:
                     raise ValueError("research progress bundle company_id mismatch")
                 for event in delta.usage_events:
-                    _record_usage(lifecycle, event)
+                    lifecycle.record_usage(event)
                 _append_research_raw(paths, delta.raw_records)
                 cumulative_items.extend(deepcopy(delta.items))
                 cumulative = build_evidence_bundle(
@@ -828,11 +790,8 @@ def _research_and_extract_phase(
                 if budget_checked and has_next_query:
                     if not lifecycle.reserve_continuation(
                         operation_key,
-                        provider="exa",
-                        ceiling=config.exa_budget_usd,
+                        policy=exa_admission,
                         reservation_usd=next_cost,
-                        budget_reason="exa_budget_exhausted",
-                        usage_unknown_reason="exa_usage_unknown",
                         fields={"successful_calls": calls},
                         company_id=company.company_id,
                         stage="research",
@@ -861,17 +820,18 @@ def _research_and_extract_phase(
             except _ResearchBudgetPause:
                 return checkpoint
             except DiscoveryProviderError as exc:
-                return _handle_research_error(
+                return _handle_required_paid_error(
                     exc=exc,
                     checkpoint=checkpoint,
                     paths=paths,
                     lifecycle=lifecycle,
                     operation_id=research_op,
                     company_id=company.company_id,
+                    stage="research",
                 )
             if not progress_supported:
                 for event in bundle.usage_events:
-                    _record_usage(lifecycle, event)
+                    lifecycle.record_usage(event)
                 _append_research_raw(paths, bundle.raw_records)
             else:
                 bundle = build_evidence_bundle(
@@ -886,7 +846,7 @@ def _research_and_extract_phase(
                 bundle,
                 completed=True,
             )
-            _finish_operation(lifecycle, research_op)
+            lifecycle.finish(research_op)
         else:
             bundle = EvidenceBundle(
                 company_id=company.company_id,
@@ -916,12 +876,9 @@ def _research_and_extract_phase(
         reservation = _deepseek_reservation(extractor, company, bundle)
         if not lifecycle.admit(
             extraction_op,
-            provider="deepseek",
             operation="structured_extraction",
-            ceiling=config.deepseek_budget_usd,
+            policy=deepseek_admission,
             reservation_usd=reservation,
-            budget_reason="deepseek_budget_exhausted",
-            usage_unknown_reason="deepseek_usage_unknown",
             company_id=company.company_id,
             pending_stage="extraction",
         ):
@@ -929,56 +886,19 @@ def _research_and_extract_phase(
         try:
             result = extractor.extract(company, bundle)
         except DiscoveryProviderError as exc:
-            _record_usage(lifecycle, exc.usage_event)
-            if exc.kind == "transient" and not exc.retryable:
-                lifecycle.pause(
-                    status="paused_unknown",
-                    reason=f"ambiguous_paid_outcome:{extraction_op}",
-                    company_id=company.company_id,
-                    stage="extraction",
-                )
-                return checkpoint
-            state = "pending" if exc.retryable or exc.kind == "budget_exhausted" else "failed"
-            _finish_operation(
-                lifecycle,
-                extraction_op,
-                state=state,
-                error_kind=exc.kind,
-            )
-            if exc.kind == "budget_exhausted":
-                lifecycle.pause(
-                    status="paused_budget",
-                    reason="deepseek_budget_exhausted",
-                    company_id=company.company_id,
-                    stage="extraction",
-                )
-                return checkpoint
-            if exc.kind in {
-                "authentication",
-                "invalid_request",
-                "invalid_response",
-                "permanent",
-            }:
-                return _pause(
-                    checkpoint,
-                    paths.checkpoint,
-                    status="failed",
-                    reason=f"deepseek_{exc.kind}",
-                    company_id=company.company_id,
-                    stage="extraction",
-                )
-            return _pause(
-                checkpoint,
-                paths.checkpoint,
-                status="paused_retryable",
-                reason=f"deepseek_{exc.kind}",
+            return _handle_required_paid_error(
+                exc=exc,
+                checkpoint=checkpoint,
+                paths=paths,
+                lifecycle=lifecycle,
+                operation_id=extraction_op,
                 company_id=company.company_id,
                 stage="extraction",
             )
-        _record_usage(lifecycle, result.usage_event)
+        lifecycle.record_usage(result.usage_event)
         company = apply_extraction(company, bundle, result)
         append_company_snapshot(paths.companies_extracted, company)
-        _finish_operation(lifecycle, extraction_op)
+        lifecycle.finish(extraction_op)
         completed_count += 1
         if completed_count >= config.max_extracted:
             break
@@ -1120,7 +1040,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if config.include_apify and not apify_token:
         config = replace(config, include_apify=False)
 
-    with httpx.Client(timeout=httpx.Timeout(30.0, connect=5.0)) as client:
+    with httpx.Client() as client:
         discovery: dict[str, DiscoveryProvider] = {
             "exa": ExaDiscoveryProvider(api_key=exa_key, client=client),
         }
