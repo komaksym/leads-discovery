@@ -135,7 +135,7 @@ class DeepSeekExtractor:
         return self._single_reservation_cost_usd(company, bundle) * _MAX_ATTEMPTS
 
     def extract(self, company: CompanyRecord, bundle: EvidenceBundle) -> ExtractionResult:
-        """Execute up to three safe attempts and strictly validate the complete fact schema."""
+        """Retry only safe dispatch failures; any received 2xx response is terminal."""
         if bundle.company_id != company.company_id:
             raise ValueError("evidence bundle company_id must match company")
         if not bundle.items:
@@ -207,12 +207,8 @@ class DeepSeekExtractor:
             try:
                 payload = json.loads(body_bytes)
             except (json.JSONDecodeError, UnicodeDecodeError):
-                if attempt < _MAX_ATTEMPTS:
-                    continue
                 raise self._invalid(company.company_id, status_code, attempt) from None
             if not isinstance(payload, dict):
-                if attempt < _MAX_ATTEMPTS:
-                    continue
                 raise self._invalid(company.company_id, status_code, attempt) from None
             try:
                 result = self._parse_result(
@@ -222,8 +218,6 @@ class DeepSeekExtractor:
                     status_code,
                 )
             except DiscoveryProviderError as exc:
-                if exc.kind == "invalid_response" and attempt < _MAX_ATTEMPTS:
-                    continue
                 if exc.kind == "invalid_response":
                     raise self._invalid(company.company_id, status_code, attempt) from None
                 raise
