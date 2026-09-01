@@ -32,7 +32,6 @@ from leads_discovery.models import (
     DiscoveryRequest,
     EvidenceBundle,
     RunCheckpoint,
-    UsageEvent,
 )
 from leads_discovery.pipeline.costs import CostTracker
 from leads_discovery.pipeline.paid_operations import (
