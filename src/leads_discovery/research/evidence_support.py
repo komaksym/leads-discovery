@@ -1,4 +1,4 @@
-"""Deterministic evidence support for extracted candidate facts."""
+"Deterministic evidence support for extracted candidate facts."
 
 from __future__ import annotations
 
@@ -8,19 +8,59 @@ from typing import Final
 
 from leads_discovery.models import EvidenceBundle, ExtractedFact
 
-_NEGATION: Final[re.Pattern[str]] = re.compile(
-    r"\b(?:no|not|none|never|without|does\s+not|doesn't|don't|isn't|aren't|lacks?|lacking)\b",
-    re.IGNORECASE,
-)
 _CLAUSE_BOUNDARY: Final[re.Pattern[str]] = re.compile(
-    r"(?:[.!?;:\n]+|\b(?:but|however|whereas|while|yet)\b)",
+    r"(?:[.!?;\n]+|\b(?:but|however|whereas|while|yet)\b)",
     re.IGNORECASE,
 )
 _WORD: Final[re.Pattern[str]] = re.compile(r"[A-Za-z0-9']+")
+_DIRECT_CONCEPT_NEGATION: Final[re.Pattern[str]] = re.compile(
+    r"(?:\bno\b|\bwithout\b|\bnot\b)\s+"
+    r"(?:(?:a|an|any|the|our|their|its)\s+)?$",
+    re.IGNORECASE,
+)
+_NEGATED_EXISTENCE: Final[re.Pattern[str]] = re.compile(
+    r"(?:\b(?:do|does|did)\s+not|\b(?:don't|doesn't|didn't)|\bnever)\s+"
+    r"(?:have|offer|provide|employ|operate|run|use|maintain)\s+"
+    r"(?:(?:a|an|any|the|our|their|its)\s+)?$",
+    re.IGNORECASE,
+)
+_NEGATED_RELATION_PREFIX: Final[re.Pattern[str]] = re.compile(
+    r"(?:"
+    r"\b(?:do|does|did)\s+not|"
+    r"\b(?:don't|doesn't|didn't)|"
+    r"\bnever|"
+    r"\b(?:is|are|was|were)\s+not|"
+    r"\b(?:isn't|aren't|wasn't|weren't)"
+    r")\s+"
+    r"(?:(?:currently|actively|directly|typically|normally)\s+)?$",
+    re.IGNORECASE,
+)
+_NO_RELATION_PREFIX: Final[re.Pattern[str]] = re.compile(
+    r"(?:\bno\b|\bwithout\b)\s+$",
+    re.IGNORECASE,
+)
+_NEGATED_PREDICATE_PREFIX: Final[re.Pattern[str]] = re.compile(
+    r"(?:\b(?:do|does|did)\s+not|\b(?:don't|doesn't|didn't)|\bnever)\s+"
+    r"(?:[a-z][a-z'-]*\s+){1,3}$",
+    re.IGNORECASE,
+)
+_PVF_OBJECT_BRIDGE: Final[re.Pattern[str]] = re.compile(
+    r"^\s*(?:(?:a|an|any|the|industrial|process|pvf|carbon|stainless|steel)\s+)*"
+    r"(?:of\s+)?$",
+    re.IGNORECASE,
+)
+_ATTRIBUTE_BINDER: Final[re.Pattern[str]] = re.compile(
+    r"^\s*(?:"
+    r"[,=/\-–—:]\s*|"
+    r"\b(?:count|number|total|value|level|breadth|of|is|are|was|were|"
+    r"equals?|include|includes|including|comprise|comprises|comprising)\b\s*"
+    r")*$",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True, slots=True)
-class PropositionSpec:
+class _PropositionSpec:
     """Describe the observable evidence vocabulary for one canonical fact."""
 
     concepts: tuple[str, ...]
@@ -51,50 +91,54 @@ _PVF_RELATIONS: Final[tuple[str, ...]] = (
     "stocks",
 )
 
-_SPECS: Final[dict[str, PropositionSpec]] = {
-    "pvf_relevant": PropositionSpec(
+_SPECS: Final[dict[str, _PropositionSpec]] = {
+    "pvf_relevant": _PropositionSpec(
         ("pvf", "pipe", "piping", "valve", "valves", "fitting", "fittings"),
         _PVF_RELATIONS,
     ),
-    "pvf_product_breadth": PropositionSpec(("pvf", "pipe", "valve", "fitting", "product")),
-    "industrial_or_process_customer_focus": PropositionSpec(
+    "pvf_product_breadth": _PropositionSpec(
+        ("pvf", "pipe", "valve", "fitting", "product")
+    ),
+    "industrial_or_process_customer_focus": _PropositionSpec(
         ("industrial", "process", "customer", "facility")
     ),
-    "branch_count": PropositionSpec(("branch", "branches", "location", "locations")),
-    "inside_sales_or_estimating_presence": PropositionSpec(
+    "branch_count": _PropositionSpec(("branch", "branches", "location", "locations")),
+    "inside_sales_or_estimating_presence": _PropositionSpec(
         ("inside sales", "estimating", "estimator", "estimators")
     ),
-    "rfq_or_quote_workflow_evidence": PropositionSpec(
+    "rfq_or_quote_workflow_evidence": _PropositionSpec(
         ("rfq", "request for quote", "quote", "quotation")
     ),
-    "project_or_tender_business": PropositionSpec(("project", "tender", "bid")),
-    "bom_or_line_item_complexity": PropositionSpec(
+    "project_or_tender_business": _PropositionSpec(("project", "tender", "bid")),
+    "bom_or_line_item_complexity": _PropositionSpec(
         ("bom", "bill of materials", "line item", "line items")
     ),
-    "manufacturer_count_or_breadth": PropositionSpec(
+    "manufacturer_count_or_breadth": _PropositionSpec(
         ("manufacturer", "manufacturers", "brand", "brands", "line card")
     ),
-    "relevant_hiring": PropositionSpec(("hiring", "job", "jobs", "career", "careers")),
-    "employee_count": PropositionSpec(("employee", "employees", "staff", "headcount")),
-    "revenue_if_reliably_available": PropositionSpec(("revenue", "sales")),
-    "regional_independent_signal": PropositionSpec(("regional", "independent")),
-    "multi_location_signal": PropositionSpec(("location", "locations", "branch", "branches")),
-    "known_current_direct_competitor_customer": PropositionSpec(
+    "relevant_hiring": _PropositionSpec(("hiring", "job", "jobs", "career", "careers")),
+    "employee_count": _PropositionSpec(("employee", "employees", "staff", "headcount")),
+    "revenue_if_reliably_available": _PropositionSpec(("revenue", "sales")),
+    "regional_independent_signal": _PropositionSpec(("regional", "independent")),
+    "multi_location_signal": _PropositionSpec(
+        ("location", "locations", "branch", "branches")
+    ),
+    "known_current_direct_competitor_customer": _PropositionSpec(
         ("competitor", "customer", "customers")
     ),
-    "known_competitor_evaluation_history": PropositionSpec(
+    "known_competitor_evaluation_history": _PropositionSpec(
         ("competitor", "evaluation", "evaluated", "pilot")
     ),
-    "known_quote_automation_or_order_automation_relationship": PropositionSpec(
+    "known_quote_automation_or_order_automation_relationship": _PropositionSpec(
         ("quote automation", "order automation", "automation")
     ),
-    "direct_quotation_pain_evidence": PropositionSpec(
+    "direct_quotation_pain_evidence": _PropositionSpec(
         ("quote", "quotation", "rfq", "delay", "manual")
     ),
-    "manual_workflow_evidence": PropositionSpec(
+    "manual_workflow_evidence": _PropositionSpec(
         ("manual", "spreadsheet", "email", "workflow")
     ),
-    "explicit_process_bottleneck_evidence": PropositionSpec(
+    "explicit_process_bottleneck_evidence": _PropositionSpec(
         ("bottleneck", "delay", "slow", "backlog", "process")
     ),
 }
@@ -112,60 +156,135 @@ def _matches(clause: str, phrases: tuple[str, ...]) -> tuple[re.Match[str], ...]
     return tuple(sorted(matches, key=lambda item: item.start()))
 
 
-def _word_distance(text: str, start: int, end: int) -> int:
-    left, right = sorted((start, end))
-    return len(_WORD.findall(text[left:right]))
+def _concept_is_negated(clause: str, concept: re.Match[str]) -> bool:
+    prefix = clause[: concept.start()]
+    return (
+        _DIRECT_CONCEPT_NEGATION.search(prefix) is not None
+        or _NEGATED_EXISTENCE.search(prefix) is not None
+    )
 
 
-def _locally_negated(clause: str, concepts: tuple[str, ...]) -> bool:
-    concept_matches = _matches(clause, concepts)
-    if not concept_matches:
-        return False
-    for negation in _NEGATION.finditer(clause):
-        for concept in concept_matches:
-            if _word_distance(clause, negation.end(), concept.start()) <= 6:
-                return True
+def _target_is_under_negated_predicate(clause: str, target: re.Match[str]) -> bool:
+    prefix = clause[: target.start()]
+    return (
+        _concept_is_negated(clause, target)
+        or _NEGATED_PREDICATE_PREFIX.search(prefix) is not None
+    )
+
+
+def _relation_is_directly_negated(clause: str, relation: re.Match[str]) -> bool:
+    prefix = clause[: relation.start()]
+    return (
+        _NEGATED_RELATION_PREFIX.search(prefix) is not None
+        or _NO_RELATION_PREFIX.search(prefix) is not None
+    )
+
+
+def _relation_is_negated(
+    clause: str,
+    relation: re.Match[str],
+    relations: tuple[re.Match[str], ...],
+) -> bool:
+    if _relation_is_directly_negated(clause, relation):
+        return True
+    for previous in relations:
+        if previous.start() >= relation.start():
+            break
+        if not _relation_is_directly_negated(clause, previous):
+            continue
+        bridge = clause[previous.end() : relation.start()]
+        if re.fullmatch(r"\s*,?\s*(?:or|nor)\s+", bridge, re.IGNORECASE):
+            return True
     return False
 
 
-def _supports_pvf_boolean(clause: str, value: bool, spec: PropositionSpec) -> bool:
-    targets = _matches(clause, spec.concepts)
-    if not targets:
-        return False
-    if value:
-        return not _locally_negated(clause, spec.concepts)
+def _relation_target_pairs(
+    clause: str,
+    spec: _PropositionSpec,
+) -> tuple[
+    tuple[re.Match[str], ...],
+    tuple[re.Match[str], ...],
+    tuple[tuple[re.Match[str], re.Match[str]], ...],
+]:
     relations = _matches(clause, spec.relations)
-    if not relations:
-        return False
-    for negation in _NEGATION.finditer(clause):
-        for relation in relations:
-            if relation.start() < negation.end():
-                continue
-            if _word_distance(clause, negation.end(), relation.start()) > 5:
-                continue
-            for target in targets:
-                if target.start() < relation.end():
-                    continue
-                if _word_distance(clause, relation.end(), target.start()) <= 6:
-                    return True
-    return False
+    targets = _matches(clause, spec.concepts)
+    pairs: list[tuple[re.Match[str], re.Match[str]]] = []
+    for target in targets:
+        preceding = [relation for relation in relations if relation.end() <= target.start()]
+        if not preceding:
+            continue
+        relation = preceding[-1]
+        bridge = clause[relation.end() : target.start()]
+        if _PVF_OBJECT_BRIDGE.fullmatch(bridge):
+            pairs.append((relation, target))
+    return relations, targets, tuple(pairs)
 
 
-def _value_is_stated(clause: str, value: object) -> bool:
+def _supports_positive_pvf_clause(clause: str, spec: _PropositionSpec) -> bool:
+    relations, targets, pairs = _relation_target_pairs(clause, spec)
+    if relations:
+        return any(
+            not _relation_is_negated(clause, relation, relations)
+            for relation, _target in pairs
+        )
+    return any(
+        not _target_is_under_negated_predicate(clause, target) for target in targets
+    )
+
+
+def _supports_negative_pvf_clause(clause: str, spec: _PropositionSpec) -> bool:
+    relations, _targets, pairs = _relation_target_pairs(clause, spec)
+    return any(
+        _relation_is_negated(clause, relation, relations)
+        for relation, _target in pairs
+    )
+
+
+def _value_matches(clause: str, value: object) -> tuple[re.Match[str], ...]:
     if isinstance(value, bool) or value is None:
-        return False
+        return ()
     if isinstance(value, (int, float)):
         rendered = format(value, "g")
-        return re.search(rf"(?<![\w.]){re.escape(rendered)}(?![\w.])", clause) is not None
+        pattern = re.compile(rf"(?<![\w.]){re.escape(rendered)}(?![\w.])")
+        return tuple(pattern.finditer(clause))
     if isinstance(value, str):
-        return _phrase_pattern(value.strip()).search(clause) is not None if value.strip() else False
+        if not value.strip():
+            return ()
+        return tuple(_phrase_pattern(value.strip()).finditer(clause))
     if isinstance(value, list):
-        return bool(value) and all(
-            isinstance(item, str)
-            and bool(item.strip())
-            and _phrase_pattern(item.strip()).search(clause) is not None
-            for item in value
-        )
+        if not value or any(
+            not isinstance(item, str) or not item.strip() for item in value
+        ):
+            return ()
+        all_matches: list[re.Match[str]] = []
+        for item in value:
+            matches = tuple(_phrase_pattern(item.strip()).finditer(clause))
+            if not matches:
+                return ()
+            all_matches.append(matches[0])
+        return tuple(sorted(all_matches, key=lambda item: item.start()))
+    return ()
+
+
+def _value_binds_to_concept(
+    clause: str,
+    value: object,
+    spec: _PropositionSpec,
+) -> bool:
+    concepts = _matches(clause, spec.concepts)
+    values = _value_matches(clause, value)
+    if not concepts or not values:
+        return False
+    for concept in concepts:
+        for value_match in values:
+            if value_match.end() <= concept.start():
+                bridge = clause[value_match.end() : concept.start()]
+                if not _WORD.search(bridge):
+                    return True
+            elif concept.end() <= value_match.start():
+                bridge = clause[concept.end() : value_match.start()]
+                if _ATTRIBUTE_BINDER.fullmatch(bridge):
+                    return True
     return False
 
 
@@ -175,14 +294,17 @@ def _supports_clause(key: str, fact: ExtractedFact, clause: str) -> bool:
         return False
     value = fact.value
     if key == "pvf_relevant" and isinstance(value, bool):
-        return _supports_pvf_boolean(clause, value, spec)
-    concepts_present = bool(_matches(clause, spec.concepts))
-    if not concepts_present:
+        if value:
+            return _supports_positive_pvf_clause(clause, spec)
+        return _supports_negative_pvf_clause(clause, spec)
+    concepts = _matches(clause, spec.concepts)
+    if not concepts:
         return False
     if isinstance(value, bool):
-        negated = _locally_negated(clause, spec.concepts)
-        return negated if value is False else not negated
-    return _value_is_stated(clause, value)
+        if value:
+            return any(not _concept_is_negated(clause, concept) for concept in concepts)
+        return any(_concept_is_negated(clause, concept) for concept in concepts)
+    return _value_binds_to_concept(clause, value, spec)
 
 
 def evidence_supports(key: str, fact: ExtractedFact, bundle: EvidenceBundle) -> bool:
@@ -192,6 +314,9 @@ def evidence_supports(key: str, fact: ExtractedFact, bundle: EvidenceBundle) -> 
     cited = set(fact.evidence_ids)
     if not cited:
         return False
+
+    support_found = False
+    pvf_negative = key == "pvf_relevant" and fact.value is False
     for item in bundle.items:
         if item.evidence_id not in cited:
             continue
@@ -199,9 +324,16 @@ def evidence_supports(key: str, fact: ExtractedFact, bundle: EvidenceBundle) -> 
             if not text:
                 continue
             for clause in _CLAUSE_BOUNDARY.split(text):
-                if _supports_clause(key, fact, clause.casefold()):
+                normalized = clause.casefold()
+                if pvf_negative:
+                    spec = _SPECS["pvf_relevant"]
+                    if _supports_positive_pvf_clause(normalized, spec):
+                        return False
+                    if _supports_negative_pvf_clause(normalized, spec):
+                        support_found = True
+                elif _supports_clause(key, fact, normalized):
                     return True
-    return False
+    return support_found
 
 
 def canonicalize_supported_fact(
@@ -209,10 +341,10 @@ def canonicalize_supported_fact(
     fact: ExtractedFact,
     bundle: EvidenceBundle,
 ) -> ExtractedFact:
-    """Convert unsupported non-null candidate facts to the repository's canonical unknown."""
+    """Convert unsupported non-null candidate facts to the canonical unknown."""
     if evidence_supports(key, fact, bundle):
         return fact
     return ExtractedFact(value=None, confidence=0.0, evidence_ids=[])
 
 
-__all__ = ["PropositionSpec", "canonicalize_supported_fact", "evidence_supports"]
+__all__ = ["canonicalize_supported_fact", "evidence_supports"]
