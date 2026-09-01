@@ -274,18 +274,12 @@ class ApifyDiscoveryProvider:
         )
         status_code = dataset_response.status_code
         if not 200 <= status_code < 300:
-            dataset_response.close()
-            kind, retryable = classify_http_status(status_code)
-            raise provider_error(
-                provider="apify",
-                request_id=request.request_id,
-                operation="google_maps_search",
-                request_count=request_count,
-                kind=kind,
-                retryable=retryable,
-                status_code=status_code,
+            _raise_http_failure(
+                dataset_response,
+                request,
+                request_count,
                 metadata={"request_id": request.request_id, "run_id": run_id},
-            ) from None
+            )
         try:
             raw_rows = json.loads(read_bounded_response(dataset_response))
         except (ResponseReadError, ResponseTooLargeError, json.JSONDecodeError, UnicodeDecodeError):
