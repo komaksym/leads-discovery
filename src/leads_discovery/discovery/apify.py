@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import math
 import time
 from collections.abc import Callable
@@ -11,13 +10,9 @@ from typing import Any, cast
 import httpx
 
 from leads_discovery.discovery.base import (
-    ResponseReadError,
-    ResponseTooLargeError,
-    classify_http_status,
+    ProviderRequestContext,
     provider_error,
-    read_bounded_response,
-    request_json,
-    safe_transport_call,
+    request_json_at_boundary,
     stable_raw_record_id,
     utc_timestamp,
     validate_common_request,
