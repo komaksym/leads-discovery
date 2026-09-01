@@ -11,15 +11,16 @@ import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Final, cast
+from typing import Any, Final, Protocol, cast
 
 from leads_discovery.contacts.models import ContactRecord
 from leads_discovery.contacts.providers import (
-    ApolloContactProvider,
-    ClayContactProvider,
+    ApolloResult,
+    ClayResults,
+    ClayStartResult,
     ContactProviderError,
-    ExaPeopleProvider,
-    InstantlyVerificationProvider,
+    ExaPeopleResult,
+    VerificationResult,
     clay_item_email,
 )
 from leads_discovery.contacts.selection import (
@@ -79,6 +80,46 @@ _CSV_COLUMNS: Final[tuple[str, ...]] = (
     "profile_url",
     "email_source",
 )
+
+
+class _ExaPeopleProvider(Protocol):
+    """Define the Exa behavior required by the enrichment pipeline."""
+
+    def search(self, company: CompanyRecord) -> ExaPeopleResult:
+        """Search people for one accepted company."""
+        ...
+
+
+class _ClayContactProvider(Protocol):
+    """Define the Clay behavior required by the enrichment pipeline."""
+
+    def start(self, contacts: list[ContactRecord]) -> ClayStartResult:
+        """Start one bounded work-email enrichment batch."""
+        ...
+
+    def results(self, routine_run_id: str) -> ClayResults:
+        """Read one work-email enrichment batch."""
+        ...
+
+
+class _ApolloContactProvider(Protocol):
+    """Define the Apollo behavior required by the enrichment pipeline."""
+
+    def enrich(self, contact: ContactRecord) -> ApolloResult:
+        """Enrich one retained contact."""
+        ...
+
+
+class _InstantlyVerificationProvider(Protocol):
+    """Define the Instantly behavior required by the enrichment pipeline."""
+
+    def create(self, email: str) -> VerificationResult:
+        """Create one email-verification request."""
+        ...
+
+    def get(self, email: str) -> VerificationResult:
+        """Read one email-verification request."""
+        ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -856,10 +897,10 @@ def _reset_for_current_m3(
 def run_contact_enrichment(
     config: ContactEnrichmentConfig,
     *,
-    exa: ExaPeopleProvider,
-    clay: ClayContactProvider,
-    apollo: ApolloContactProvider,
-    instantly: InstantlyVerificationProvider,
+    exa: _ExaPeopleProvider,
+    clay: _ClayContactProvider,
+    apollo: _ApolloContactProvider,
+    instantly: _InstantlyVerificationProvider,
 ) -> ContactEnrichmentSummary:
     """Run or safely resume the artifact-only M4 contact-enrichment stage."""
     if not config.execute_live:
