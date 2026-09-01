@@ -257,16 +257,7 @@ def _relation_is_negated(
         )
     if not coordinated:
         return False
-    previous_matches = _RelationMatches(
-        relations=matches.relations[:relation_index],
-        targets=matches.targets,
-        pairs=tuple(
-            pair
-            for pair in matches.pairs
-            if any(_same_match(pair[0], candidate) for candidate in matches.relations[:relation_index])
-        ),
-    )
-    return _relation_is_negated(clause, previous, previous_matches)
+    return _relation_is_negated(clause, previous, matches)
 
 
 def _relation_concept_pairs(
