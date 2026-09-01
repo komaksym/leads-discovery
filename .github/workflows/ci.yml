@@ -7,6 +7,9 @@ on:
       - "feat/**"
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   validate:
     runs-on: ubuntu-latest
@@ -28,3 +31,21 @@ jobs:
         run: pytest
       - name: Build
         run: python -m build
+      - name: Offline dry run
+        run: python -m leads_discovery run --run-id ci-dry --deepseek-budget-usd 0.01
+      - name: Validate production workflow safety
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          text = Path(".github/workflows/generate-leads.yml").read_text(encoding="utf-8")
+          trigger = text.split("permissions:", 1)[0]
+          assert "workflow_dispatch:" in trigger
+          assert "push:" not in trigger
+          assert "pull_request:" not in trigger
+          assert "schedule:" not in trigger
+          assert "inputs:" not in trigger
+          assert "runs-on: ubuntu-latest" in text
+          assert "actions/upload-artifact" not in text
+          assert "python -m leads_discovery.production_canary" in text
+          assert "generated-leads" in text
+          PY

@@ -20,6 +20,7 @@ from leads_discovery.discovery.base import (
 from leads_discovery.models import DiscoveryBatch, DiscoveryRecord, DiscoveryRequest, UsageEvent
 
 _EXA_SEARCH_URL = "https://api.exa.ai/search"
+_REQUEST_TIMEOUT = httpx.Timeout(30.0, connect=5.0)
 
 
 class ExaDiscoveryProvider:
@@ -58,19 +59,24 @@ class ExaDiscoveryProvider:
             "userLocation": request.target_country_code,
             "contents": {"highlights": True},
         }
+        http_request = self._client.build_request(
+            "POST",
+            _EXA_SEARCH_URL,
+            headers={"x-api-key": self._api_key},
+            json=body,
+            timeout=_REQUEST_TIMEOUT,
+        )
         response = safe_transport_call(
-            lambda: self._client.post(
-                _EXA_SEARCH_URL,
-                headers={"x-api-key": self._api_key},
-                json=body,
-            ),
+            lambda: self._client.send(http_request, stream=True),
             provider="exa",
             request_id=request.request_id,
             operation="company_search",
             request_count=1,
         )
         if not 200 <= response.status_code < 300:
-            kind, retryable = classify_http_status(response.status_code)
+            status_code = response.status_code
+            response.close()
+            kind, retryable = classify_http_status(status_code)
             raise provider_error(
                 provider="exa",
                 request_id=request.request_id,
@@ -78,7 +84,7 @@ class ExaDiscoveryProvider:
                 request_count=1,
                 kind=kind,
                 retryable=retryable,
-                status_code=response.status_code,
+                status_code=status_code,
             ) from None
 
         payload = request_json(

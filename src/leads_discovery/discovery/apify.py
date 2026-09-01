@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 import time
 from collections.abc import Callable
@@ -10,8 +11,10 @@ from typing import Any, cast
 import httpx
 
 from leads_discovery.discovery.base import (
+    ResponseTooLargeError,
     classify_http_status,
     provider_error,
+    read_bounded_response,
     request_json,
     safe_transport_call,
     stable_raw_record_id,
@@ -26,6 +29,8 @@ _RUN_URL = "https://api.apify.com/v2/actor-runs/{run_id}"
 _DATASET_URL = "https://api.apify.com/v2/datasets/{dataset_id}/items"
 _NONTERMINAL = {"READY", "RUNNING"}
 _TERMINAL_ERROR = {"FAILED", "TIMED-OUT", "ABORTED"}
+_CONTROL_TIMEOUT = httpx.Timeout(15.0, connect=5.0)
+_DATASET_TIMEOUT = httpx.Timeout(30.0, connect=5.0)
 
 
 class ApifyDiscoveryProvider:
@@ -50,27 +55,32 @@ class ApifyDiscoveryProvider:
         self._on_run_started = on_run_started
 
     def search(self, request: DiscoveryRequest) -> DiscoveryBatch:
-        """Start one capped Actor run and poll/fetch only that run."""
+        """Start one capped Actor run, persist its ID immediately, then poll/fetch it."""
         self._validate(request)
         body = self._actor_input(request)
+        http_request = self._client.build_request(
+            "POST",
+            _START_URL,
+            headers={"Authorization": f"Bearer {self._api_token}"},
+            params={
+                "waitForFinish": 0,
+                "maxItems": request.max_results_total,
+                "maxTotalChargeUsd": request.max_cost_usd,
+            },
+            json=body,
+            timeout=_CONTROL_TIMEOUT,
+        )
         response = safe_transport_call(
-            lambda: self._client.post(
-                _START_URL,
-                headers={"Authorization": f"Bearer {self._api_token}"},
-                params={
-                    "waitForFinish": 60,
-                    "maxItems": request.max_results_total,
-                    "maxTotalChargeUsd": request.max_cost_usd,
-                },
-                json=body,
-            ),
+            lambda: self._client.send(http_request, stream=True),
             provider="apify",
             request_id=request.request_id,
             operation="google_maps_search",
             request_count=1,
         )
         if not 200 <= response.status_code < 300:
-            kind, retryable = classify_http_status(response.status_code)
+            status_code = response.status_code
+            response.close()
+            kind, retryable = classify_http_status(status_code)
             raise provider_error(
                 provider="apify",
                 request_id=request.request_id,
@@ -78,7 +88,7 @@ class ApifyDiscoveryProvider:
                 request_count=1,
                 kind=kind,
                 retryable=retryable,
-                status_code=response.status_code,
+                status_code=status_code,
             ) from None
         payload = request_json(
             response,
@@ -188,10 +198,15 @@ class ApifyDiscoveryProvider:
                         },
                     ) from None
                 request_count += 1
+                http_request = self._client.build_request(
+                    "GET",
+                    _RUN_URL.format(run_id=run_id),
+                    headers={"Authorization": f"Bearer {self._api_token}"},
+                    timeout=_CONTROL_TIMEOUT,
+                )
                 response = safe_transport_call(
-                    lambda: self._client.get(
-                        _RUN_URL.format(run_id=run_id),
-                        headers={"Authorization": f"Bearer {self._api_token}"},
+                    lambda http_request=http_request: self._client.send(
+                        http_request, stream=True
                     ),
                     provider="apify",
                     request_id=request.request_id,
@@ -199,7 +214,9 @@ class ApifyDiscoveryProvider:
                     request_count=request_count,
                 )
                 if not 200 <= response.status_code < 300:
-                    kind, retryable = classify_http_status(response.status_code)
+                    status_code = response.status_code
+                    response.close()
+                    kind, retryable = classify_http_status(status_code)
                     raise provider_error(
                         provider="apify",
                         request_id=request.request_id,
@@ -207,7 +224,7 @@ class ApifyDiscoveryProvider:
                         request_count=request_count,
                         kind=kind,
                         retryable=retryable,
-                        status_code=response.status_code,
+                        status_code=status_code,
                         metadata={"request_id": request.request_id, "run_id": run_id},
                     ) from None
                 payload = request_json(
@@ -258,19 +275,24 @@ class ApifyDiscoveryProvider:
 
         dataset_id = _required_str(data.get("defaultDatasetId"), request, request_count)
         request_count += 1
+        http_request = self._client.build_request(
+            "GET",
+            _DATASET_URL.format(dataset_id=dataset_id),
+            headers={"Authorization": f"Bearer {self._api_token}"},
+            params={"clean": "true"},
+            timeout=_DATASET_TIMEOUT,
+        )
         dataset_response = safe_transport_call(
-            lambda: self._client.get(
-                _DATASET_URL.format(dataset_id=dataset_id),
-                headers={"Authorization": f"Bearer {self._api_token}"},
-                params={"clean": "true"},
-            ),
+            lambda: self._client.send(http_request, stream=True),
             provider="apify",
             request_id=request.request_id,
             operation="google_maps_search",
             request_count=request_count,
         )
-        if not 200 <= dataset_response.status_code < 300:
-            kind, retryable = classify_http_status(dataset_response.status_code)
+        status_code = dataset_response.status_code
+        if not 200 <= status_code < 300:
+            dataset_response.close()
+            kind, retryable = classify_http_status(status_code)
             raise provider_error(
                 provider="apify",
                 request_id=request.request_id,
@@ -278,12 +300,27 @@ class ApifyDiscoveryProvider:
                 request_count=request_count,
                 kind=kind,
                 retryable=retryable,
-                status_code=dataset_response.status_code,
+                status_code=status_code,
                 metadata={"request_id": request.request_id, "run_id": run_id},
             ) from None
         try:
-            raw_rows = dataset_response.json()
-        except Exception:
+            raw_rows = json.loads(read_bounded_response(dataset_response))
+        except httpx.HTTPError:
+            raise provider_error(
+                provider="apify",
+                request_id=request.request_id,
+                operation="google_maps_search",
+                request_count=request_count,
+                kind="transient",
+                retryable=False,
+                status_code=status_code,
+                metadata={
+                    "request_id": request.request_id,
+                    "run_id": run_id,
+                    "outcome_unknown": True,
+                },
+            ) from None
+        except (ResponseTooLargeError, json.JSONDecodeError, UnicodeDecodeError):
             raise provider_error(
                 provider="apify",
                 request_id=request.request_id,
@@ -291,7 +328,7 @@ class ApifyDiscoveryProvider:
                 request_count=request_count,
                 kind="invalid_response",
                 retryable=False,
-                status_code=dataset_response.status_code,
+                status_code=status_code,
                 metadata={"request_id": request.request_id, "run_id": run_id},
             ) from None
         if not isinstance(raw_rows, list) or any(not isinstance(row, dict) for row in raw_rows):
@@ -302,7 +339,7 @@ class ApifyDiscoveryProvider:
                 request_count=request_count,
                 kind="invalid_response",
                 retryable=False,
-                status_code=dataset_response.status_code,
+                status_code=status_code,
                 metadata={"request_id": request.request_id, "run_id": run_id},
             ) from None
 
