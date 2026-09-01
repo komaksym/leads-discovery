@@ -174,3 +174,45 @@ def test_boolean_negative_requires_negation_of_fact_concept() -> None:
         "confidence": 0.0,
         "evidence_ids": [],
     }
+
+
+def test_coordinated_negative_pvf_relation_remains_canonical() -> None:
+    extracted = apply_extraction(
+        _company(),
+        _bundle("We do not manufacture or sell pipe."),
+        _result("pvf_relevant", False),
+    )
+
+    assert extracted.features["pvf_relevant"] is False
+
+
+def test_bare_pvf_mention_does_not_veto_explicit_negative_relation() -> None:
+    extracted = apply_extraction(
+        _company(),
+        _bundle("Pipe products. We do not sell pipe."),
+        _result("pvf_relevant", False),
+    )
+
+    assert extracted.features["pvf_relevant"] is False
+
+
+def test_genuine_negative_pvf_proposition_triggers_rejection() -> None:
+    extracted = apply_extraction(
+        _company(),
+        _bundle("We do not distribute industrial valves."),
+        _result("pvf_relevant", False),
+    )
+    evaluated = evaluate_company(extracted)
+
+    assert extracted.features["pvf_relevant"] is False
+    assert "confirmed_not_pvf_relevant" in evaluated.rejection_reasons
+
+
+def test_boolean_relation_negative_binds_to_fact_proposition() -> None:
+    extracted = apply_extraction(
+        _company(),
+        _bundle("We do not serve industrial customers."),
+        _result("industrial_or_process_customer_focus", False),
+    )
+
+    assert extracted.features["industrial_or_process_customer_focus"] is False
