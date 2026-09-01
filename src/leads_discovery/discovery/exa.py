@@ -8,10 +8,9 @@ from typing import Any, cast
 import httpx
 
 from leads_discovery.discovery.base import (
-    classify_http_status,
+    ProviderRequestContext,
     provider_error,
-    request_json,
-    safe_transport_call,
+    request_json_at_boundary,
     stable_raw_record_id,
     utc_timestamp,
     validate_common_request,
@@ -66,34 +65,19 @@ class ExaDiscoveryProvider:
             json=body,
             timeout=_REQUEST_TIMEOUT,
         )
-        response = safe_transport_call(
-            lambda: self._client.send(http_request, stream=True),
-            provider="exa",
-            request_id=request.request_id,
-            operation="company_search",
-            request_count=1,
+        context = ProviderRequestContext("exa", request.request_id, "company_search", 1)
+        payload_raw, status_code = request_json_at_boundary(
+            self._client,
+            http_request,
+            context=context,
         )
-        if not 200 <= response.status_code < 300:
-            status_code = response.status_code
-            response.close()
-            kind, retryable = classify_http_status(status_code)
-            raise provider_error(
-                provider="exa",
-                request_id=request.request_id,
-                operation="company_search",
-                request_count=1,
-                kind=kind,
-                retryable=retryable,
+        if not isinstance(payload_raw, dict):
+            raise context.error(
+                kind="invalid_response",
+                retryable=False,
                 status_code=status_code,
             ) from None
-
-        payload = request_json(
-            response,
-            provider="exa",
-            request_id=request.request_id,
-            operation="company_search",
-            request_count=1,
-        )
+        payload = cast(dict[str, Any], payload_raw)
         raw_results = payload.get("results")
         if not isinstance(raw_results, list):
             raise provider_error(
@@ -103,7 +87,7 @@ class ExaDiscoveryProvider:
                 request_count=1,
                 kind="invalid_response",
                 retryable=False,
-                status_code=response.status_code,
+                status_code=status_code,
             ) from None
 
         retrieved_at = utc_timestamp()
@@ -117,7 +101,7 @@ class ExaDiscoveryProvider:
                     request_count=1,
                     kind="invalid_response",
                     retryable=False,
-                    status_code=response.status_code,
+                    status_code=status_code,
                 ) from None
             records.append(self._parse_record(request, raw, retrieved_at))
 
