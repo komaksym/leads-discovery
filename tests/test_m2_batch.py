@@ -350,6 +350,24 @@ def test_preexisting_artifact_symlink_cannot_redirect_writes_outside_data_root(
     assert outside.read_text(encoding="utf-8") == "sentinel\n"
 
 
+def test_symlinked_data_root_preserves_existing_resolution_behavior(tmp_path: Path) -> None:
+    """Issue #30 must not change the base behavior of resolving a symlinked data root."""
+    real_root = tmp_path / "real-data"
+    real_root.mkdir()
+    linked_root = tmp_path / "linked-data"
+    linked_root.symlink_to(real_root, target_is_directory=True)
+
+    checkpoint = run_m2_batch(
+        _config(linked_root, "symlink-root"),
+        discovery={"exa": FakeDiscovery()},
+        researcher=FakeResearcher(),
+        extractor=FakeExtractor(),
+    )
+
+    assert checkpoint.status == "completed"
+    assert (real_root / "symlink-root" / "checkpoint.json").exists()
+
+
 def test_explicit_live_flag_is_required_before_provider_calls(tmp_path: Path) -> None:
     """Without explicit live authorization the runner returns dry-run state and makes no calls."""
     discovery = FakeDiscovery()
@@ -407,6 +425,40 @@ def test_fake_provider_end_to_end_writes_seven_artifacts_in_durable_order(
     assert (run_dir / "companies_deduped.jsonl").read_text(encoding="utf-8").strip()
     assert (run_dir / "research_raw.jsonl").read_text(encoding="utf-8").strip()
     assert (run_dir / "companies_extracted.jsonl").read_text(encoding="utf-8").strip()
+
+
+def test_completed_rerun_does_not_churn_checkpoint_or_call_providers(tmp_path: Path) -> None:
+    """A healthy completed run is a read-only replay unless its derived usage is stale."""
+    config = _config(tmp_path, "completed-rerun")
+    first_discovery = FakeDiscovery()
+    first_researcher = FakeResearcher()
+    first_extractor = FakeExtractor()
+    first = run_m2_batch(
+        config,
+        discovery={"exa": first_discovery},
+        researcher=first_researcher,
+        extractor=first_extractor,
+    )
+    run_dir = tmp_path / "completed-rerun"
+    checkpoint_before = (run_dir / "checkpoint.json").read_bytes()
+    usage_before = (run_dir / "usage.json").read_bytes()
+
+    second_discovery = FakeDiscovery()
+    second_researcher = FakeResearcher()
+    second_extractor = FakeExtractor()
+    second = run_m2_batch(
+        config,
+        discovery={"exa": second_discovery},
+        researcher=second_researcher,
+        extractor=second_extractor,
+    )
+
+    assert first.status == second.status == "completed"
+    assert second_discovery.calls == 0
+    assert second_researcher.calls == 0
+    assert second_extractor.calls == 0
+    assert (run_dir / "checkpoint.json").read_bytes() == checkpoint_before
+    assert (run_dir / "usage.json").read_bytes() == usage_before
 
 
 def test_successful_research_response_is_durable_before_next_paid_search(tmp_path: Path) -> None:
@@ -526,6 +578,29 @@ def test_conservative_deepseek_reservation_persists_paused_budget_without_call(
     assert extractor.calls == 0
     persisted = json.loads((tmp_path / "budget" / "checkpoint.json").read_text())
     assert persisted["status"] == "paused_budget"
+
+
+def test_unknown_exa_spend_freezes_without_configured_ceiling(tmp_path: Path) -> None:
+    """Unknown authoritative spend blocks fresh paid work even when Exa has no ceiling."""
+    run_dir = tmp_path / "unknown-spend-no-ceiling"
+    run_dir.mkdir()
+    event = UsageEvent(provider="exa", operation="company_search", request_count=1)
+    (run_dir / "usage_events.jsonl").write_text(
+        json.dumps(event.to_dict()) + "\n",
+        encoding="utf-8",
+    )
+    discovery = FakeDiscovery()
+
+    checkpoint = run_m2_batch(
+        _config(tmp_path, "unknown-spend-no-ceiling", exa_budget_usd=None),
+        discovery={"exa": discovery},
+        researcher=FakeResearcher(),
+        extractor=FakeExtractor(),
+    )
+
+    assert checkpoint.status == "paused_unknown"
+    assert checkpoint.pause_reason == "exa_usage_unknown"
+    assert discovery.calls == 0
 
 
 def test_usage_replay_prevents_budget_reset_and_second_model_call(tmp_path: Path) -> None:
@@ -670,6 +745,60 @@ def test_persisted_apify_run_id_is_resumed_without_replacement_search(tmp_path: 
     assert apify.resume_calls == [(apify_request.request_id, "persisted-run-123")]
 
 
+def test_unresolved_apify_start_freezes_all_subsequent_paid_work(tmp_path: Path) -> None:
+    """An Apify start with unknown outcome and no run ID blocks later Exa work."""
+    config = _config(
+        tmp_path,
+        "unknown-apify",
+        max_candidates=4,
+        include_apify=True,
+        apify_budget_usd=0.25,
+    )
+    requests = build_discovery_requests(
+        include_apify=True,
+        max_candidates=4,
+        apify_budget_usd=0.25,
+    )
+    apify_request = next(request for request in requests if request.provider == "apify")
+    run_dir = tmp_path / "unknown-apify"
+    run_dir.mkdir()
+    (run_dir / "checkpoint.json").write_text(
+        json.dumps(
+            {
+                "run_id": "unknown-apify",
+                "status": "running",
+                "provider_state": {
+                    "operations": {
+                        f"discovery:{apify_request.request_id}": {
+                            "provider": "apify",
+                            "operation": "google_maps_search",
+                            "request_id": apify_request.request_id,
+                            "state": "in_flight",
+                        }
+                    },
+                    "stages": {},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class BombDiscovery:
+        def search(self, _request: DiscoveryRequest) -> DiscoveryBatch:
+            raise AssertionError("no paid provider may run behind an unresolved outcome")
+
+    checkpoint = run_m2_batch(
+        config,
+        discovery={"exa": BombDiscovery(), "apify": BombDiscovery()},
+        researcher=FakeResearcher(),
+        extractor=FakeExtractor(),
+    )
+
+    assert checkpoint.status == "paused_unknown"
+    assert checkpoint.pause_reason is not None
+    assert "discovery:" in checkpoint.pause_reason
+
+
 def test_unknown_in_flight_exa_is_not_automatically_repeated(tmp_path: Path) -> None:
     """Process death during required Exa yields paused_unknown and no automatic repeat."""
     calls = 0
@@ -763,7 +892,7 @@ def test_exa_budget_is_rechecked_between_paid_research_queries(tmp_path: Path) -
     run_dir = tmp_path / "exa-research-budget"
     with httpx.Client(transport=httpx.MockTransport(handler)) as client:
         checkpoint = run_m2_batch(
-            _config(tmp_path, "exa-research-budget", exa_budget_usd=0.01),
+            _config(tmp_path, "exa-research-budget", exa_budget_usd=0.021),
             discovery={"exa": FakeDiscovery()},
             researcher=ExaEvidenceResearcher(api_key="test-key", client=client),
             extractor=FakeExtractor(),
