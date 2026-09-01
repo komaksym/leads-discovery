@@ -313,21 +313,22 @@ def safe_transport_call(
     call: Callable[[], httpx.Response],
     *,
     context: ProviderRequestContext,
+    metadata: dict[str, Any] | None = None,
 ) -> httpx.Response:
-    """Run one injected streamed-client dispatch and classify transport failures safely."""
+    """Run one streamed dispatch and enforce the stable provider request boundary."""
     try:
         response = call()
     except (httpx.ConnectError, httpx.ConnectTimeout):
         raise context.error(
             kind="transient",
             retryable=True,
-            metadata={"request_id": context.request_id, "safe_to_retry": True},
+            metadata={**(metadata or {"request_id": context.request_id}), "safe_to_retry": True},
         ) from None
     except httpx.HTTPError:
         raise context.error(
             kind="transient",
             retryable=False,
-            metadata={"request_id": context.request_id, "outcome_unknown": True},
+            metadata={**(metadata or {"request_id": context.request_id}), "outcome_unknown": True},
         ) from None
     try:
         _enforce_declared_response_limit(response, _http_response_limit())
@@ -336,6 +337,17 @@ def safe_transport_call(
             kind="invalid_response",
             retryable=False,
             status_code=response.status_code,
+            metadata=metadata,
+        ) from None
+    status_code = response.status_code
+    if not 200 <= status_code < 300:
+        response.close()
+        kind, retryable = classify_http_status(status_code)
+        raise context.error(
+            kind=kind,
+            retryable=retryable,
+            status_code=status_code,
+            metadata=metadata,
         ) from None
     return response
 
@@ -351,15 +363,6 @@ def request_json_at_boundary(
     response = safe_transport_call(
         lambda: client.send(request, stream=True),
         context=context,
+        metadata=metadata,
     )
-    status_code = response.status_code
-    if not 200 <= status_code < 300:
-        response.close()
-        kind, retryable = classify_http_status(status_code)
-        raise context.error(
-            kind=kind,
-            retryable=retryable,
-            status_code=status_code,
-            metadata=metadata,
-        ) from None
-    return _decode_bounded_json(response, context, metadata=metadata), status_code
+    return _decode_bounded_json(response, context, metadata=metadata), response.status_code
