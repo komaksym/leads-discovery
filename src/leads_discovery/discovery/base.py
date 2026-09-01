@@ -312,10 +312,21 @@ def stable_raw_record_id(
 def safe_transport_call(
     call: Callable[[], httpx.Response],
     *,
-    context: ProviderRequestContext,
+    context: ProviderRequestContext | None = None,
+    provider: str | None = None,
+    request_id: str | None = None,
+    operation: str | None = None,
+    request_count: int | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> httpx.Response:
     """Run one streamed dispatch and enforce the stable provider request boundary."""
+    if context is None:
+        if provider is None or request_id is None or operation is None or request_count is None:
+            raise TypeError("provider request context is required")
+        context = ProviderRequestContext(provider, request_id, operation, request_count)
+    elif any(value is not None for value in (provider, request_id, operation, request_count)):
+        raise TypeError("pass either context or provider request identity fields")
+
     try:
         response = call()
     except (httpx.ConnectError, httpx.ConnectTimeout):
