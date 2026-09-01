@@ -289,3 +289,30 @@ def test_comma_coordinated_negative_pvf_relations_remain_canonical() -> None:
     assert extracted.features["pvf_relevant"] is False
     assert evaluated.final_decision == "rejected"
     assert "confirmed_not_pvf_relevant" in evaluated.rejection_reasons
+
+
+def test_negative_pvf_relation_propagates_across_coordinated_object() -> None:
+    extracted = apply_extraction(
+        _company(),
+        _bundle("We do not sell pipe or distribute valves."),
+        _result("pvf_relevant", False),
+    )
+    evaluated = evaluate_company(extracted)
+
+    assert extracted.features["pvf_relevant"] is False
+    assert evaluated.final_decision == "rejected"
+    assert "confirmed_not_pvf_relevant" in evaluated.rejection_reasons
+
+
+def test_nominal_negative_distribution_remains_canonical() -> None:
+    extracted = apply_extraction(
+        _company(),
+        _bundle("We are not a PVF distributor of valves."),
+        _result("pvf_relevant", False),
+    )
+    evaluated = evaluate_company(extracted)
+
+    assert extracted.features["pvf_relevant"] is False
+    assert evaluated.final_decision == "rejected"
+    assert "confirmed_not_pvf_relevant" in evaluated.rejection_reasons
+
