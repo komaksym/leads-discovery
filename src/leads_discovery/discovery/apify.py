@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import time
+from functools import partial
 from collections.abc import Callable
 from typing import Any, cast
 
@@ -195,9 +196,7 @@ class ApifyDiscoveryProvider:
                     timeout=_CONTROL_TIMEOUT,
                 )
                 response = safe_transport_call(
-                    lambda: self._client.send(
-                        http_request, stream=True
-                    ),
+                    partial(self._client.send, http_request, stream=True),
                     provider="apify",
                     request_id=request.request_id,
                     operation="google_maps_search",

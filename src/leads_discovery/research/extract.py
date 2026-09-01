@@ -6,6 +6,7 @@ import json
 import math
 from copy import deepcopy
 from dataclasses import dataclass
+from functools import partial
 from typing import Any, cast
 
 import httpx
@@ -172,9 +173,7 @@ class DeepSeekExtractor:
             )
             try:
                 response = safe_transport_call(
-                    lambda: self._client.send(
-                        http_request, stream=True
-                    ),
+                    partial(self._client.send, http_request, stream=True),
                     provider="deepseek",
                     request_id=company.company_id,
                     operation="structured_extraction",
