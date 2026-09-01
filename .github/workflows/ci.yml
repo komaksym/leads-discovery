@@ -24,6 +24,10 @@ jobs:
         run: ruff check .
       - name: Typecheck
         run: mypy src tests
+      - name: Target extraction and transport safety
+        run: pytest -q tests/test_extraction.py tests/test_transport_safety.py
+      - name: Target Apify and Exa paths
+        run: pytest -q tests/test_apify_discovery.py tests/test_exa_discovery.py tests/test_evidence.py
       - name: Test
         run: pytest
       - name: Build
