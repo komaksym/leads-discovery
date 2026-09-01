@@ -136,6 +136,18 @@ def test_coordinated_unrelated_pvf_negation_does_not_bind_to_distribution() -> N
     assert "confirmed_not_pvf_relevant" not in evaluated.rejection_reasons
 
 
+def test_contradictory_pvf_evidence_cannot_validate_negative_relevance() -> None:
+    extracted = apply_extraction(
+        _company(),
+        _bundle("We do not sell pipe, but we distribute industrial valves."),
+        _result("pvf_relevant", False),
+    )
+    evaluated = evaluate_company(extracted)
+
+    assert extracted.features["pvf_relevant"] is None
+    assert "confirmed_not_pvf_relevant" not in evaluated.rejection_reasons
+
+
 def test_numeric_fact_requires_value_to_describe_fact_concept() -> None:
     extracted = apply_extraction(
         _company(),
