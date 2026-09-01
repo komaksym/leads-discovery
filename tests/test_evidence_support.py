@@ -263,3 +263,29 @@ def test_supported_facts_can_reach_accepted_after_canonicalization() -> None:
     evaluated = evaluate_company(extracted)
 
     assert evaluated.final_decision == "accepted"
+
+
+def test_nominal_positive_distribution_vetoes_negative_relevance() -> None:
+    extracted = apply_extraction(
+        _company(),
+        _bundle("We do not sell pipe. We are a PVF distributor of valves."),
+        _result("pvf_relevant", False),
+    )
+    evaluated = evaluate_company(extracted)
+
+    assert extracted.features["pvf_relevant"] is None
+    assert evaluated.final_decision == "uncertain"
+    assert "confirmed_not_pvf_relevant" not in evaluated.rejection_reasons
+
+
+def test_comma_coordinated_negative_pvf_relations_remain_canonical() -> None:
+    extracted = apply_extraction(
+        _company(),
+        _bundle("We do not sell, distribute, or stock pipe."),
+        _result("pvf_relevant", False),
+    )
+    evaluated = evaluate_company(extracted)
+
+    assert extracted.features["pvf_relevant"] is False
+    assert evaluated.final_decision == "rejected"
+    assert "confirmed_not_pvf_relevant" in evaluated.rejection_reasons
