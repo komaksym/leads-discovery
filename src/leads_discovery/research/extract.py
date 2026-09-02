@@ -32,7 +32,6 @@ from leads_discovery.research.evidence_support import canonicalize_supported_fac
 _DEEPSEEK_URL = "https://api.deepseek.com/chat/completions"
 _MODEL = "deepseek-v4-flash"
 _MAX_TOKENS = 2048
-_MAX_ATTEMPTS = 3
 _REQUEST_TIMEOUT = httpx.Timeout(45.0, connect=5.0)
 FACT_KEYS = (
     "pvf_relevant",
@@ -119,10 +118,10 @@ class DeepSeekExtractor:
         self._model = model
         self._prices = prices
 
-    def _single_reservation_cost_usd(
+    def reservation_cost_usd(
         self, company: CompanyRecord, bundle: EvidenceBundle
     ) -> float:
-        """Return the conservative cache-miss plus maximum-output cost for one attempt."""
+        """Return the conservative cache-miss plus maximum-output cost for the single call."""
         evidence_json = _evidence_json(company, bundle)
         prompt_characters = len(SYSTEM_PROMPT) + len(evidence_json)
         return (
@@ -130,12 +129,8 @@ class DeepSeekExtractor:
             + _MAX_TOKENS * self._prices.output_per_million
         ) / 1_000_000
 
-    def reservation_cost_usd(self, company: CompanyRecord, bundle: EvidenceBundle) -> float:
-        """Reserve enough budget for every bounded attempt before the first dispatch."""
-        return self._single_reservation_cost_usd(company, bundle) * _MAX_ATTEMPTS
-
     def extract(self, company: CompanyRecord, bundle: EvidenceBundle) -> ExtractionResult:
-        """Execute up to three safe attempts and strictly validate the complete fact schema."""
+        """Execute one paid call and strictly validate the complete fact schema."""
         if bundle.company_id != company.company_id:
             raise ValueError("evidence bundle company_id must match company")
         if not bundle.items:
@@ -161,74 +156,50 @@ class DeepSeekExtractor:
             "temperature": 0,
             "stream": False,
         }
-        single_reservation = self._single_reservation_cost_usd(company, bundle)
-        for attempt in range(1, _MAX_ATTEMPTS + 1):
-            http_request = self._client.build_request(
-                "POST",
-                _DEEPSEEK_URL,
-                headers={"Authorization": f"Bearer {self._api_key}"},
-                json=body,
-                timeout=_REQUEST_TIMEOUT,
-            )
-            try:
-                response = safe_transport_call(
-                    lambda http_request=http_request: self._client.send(
-                        http_request, stream=True
-                    ),
-                    provider="deepseek",
-                    request_id=company.company_id,
-                    operation="structured_extraction",
-                    request_count=attempt,
-                )
-            except DiscoveryProviderError as exc:
-                if exc.retryable and attempt < _MAX_ATTEMPTS:
-                    continue
-                raise
-            status_code = response.status_code
-            if not 200 <= status_code < 300:
-                response.close()
-                kind, retryable = classify_http_status(status_code)
-                if retryable and attempt < _MAX_ATTEMPTS:
-                    continue
-                raise provider_error(
-                    provider="deepseek",
-                    request_id=company.company_id,
-                    operation="structured_extraction",
-                    request_count=attempt,
-                    kind=kind,
-                    retryable=retryable,
-                    status_code=status_code,
-                    metadata={"company_id": company.company_id, "attempts": attempt},
-                ) from None
-            try:
-                body_bytes = read_bounded_response(response)
-            except (ResponseReadError, ResponseTooLargeError):
-                raise self._invalid(company.company_id, status_code, attempt) from None
-            try:
-                payload = json.loads(body_bytes)
-            except (json.JSONDecodeError, UnicodeDecodeError):
-                if attempt < _MAX_ATTEMPTS:
-                    continue
-                raise self._invalid(company.company_id, status_code, attempt) from None
-            if not isinstance(payload, dict):
-                if attempt < _MAX_ATTEMPTS:
-                    continue
-                raise self._invalid(company.company_id, status_code, attempt) from None
-            try:
-                result = self._parse_result(
-                    company,
-                    bundle,
-                    cast(dict[str, Any], payload),
-                    status_code,
-                )
-            except DiscoveryProviderError as exc:
-                if exc.kind == "invalid_response" and attempt < _MAX_ATTEMPTS:
-                    continue
-                if exc.kind == "invalid_response":
-                    raise self._invalid(company.company_id, status_code, attempt) from None
-                raise
-            return _account_retries(result, attempt, single_reservation)
-        raise AssertionError("bounded DeepSeek retry loop is unreachable")
+        http_request = self._client.build_request(
+            "POST",
+            _DEEPSEEK_URL,
+            headers={"Authorization": f"Bearer {self._api_key}"},
+            json=body,
+            timeout=_REQUEST_TIMEOUT,
+        )
+        response = safe_transport_call(
+            lambda: self._client.send(http_request, stream=True),
+            provider="deepseek",
+            request_id=company.company_id,
+            operation="structured_extraction",
+            request_count=1,
+        )
+        status_code = response.status_code
+        if not 200 <= status_code < 300:
+            response.close()
+            kind, retryable = classify_http_status(status_code)
+            raise provider_error(
+                provider="deepseek",
+                request_id=company.company_id,
+                operation="structured_extraction",
+                request_count=1,
+                kind=kind,
+                retryable=retryable,
+                status_code=status_code,
+                metadata={"company_id": company.company_id},
+            ) from None
+        try:
+            body_bytes = read_bounded_response(response)
+        except (ResponseReadError, ResponseTooLargeError):
+            raise self._invalid(company.company_id, status_code, 1) from None
+        try:
+            payload = json.loads(body_bytes)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            raise self._invalid(company.company_id, status_code, 1) from None
+        if not isinstance(payload, dict):
+            raise self._invalid(company.company_id, status_code, 1) from None
+        return self._parse_result(
+            company,
+            bundle,
+            cast(dict[str, Any], payload),
+            status_code,
+        )
 
     def _parse_result(
         self,
@@ -278,7 +249,7 @@ class DeepSeekExtractor:
 
     @staticmethod
     def _invalid(company_id: str, status_code: int | None, attempts: int) -> DiscoveryProviderError:
-        """Build a sanitized terminal invalid-response error after bounded retries."""
+        """Build a sanitized terminal invalid-response error for the single request."""
         return provider_error(
             provider="deepseek",
             request_id=company_id,
@@ -289,35 +260,6 @@ class DeepSeekExtractor:
             status_code=status_code,
             metadata={"company_id": company_id, "attempts": attempts},
         )
-
-
-def _account_retries(
-    result: ExtractionResult,
-    attempts: int,
-    single_reservation: float,
-) -> ExtractionResult:
-    """Conservatively account failed prior attempts without retaining provider bodies."""
-    event = result.usage_event
-    estimated = event.estimated_cost_usd
-    if estimated is not None:
-        estimated += (attempts - 1) * single_reservation
-    usage = UsageEvent(
-        provider=event.provider,
-        operation=event.operation,
-        request_count=attempts,
-        input_tokens=event.input_tokens,
-        output_tokens=event.output_tokens,
-        estimated_cost_usd=estimated,
-        exact_cost_usd=event.exact_cost_usd if attempts == 1 else None,
-        metadata={**event.metadata, "attempts": attempts},
-        recorded_at=event.recorded_at,
-    )
-    return ExtractionResult(
-        company_id=result.company_id,
-        model=result.model,
-        facts={key: deepcopy(value) for key, value in result.facts.items()},
-        usage_event=usage,
-    )
 
 
 def _reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
