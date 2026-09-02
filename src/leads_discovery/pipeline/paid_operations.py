@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass
@@ -10,7 +11,7 @@ from typing import Any, cast
 
 from leads_discovery.models import RunCheckpoint, UsageEvent
 from leads_discovery.pipeline.costs import CostTracker
-from leads_discovery.pipeline.state import append_usage_event
+from leads_discovery.pipeline.state import append_usage_event, load_usage_events
 
 _OPERATION_STATES = frozenset({"in_flight", "completed", "failed", "pending"})
 
@@ -83,6 +84,35 @@ class PaidOperationLifecycle:
             self.tracker.provider_estimated_spend(provider), ceiling, reservation
         )
 
+    def quota_used(
+        self,
+        provider: str,
+        *,
+        operation: str | None = None,
+        metadata_field: str | None = None,
+    ) -> float:
+        """Replay a provider quota directly from the authoritative usage ledger."""
+        total = 0.0
+        for event in load_usage_events(self.usage_path):
+            if event.provider != provider:
+                continue
+            if operation is not None and event.operation != operation:
+                continue
+            raw: object = (
+                event.request_count
+                if metadata_field is None
+                else event.metadata.get(metadata_field, 0)
+            )
+            if (
+                isinstance(raw, bool)
+                or not isinstance(raw, (int, float))
+                or not math.isfinite(raw)
+                or raw < 0
+            ):
+                raise ValueError("provider quota usage must be a nonnegative finite number")
+            total += float(raw)
+        return total
+
     def pause(
         self,
         *,
@@ -143,6 +173,45 @@ class PaidOperationLifecycle:
             request_id=request_id,
             company_id=company_id,
             reservation_usd=reservation_usd,
+            pending_stage=pending_stage,
+        )
+        return True
+
+    def admit_quota(
+        self,
+        operation_id: str,
+        *,
+        provider: str,
+        operation: str,
+        ceiling: float | None,
+        reservation: float,
+        budget_reason: str,
+        quota_operation: str | None = None,
+        metadata_field: str | None = None,
+        company_id: str | None = None,
+        fields: Mapping[str, Any] | None = None,
+        pending_stage: str | None = None,
+    ) -> bool:
+        """Check an event-backed quota and persist intent before dispatch."""
+        used = self.quota_used(
+            provider,
+            operation=quota_operation,
+            metadata_field=metadata_field,
+        )
+        if not reservation_fits(used, ceiling, reservation):
+            self.pause(
+                status="paused_budget",
+                reason=budget_reason,
+                company_id=company_id,
+                stage=pending_stage or operation,
+            )
+            return False
+        self.begin(
+            operation_id,
+            provider=provider,
+            operation=operation,
+            fields=fields,
+            company_id=company_id,
             pending_stage=pending_stage,
         )
         return True
