@@ -64,7 +64,7 @@ class ApifyDiscoveryProvider:
             _START_URL,
             headers={"Authorization": f"Bearer {self._api_token}"},
             params={
-                "waitForFinish": 0,
+                "waitForFinish": 60,
                 "maxItems": request.max_results_total,
                 "maxTotalChargeUsd": request.max_cost_usd,
             },
