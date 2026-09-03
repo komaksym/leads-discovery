@@ -14,9 +14,11 @@ import httpx
 
 from leads_discovery.contacts.models import ContactRecord, VerificationStatus
 from leads_discovery.discovery.base import (
+    DiscoveryProviderError,
+    ProviderRequestContext,
     ResponseTooLargeError,
     read_bounded_response,
-    validate_response_size_header,
+    safe_transport_call,
 )
 from leads_discovery.models import CompanyRecord, ErrorKind, UsageEvent
 
@@ -134,23 +136,6 @@ class VerificationResult:
         self.usage_event = UsageEvent.from_dict(self.usage_event.to_dict())
 
 
-def _status_kind(status_code: int) -> tuple[ErrorKind, bool]:
-    """Map provider HTTP statuses to the established sanitized failure taxonomy."""
-    if status_code in {401, 403}:
-        return "authentication", False
-    if status_code == 402:
-        return "budget_exhausted", False
-    if status_code in {400, 422}:
-        return "invalid_request", False
-    if status_code in {408, 429}:
-        return "rate_limited", True
-    if 500 <= status_code <= 599:
-        return "transient", True
-    if 400 <= status_code <= 499:
-        return "permanent", False
-    return "invalid_response", False
-
-
 def _usage(
     provider: str,
     operation: str,
@@ -190,43 +175,35 @@ def _raise(
 
 
 def _call(
-    call: Any,
+    client: httpx.Client,
+    request: httpx.Request,
     *,
     provider: str,
     operation: str,
     metadata: dict[str, Any] | None = None,
 ) -> httpx.Response:
-    """Execute one streamed HTTP dispatch and preserve ambiguous paid outcomes."""
+    """Dispatch through the shared provider transport guard and preserve M4 error contracts."""
+    context = ProviderRequestContext(
+        provider=provider,
+        request_id=f"m4:{provider}:{operation}",
+        operation=operation,
+        request_count=1,
+    )
     try:
-        response = cast(httpx.Response, call())
-    except (httpx.ConnectError, httpx.ConnectTimeout):
-        _raise(
-            provider,
-            operation,
-            kind="transient",
-            retryable=True,
-            metadata={**(metadata or {}), "safe_to_retry": True},
-        )
-    except httpx.HTTPError:
-        _raise(
-            provider,
-            operation,
-            kind="transient",
-            retryable=False,
-            metadata={**(metadata or {}), "outcome_unknown": True},
-        )
-    try:
-        validate_response_size_header(response)
-    except ResponseTooLargeError:
-        _raise(
-            provider,
-            operation,
-            kind="invalid_response",
-            retryable=False,
-            status_code=response.status_code,
+        return safe_transport_call(
+            lambda: client.send(request, stream=True),
+            context=context,
             metadata=metadata,
         )
-    return response
+    except DiscoveryProviderError as exc:
+        raise ContactProviderError(
+            provider=exc.provider,
+            operation=operation,
+            kind=exc.kind,
+            retryable=exc.retryable,
+            status_code=exc.status_code,
+            usage_event=exc.usage_event,
+        ) from None
 
 
 def _json_object(
@@ -268,30 +245,6 @@ def _json_object(
             metadata=metadata,
         )
     return cast(dict[str, Any], payload)
-
-
-def _require_success(
-    response: httpx.Response,
-    *,
-    provider: str,
-    operation: str,
-    metadata: dict[str, Any] | None = None,
-    allow_202: bool = True,
-) -> None:
-    """Reject non-success statuses using only the shared safe taxonomy."""
-    status_code = response.status_code
-    if 200 <= status_code < 300 and (allow_202 or status_code != 202):
-        return
-    response.close()
-    kind, retryable = _status_kind(status_code)
-    _raise(
-        provider,
-        operation,
-        kind=kind,
-        retryable=retryable,
-        status_code=status_code,
-        metadata=metadata,
-    )
 
 
 def _finite_nonnegative(value: Any, *, field: str) -> float:
@@ -369,13 +322,8 @@ class ExaPeopleProvider:
             timeout=_REQUEST_TIMEOUT,
         )
         response = _call(
-            lambda: self._client.send(request, stream=True),
-            provider="exa",
-            operation="people_search",
-            metadata=metadata,
-        )
-        _require_success(
-            response,
+            self._client,
+            request,
             provider="exa",
             operation="people_search",
             metadata=metadata,
@@ -481,13 +429,8 @@ class ClayContactProvider:
             timeout=_REQUEST_TIMEOUT,
         )
         response = _call(
-            lambda: self._client.send(request, stream=True),
-            provider="clay",
-            operation="work_email_routine_start",
-            metadata=metadata,
-        )
-        _require_success(
-            response,
+            self._client,
+            request,
             provider="clay",
             operation="work_email_routine_start",
             metadata=metadata,
@@ -527,13 +470,8 @@ class ClayContactProvider:
             timeout=_REQUEST_TIMEOUT,
         )
         response = _call(
-            lambda: self._client.send(request, stream=True),
-            provider="clay",
-            operation="work_email_routine_results",
-            metadata=metadata,
-        )
-        _require_success(
-            response,
+            self._client,
+            request,
             provider="clay",
             operation="work_email_routine_results",
             metadata=metadata,
@@ -609,13 +547,8 @@ class ApolloContactProvider:
             timeout=_REQUEST_TIMEOUT,
         )
         response = _call(
-            lambda: self._client.send(request, stream=True),
-            provider="apollo",
-            operation="people_enrichment",
-            metadata=metadata,
-        )
-        _require_success(
-            response,
+            self._client,
+            request,
             provider="apollo",
             operation="people_enrichment",
             metadata=metadata,
@@ -703,13 +636,8 @@ class InstantlyVerificationProvider:
             raise ValueError("Instantly verification requires a syntactically valid work email")
         metadata = {"email": email.casefold()}
         response = _call(
-            lambda: self._client.send(request, stream=True),
-            provider="instantly",
-            operation=operation,
-            metadata=metadata,
-        )
-        _require_success(
-            response,
+            self._client,
+            request,
             provider="instantly",
             operation=operation,
             metadata=metadata,

@@ -11,6 +11,7 @@ import pytest
 from leads_discovery.contacts.models import ContactRecord
 from leads_discovery.contacts.providers import (
     ApolloContactProvider,
+    ContactProviderError,
     ClayContactProvider,
     ExaPeopleProvider,
     InstantlyVerificationProvider,
@@ -63,6 +64,39 @@ class _UnreadableStream(httpx.SyncByteStream):
         self.chunks_consumed += 1
         raise AssertionError("oversized Content-Length body must not be consumed")
         yield b""  # pragma: no cover
+
+
+def _invoke_m4_provider(provider_name: str, client: httpx.Client) -> None:
+    """Call one public M4 provider adapter through the injected HTTP seam."""
+    contact = ContactRecord(
+        contact_id="contact-transport",
+        company_id="cmp_transport",
+        company_name="Transport Valve",
+        company_domain="transport.example",
+        company_final_score=1.0,
+        full_name="Taylor Transport",
+        title="President",
+        decision_rank=1,
+        decision_reason="owner",
+    )
+    company = CompanyRecord(
+        company_id="cmp_transport",
+        name="Transport Valve",
+        domain="transport.example",
+        normalized_domain="transport.example",
+    )
+    if provider_name == "exa":
+        ExaPeopleProvider(api_key="test", client=client).search(company)
+    elif provider_name == "clay":
+        ClayContactProvider(api_key="test", routine_id="routine-1", client=client).start([contact])
+    elif provider_name == "apollo":
+        ApolloContactProvider(api_key="test", client=client).enrich(contact)
+    elif provider_name == "instantly":
+        InstantlyVerificationProvider(api_key="test", client=client).create(
+            "taylor@transport.example"
+        )
+    else:  # pragma: no cover - parameterization controls provider names.
+        raise AssertionError(f"unsupported provider: {provider_name}")
 
 
 def _exa_request() -> DiscoveryRequest:
@@ -188,6 +222,80 @@ def test_exa_small_json_response_still_works_with_response_limits() -> None:
         result = provider.search(_exa_request())
 
     assert result.records == []
+
+
+@pytest.mark.parametrize("provider_name", ["exa", "clay", "apollo", "instantly"])
+def test_m4_oversized_content_length_is_rejected_before_body_read(
+    monkeypatch: pytest.MonkeyPatch,
+    provider_name: str,
+) -> None:
+    """Every M4 provider must reject an oversized declaration before body consumption."""
+    monkeypatch.setenv("LEADS_MAX_HTTP_RESPONSE_BYTES", "8")
+    stream = _UnreadableStream()
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        """Return a declared oversized body that must remain completely unread."""
+        return httpx.Response(
+            200,
+            headers={"Content-Length": "9"},
+            stream=stream,
+        )
+
+    with (
+        httpx.Client(transport=httpx.MockTransport(handler)) as client,
+        pytest.raises(ContactProviderError) as exc_info,
+    ):
+        _invoke_m4_provider(provider_name, client)
+
+    assert stream.chunks_consumed == 0
+    assert exc_info.value.kind == "invalid_response"
+    assert exc_info.value.retryable is False
+
+
+@pytest.mark.parametrize("provider_name", ["exa", "clay", "apollo", "instantly"])
+def test_m4_chunked_oversize_aborts_on_first_crossing_chunk(
+    monkeypatch: pytest.MonkeyPatch,
+    provider_name: str,
+) -> None:
+    """Every M4 provider must stop a no-Length stream at the first crossing chunk."""
+    monkeypatch.setenv("LEADS_MAX_HTTP_RESPONSE_BYTES", "5")
+    stream = _GuardedChunkStream(chunk=b"123", allowed_chunks=3)
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        """Return a chunked response whose second chunk crosses the configured limit."""
+        return httpx.Response(200, stream=stream)
+
+    with (
+        httpx.Client(transport=httpx.MockTransport(handler)) as client,
+        pytest.raises(ContactProviderError) as exc_info,
+    ):
+        _invoke_m4_provider(provider_name, client)
+
+    assert stream.chunks_consumed == 2
+    assert exc_info.value.kind == "invalid_response"
+    assert exc_info.value.retryable is False
+
+
+@pytest.mark.parametrize("provider_name", ["exa", "clay", "apollo", "instantly"])
+def test_m4_transport_does_not_retry_provider_failures(provider_name: str) -> None:
+    """Adapters may classify retryability but must never replay an operation internally."""
+    calls = 0
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        """Return one retryable provider failure and count actual request attempts."""
+        nonlocal calls
+        calls += 1
+        return httpx.Response(503, json={"error": "temporary"})
+
+    with (
+        httpx.Client(transport=httpx.MockTransport(handler)) as client,
+        pytest.raises(ContactProviderError) as exc_info,
+    ):
+        _invoke_m4_provider(provider_name, client)
+
+    assert calls == 1
+    assert exc_info.value.kind == "transient"
+    assert exc_info.value.retryable is True
 
 
 def test_exa_provider_boundary_owns_explicit_deterministic_timeout() -> None:
