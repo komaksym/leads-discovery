@@ -33,9 +33,9 @@ Do not put credentials on the command line or in committed files.
 
 ## Commands
 
-### Full run
+### Batch company run (M1–M3)
 
-A full run is dry by default. Without `--execute-live`, it does not read provider credentials, create provider clients, or make network calls.
+The normal product input is market/search criteria plus independent company limits; it does not accept a company ID or company name as the primary input. A batch company run is dry by default. Without `--execute-live`, it does not read provider credentials, create provider clients, or make network calls.
 
 ```bash
 python -m leads_discovery run \
@@ -84,6 +84,35 @@ The existing narrow M2 entry point remains supported:
 ```bash
 python -m leads_discovery.pipeline.m2_batch --help
 ```
+
+### Normal batch production flow (M1–M4)
+
+A normal M1–M4 batch uses the same run ID across two explicit commands. `run` discovers, deduplicates, researches, canonicalizes, and evaluates the company batch; `enrich` then consumes only that run's current `accepted` companies. Keeping M4 as an explicit second command preserves a clean recovery and authorization boundary; it does not make the product single-company.
+
+```bash
+python -m leads_discovery run \
+  --run-id RUN \
+  --market "industrial pumps" \
+  --search-term "regional distributors" \
+  --search-term "RFQ workflow" \
+  --target-geography US \
+  --max-candidates 50 \
+  --max-evaluated 20 \
+  --exa-budget-usd 1.00 \
+  --deepseek-budget-usd 1.00 \
+  --execute-live
+
+python -m leads_discovery enrich \
+  --run-id RUN \
+  --exa-people-budget-usd 1.00 \
+  --max-contacts-per-company 3 \
+  --max-paid-contacts-per-company 2 \
+  --execute-live
+```
+
+Live authorization and batch cardinality are separate controls. `--execute-live` authorizes provider calls; `--max-candidates`, `--max-evaluated`, and the contact caps only bound how much work may be attempted. Raising a cap never turns a dry command into a live one.
+
+Normal batch artifacts remain runner-local under `data/RUN/`. The normal `run` and `enrich` commands do not publish them. Publication exists only at an explicitly approved boundary such as the fixed production canary workflow described below.
 
 ### Contact enrichment
 
@@ -249,6 +278,8 @@ M4 adds contact discovery and work-email verification only. The project still do
 ## Production canary
 
 Production execution does not depend on a local computer. The production entry point is the manual `Production lead canary` GitHub Actions workflow on a standard GitHub-hosted `ubuntu-latest` runner. Provider credentials live only in GitHub Actions repository secrets.
+
+The canary is deliberately a credentialed smoke test, not the normal batch entry point. Its command surface exposes only run identity/data location and hard-codes one candidate, one evaluation, and one paid contact. Market/search criteria and batch cardinality belong to the normal `run` + `enrich` flow above; the canary cannot be widened into that configuration.
 
 The workflow has no safety-limit inputs: the application fixes the canary at one company, one paid contact, tiny provider quotas, and tiny spend/storage ceilings. Paid-operation barriers are written durably before dispatch so a runner restart cannot silently repeat an unresolved potentially billed operation.
 
