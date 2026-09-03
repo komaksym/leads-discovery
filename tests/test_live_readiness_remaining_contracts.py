@@ -11,8 +11,8 @@ import pytest
 from leads_discovery.contacts.models import ContactRecord
 from leads_discovery.contacts.providers import (
     ApolloContactProvider,
-    ContactProviderError,
     ClayContactProvider,
+    ContactProviderError,
     ExaPeopleProvider,
     InstantlyVerificationProvider,
 )
