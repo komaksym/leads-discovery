@@ -3,12 +3,22 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
 import httpx
 import pytest
+from m4_contract_fixtures import (
+    ClayRoutineScript,
+    WireStub,
+    call_enrich_live,
+    install_mock_http,
+    json_body,
+    person_result,
+    read_csv,
+    read_jsonl,
+    set_m4_credentials,
+)
 
 import leads_discovery.discovery as discovery_module
 import leads_discovery.research as research_module
@@ -26,17 +36,6 @@ from leads_discovery.models import (
     UsageEvent,
 )
 from leads_discovery.research.extract import FACT_KEYS
-from m4_contract_fixtures import (
-    ClayRoutineScript,
-    WireStub,
-    call_enrich_live,
-    install_mock_http,
-    json_body,
-    person_result,
-    read_csv,
-    read_jsonl,
-    set_m4_credentials,
-)
 
 _COMPANIES = (
     ("cmp_alpha", "Alpha Valve", "alpha-valve.com"),
@@ -187,11 +186,11 @@ class _BatchExtractor:
             item.title: item.evidence_id for item in bundle.items if item.title is not None
         }
         facts = {key: ExtractedFact(None, 0.0, []) for key in FACT_KEYS}
-        keys: Sequence[str]
-        if company.company_id == "cmp_gamma":
-            keys = ("pvf_relevant",)
-        else:
-            keys = tuple(_SUPPORTED_FACTS)
+        keys = (
+            ("pvf_relevant",)
+            if company.company_id == "cmp_gamma"
+            else tuple(_SUPPORTED_FACTS)
+        )
         for key in keys:
             facts[key] = ExtractedFact(
                 _SUPPORTED_FACTS[key],
