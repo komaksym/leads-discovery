@@ -1,9 +1,7 @@
-"""Deterministic contact discovery primitives."""
+"""M4 contact selection and provider interfaces."""
 
-from leads_discovery.contacts.models import ContactRecord
-from leads_discovery.contacts.providers import ExaPeopleProvider, ExaPeopleResult
+from leads_discovery.contacts.models import ContactRecord, VerificationStatus
 from leads_discovery.contacts.selection import (
-    contact_decision_order_key,
     normalize_contact_name,
     normalize_profile_url,
     rank_title,
@@ -12,9 +10,7 @@ from leads_discovery.contacts.selection import (
 
 __all__ = [
     "ContactRecord",
-    "ExaPeopleProvider",
-    "ExaPeopleResult",
-    "contact_decision_order_key",
+    "VerificationStatus",
     "normalize_contact_name",
     "normalize_profile_url",
     "rank_title",
