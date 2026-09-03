@@ -45,30 +45,31 @@ _COMPANIES = (
 )
 _SUPPORTED_FACTS: dict[str, bool | int] = {
     "pvf_relevant": True,
-    "rfq_or_quote_workflow_evidence": True,
+    "industrial_or_process_customer_focus": True,
+    "branch_count": 5,
     "inside_sales_or_estimating_presence": True,
+    "rfq_or_quote_workflow_evidence": True,
     "project_or_tender_business": True,
     "bom_or_line_item_complexity": True,
     "manufacturer_count_or_breadth": 20,
+    "relevant_hiring": True,
     "employee_count": 50,
-    "branch_count": 3,
+    "regional_independent_signal": True,
     "multi_location_signal": True,
     "known_current_direct_competitor_customer": False,
     "known_quote_automation_or_order_automation_relationship": False,
+    "manual_workflow_evidence": True,
+    "explicit_process_bottleneck_evidence": True,
 }
 _SUPPORT_EXCERPTS = {
-    "pvf_relevant": "We distribute industrial pipe, valves, and fittings.",
-    "rfq_or_quote_workflow_evidence": "Our RFQ quotation workflow handles customer quotes.",
-    "inside_sales_or_estimating_presence": "Our inside sales and estimating team prepares quotes.",
-    "project_or_tender_business": "We bid on industrial projects and tenders.",
-    "bom_or_line_item_complexity": "Our estimators process BOM bill of materials line items.",
-    "manufacturer_count_or_breadth": "20 manufacturers supply our line card brands.",
-    "employee_count": "50 employees work across the company.",
-    "branch_count": "3 branches serve regional customers.",
-    "multi_location_signal": "We operate multiple locations across the region.",
-    "known_current_direct_competitor_customer": "No competitor customer relationship exists.",
-    "known_quote_automation_or_order_automation_relationship": (
-        "No quote automation relationship exists."
+    "supported_batch": (
+        "Industrial pipe, valves, and fittings. "
+        "We serve industrial customers. "
+        "Branch count 5. Inside sales team. RFQ workflow. "
+        "Project tender business. BOM line items. Manufacturer count 20. "
+        "Relevant hiring. Employee count 50. Regional independent distributor. "
+        "Multiple locations. No competitor customer. No quote automation. "
+        "Manual workflow. Process bottleneck."
     ),
     "unsupported_direct_pain": "Our warehouse is open on weekdays.",
 }
@@ -185,6 +186,7 @@ class _BatchExtractor:
         evidence_by_title = {
             item.title: item.evidence_id for item in bundle.items if item.title is not None
         }
+        supported_id = evidence_by_title["supported_batch"]
         facts = {key: ExtractedFact(None, 0.0, []) for key in FACT_KEYS}
         keys = (
             ("pvf_relevant",)
@@ -192,11 +194,7 @@ class _BatchExtractor:
             else tuple(_SUPPORTED_FACTS)
         )
         for key in keys:
-            facts[key] = ExtractedFact(
-                _SUPPORTED_FACTS[key],
-                0.9,
-                [evidence_by_title[key]],
-            )
+            facts[key] = ExtractedFact(_SUPPORTED_FACTS[key], 0.9, [supported_id])
         if company.company_id != "cmp_gamma":
             facts["direct_quotation_pain_evidence"] = ExtractedFact(
                 True,
