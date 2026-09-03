@@ -255,6 +255,61 @@ def _config(
     )
 
 
+def test_rank3_only_contact_is_retained_without_paid_provider_calls(
+    tmp_path: Path,
+) -> None:
+    run_id = "rank3-retained"
+    company = _company()
+    _write_evaluated(tmp_path / run_id, company)
+
+    def search(candidate: CompanyRecord) -> ExaPeopleResult:
+        return ExaPeopleResult(
+            results=[
+                _person(
+                    candidate,
+                    "operations-manager",
+                    "Robin Operations",
+                    "Operations Manager",
+                )
+            ],
+            usage_event=UsageEvent(
+                provider="exa",
+                operation="people_search",
+                request_count=1,
+                estimated_cost_usd=0.0,
+                metadata={"company_id": candidate.company_id},
+            ),
+        )
+
+    discovery = run_contact_discovery(
+        ContactDiscoveryConfig(
+            run_id=run_id,
+            data_root=tmp_path,
+            max_contacts_per_company=3,
+            execute_live=True,
+        ),
+        exa_search=search,
+    )
+    assert discovery.status == "completed"
+    assert discovery.contact_count == 1
+
+    enriched = run_contact_enrichment(
+        _config(tmp_path, run_id),
+        clay=_BombClay(),
+        apollo=_BombApollo(),
+        instantly=_BombInstantly(),
+    )
+
+    assert enriched.status == "completed"
+    rows = [
+        json.loads(line)
+        for line in enriched.contacts_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert len(rows) == 1
+    assert rows[0]["decision_rank"] == 3
+    assert rows[0]["provider_attempts"] == []
+
+
 def test_enrichment_is_bounded_exact_cap_and_idempotent(tmp_path: Path) -> None:
     run_id = "bounded"
     _discover(tmp_path, run_id)
