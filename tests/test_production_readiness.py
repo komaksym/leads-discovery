@@ -474,3 +474,20 @@ def test_paid_workflow_is_manual_only_and_publishes_only_approved_outputs() -> N
     assert "git add --all" not in text
     assert "contact_checkpoint.json" not in text
     assert "contact_usage_events.jsonl" not in text
+
+    authorize = text.split("jobs:\n  authorize:", 1)[1].split("\n  canary:", 1)[0]
+    canary = text.split("\n  canary:", 1)[1]
+    assert "contents: read" in authorize
+    assert "actions: read" in authorize
+    assert "secrets." not in authorize
+    assert "id: target" in authorize
+    assert "ref: main" in authorize
+    assert 'git rev-parse HEAD' in authorize
+    assert 'echo "sha=$target_sha" >> "$GITHUB_OUTPUT"' in authorize
+    assert "actions/workflows/ci.yml/runs" in authorize
+    assert '.head_sha == $sha' in authorize
+    assert '.head_branch == "main"' in authorize
+    assert '.event == "push"' in authorize
+    assert '.conclusion == "success"' in authorize
+    assert "needs: authorize" in canary
+    assert "ref: ${{ needs.authorize.outputs.target_sha }}" in canary
