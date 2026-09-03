@@ -373,6 +373,7 @@ def run_contact_enrichment(
     _validate_shortlist(accepted, operations, contacts)
     accepted_ids = frozenset(company.company_id for company in accepted)
     paid = _paid_contacts(contacts, accepted_ids, config.max_paid_contacts_per_company)
+    paid_ids = {contact.contact_id for contact in paid}
 
     pending_clay = [
         (operation_id, entry)
@@ -393,7 +394,7 @@ def run_contact_enrichment(
         ):
             raise ValueError("pending Clay operation is malformed")
         contact_ids = cast(list[str], raw_ids)
-        if any(contacts[item].company_id not in accepted_ids for item in contact_ids):
+        if any(contact_id not in paid_ids for contact_id in contact_ids):
             return stop("paused_unknown", "clay_authorization_changed")
 
         result_id = _next_id(operations, f"clay_results:{parent_id}")
