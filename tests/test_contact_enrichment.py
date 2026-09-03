@@ -310,6 +310,64 @@ def test_rank3_only_contact_is_retained_without_paid_provider_calls(
     assert rows[0]["provider_attempts"] == []
 
 
+
+def test_pending_clay_resume_fails_closed_for_contact_outside_current_paid_boundary(
+    tmp_path: Path,
+) -> None:
+    run_id = "pending-clay-rank3"
+    _discover(tmp_path, run_id)
+    clay = _Clay()
+    config = _config(tmp_path, run_id)
+
+    initial = run_contact_enrichment(
+        config,
+        clay=clay,
+        apollo=_BombApollo(),
+        instantly=_BombInstantly(),
+    )
+    assert initial.status == "paused_pending"
+    assert clay.result_calls == 0
+
+    checkpoint_path = tmp_path / run_id / "contact_discovery_checkpoint.json"
+    checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    operations = checkpoint["provider_state"]["operations"]
+    pending_batch = next(
+        entry
+        for operation_id, entry in operations.items()
+        if operation_id.startswith("clay_batch:") and entry["state"] == "pending"
+    )
+
+    contacts_path = tmp_path / run_id / "contacts.jsonl"
+    rows = [
+        json.loads(line)
+        for line in contacts_path.read_text(encoding="utf-8").splitlines()
+    ]
+    rank3 = next(row for row in rows if row["decision_rank"] == 3)
+    pending_batch["contact_ids"] = [rank3["contact_id"]]
+    checkpoint_path.write_text(
+        json.dumps(checkpoint, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    resumed = run_contact_enrichment(
+        config,
+        clay=clay,
+        apollo=_BombApollo(),
+        instantly=_BombInstantly(),
+    )
+
+    assert resumed.status == "paused_unknown"
+    assert clay.result_calls == 0
+    persisted = [
+        json.loads(line)
+        for line in contacts_path.read_text(encoding="utf-8").splitlines()
+    ]
+    persisted_rank3 = next(
+        row for row in persisted if row["contact_id"] == rank3["contact_id"]
+    )
+    assert persisted_rank3["provider_attempts"] == []
+
+
 def test_enrichment_is_bounded_exact_cap_and_idempotent(tmp_path: Path) -> None:
     run_id = "bounded"
     _discover(tmp_path, run_id)
