@@ -411,7 +411,7 @@ def run_contact_enrichment(
         ):
             return _summary(config, paths, accepted, checkpoint, contacts)
         try:
-            result = clay.results(routine_run_id)
+            clay_result = clay.results(routine_run_id)
         except ContactProviderError as error:
             known = _record_error(lifecycle, result_id, error)
             if not known:
@@ -420,13 +420,13 @@ def run_contact_enrichment(
                 return stop("paused_budget", "clay_provider_budget")
             return stop("paused_pending", f"clay_results_failed:{error.kind}")
 
-        lifecycle.record_usage(result.usage_event)
-        lifecycle.finish(result_id, fields={"result_status": result.status})
-        if result.status == "pending":
+        lifecycle.record_usage(clay_result.usage_event)
+        lifecycle.finish(result_id, fields={"result_status": clay_result.status})
+        if clay_result.status == "pending":
             return stop("paused_pending", "clay_results_pending")
 
         by_id: dict[str, dict[str, Any]] = {}
-        for item in result.items:
+        for item in clay_result.items:
             raw_id = item.get("id")
             if isinstance(raw_id, str):
                 by_id[raw_id] = item
@@ -515,7 +515,7 @@ def run_contact_enrichment(
         ):
             return _summary(config, paths, accepted, checkpoint, contacts)
         try:
-            result = apollo.enrich(contact)
+            apollo_result = apollo.enrich(contact)
         except ContactProviderError as error:
             known = _record_error(lifecycle, operation_id, error)
             if not known:
@@ -524,13 +524,16 @@ def run_contact_enrichment(
                 return stop("paused_budget", "apollo_provider_budget")
             return stop("paused_pending", f"apollo_failed:{error.kind}")
 
-        lifecycle.record_usage(result.usage_event)
-        if result.work_email is not None:
-            contact.work_email = result.work_email
+        lifecycle.record_usage(apollo_result.usage_event)
+        if apollo_result.work_email is not None:
+            contact.work_email = apollo_result.work_email
             contact.email_source = "apollo"
         _mark_attempt(contact, "apollo", "people_enrichment", "completed")
         _publish_outputs(paths, contacts)
-        lifecycle.finish(operation_id, fields={"credits_used": result.credits_used})
+        lifecycle.finish(
+            operation_id,
+            fields={"credits_used": apollo_result.credits_used},
+        )
 
     for contact in paid:
         email = contact.work_email
@@ -568,7 +571,9 @@ def run_contact_enrichment(
             return _summary(config, paths, accepted, checkpoint, contacts)
 
         try:
-            result = instantly.get(email) if pending else instantly.create(email)
+            verification_result = (
+                instantly.get(email) if pending else instantly.create(email)
+            )
         except ContactProviderError as error:
             known = _record_error(lifecycle, dispatch_id, error)
             if not known:
@@ -577,12 +582,15 @@ def run_contact_enrichment(
                 return stop("paused_budget", "instantly_provider_budget")
             return stop("paused_pending", f"instantly_failed:{error.kind}")
 
-        lifecycle.record_usage(result.usage_event)
+        lifecycle.record_usage(verification_result.usage_event)
         if pending:
-            lifecycle.finish(dispatch_id, fields={"result_status": result.status})
+            lifecycle.finish(
+                dispatch_id,
+                fields={"result_status": verification_result.status},
+            )
 
-        contact.email_verification_status = result.status
-        if result.status == "pending":
+        contact.email_verification_status = verification_result.status
+        if verification_result.status == "pending":
             _mark_attempt(contact, "instantly", "email_verification", "pending")
             _publish_outputs(paths, contacts)
             lifecycle.finish(parent_id, state="pending", fields={"email": email})
@@ -593,12 +601,12 @@ def run_contact_enrichment(
             "instantly",
             "email_verification",
             "completed",
-            status=result.status,
+            status=verification_result.status,
         )
         _publish_outputs(paths, contacts)
         lifecycle.finish(
             parent_id,
-            fields={"email": email, "status": result.status},
+            fields={"email": email, "status": verification_result.status},
         )
 
     if any(not _attempted(contact, "clay") for contact in paid):
