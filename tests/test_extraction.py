@@ -9,7 +9,14 @@ import httpx
 import pytest
 
 from leads_discovery.discovery.base import DiscoveryProviderError
-from leads_discovery.models import CompanyRecord, EvidenceBundle, EvidenceItem, UsageEvent
+from leads_discovery.models import (
+    CompanyRecord,
+    EvidenceBundle,
+    EvidenceItem,
+    ExtractedFact,
+    ExtractionResult,
+    UsageEvent,
+)
 from leads_discovery.research.extract import (
     DeepSeekExtractor,
     DeepSeekPriceSchedule,
@@ -258,8 +265,8 @@ def test_explicit_unknowns_are_accepted_exactly() -> None:
         lambda facts: facts["pvf_relevant"].__setitem__("evidence_ids", []),
     ],
 )
-def test_invalid_fact_schema_is_rejected_without_repair(mutate: Any) -> None:
-    """Missing/extra/type/confidence/citation violations fail after only one paid call."""
+def test_invalid_fact_schema_is_terminal_after_received_2xx(mutate: Any) -> None:
+    """Schema-invalid paid 2xx output is terminal and must not be replayed."""
     facts = _valid_facts()
     mutate(facts)
     calls = 0
@@ -282,7 +289,7 @@ def test_invalid_fact_schema_is_rejected_without_repair(mutate: Any) -> None:
     assert calls == 1
     assert caught.value.kind == "invalid_response"
     assert caught.value.retryable is False
-
+    assert caught.value.usage_event.request_count == 1
 
 def test_boolean_fact_value_is_allowed_for_branch_count_without_integer_coercion() -> None:
     """The owner-defined FactValue union applies uniformly, so bool stays a bool for every key."""
@@ -341,17 +348,21 @@ def test_unknown_representation_must_be_exact(facts: dict[str, dict[str, Any]]) 
     assert caught.value.kind == "invalid_response"
 
 
-def test_invalid_json_and_truncated_output_make_no_automatic_repair_call() -> None:
-    """Malformed or truncated output fails once and is never repaired with a second call."""
-    responses = [
+@pytest.mark.parametrize(
+    "response",
+    [
         _response(content="{not-json"),
         _response(finish_reason="length"),
-    ]
+    ],
+)
+def test_invalid_json_and_truncated_output_are_terminal_after_received_2xx(
+    response: dict[str, Any],
+) -> None:
+    """Malformed or truncated paid 2xx output is terminal and is not replayed."""
     calls = 0
 
     def handler(_request: httpx.Request) -> httpx.Response:
         nonlocal calls
-        response = responses[calls]
         calls += 1
         return httpx.Response(200, json=response)
 
@@ -362,12 +373,13 @@ def test_invalid_json_and_truncated_output_make_no_automatic_repair_call() -> No
             model=MODEL,
             prices=PRICES,
         )
-        with pytest.raises(DiscoveryProviderError):
-            extractor.extract(_company(), _bundle())
-        with pytest.raises(DiscoveryProviderError):
+        with pytest.raises(DiscoveryProviderError) as caught:
             extractor.extract(_company(), _bundle())
 
-    assert calls == 2
+    assert calls == 1
+    assert caught.value.kind == "invalid_response"
+    assert caught.value.retryable is False
+    assert caught.value.usage_event.request_count == 1
 
 
 def test_apply_extraction_updates_only_m2_fact_fields_and_preserves_m1_defaults() -> None:
@@ -400,6 +412,124 @@ def test_apply_extraction_updates_only_m2_fact_fields_and_preserves_m1_defaults(
     assert updated.final_score is None
     assert updated.final_decision is None
     assert updated.rejection_reasons == []
+
+
+def test_apply_extraction_downgrades_an_uncited_positive_proposition_to_unknown() -> None:
+    """A cited ID alone cannot make an unrelated numeric fact canonical."""
+    company = _company()
+    bundle = _bundle()
+    facts = {key: ExtractedFact(None, 0.0, []) for key in FACT_KEYS}
+    facts["branch_count"] = ExtractedFact(
+        12, 0.9, ["ev_000000000000000000000001"]
+    )
+    result = ExtractionResult(
+        company_id=company.company_id,
+        model=MODEL,
+        facts=facts,
+        usage_event=UsageEvent(provider="deepseek", operation="structured_extraction"),
+    )
+
+    updated = apply_extraction(company, bundle, result)
+
+    assert updated.features["branch_count"] is None
+    assert updated.feature_confidence["branch_count"] == {
+        "confidence": 0.0,
+        "evidence_ids": [],
+    }
+
+
+def test_apply_extraction_rejects_a_positive_boolean_without_its_predicate() -> None:
+    """A topical word alone cannot make a positive boolean fact canonical."""
+    company = _company()
+    bundle = EvidenceBundle(
+        company_id=company.company_id,
+        items=[
+            EvidenceItem(
+                evidence_id="ev_industrial_word",
+                url="https://acme.com/news",
+                excerpt="Our industrial design award recognizes excellent customer service.",
+                provider="exa",
+            )
+        ],
+        raw_records=[],
+        usage_events=[],
+    )
+    facts = {key: ExtractedFact(None, 0.0, []) for key in FACT_KEYS}
+    facts["industrial_or_process_customer_focus"] = ExtractedFact(
+        True, 0.9, ["ev_industrial_word"]
+    )
+    result = ExtractionResult(
+        company_id=company.company_id,
+        model=MODEL,
+        facts=facts,
+        usage_event=UsageEvent(provider="deepseek", operation="structured_extraction"),
+    )
+
+    updated = apply_extraction(company, bundle, result)
+
+    assert updated.features["industrial_or_process_customer_focus"] is None
+
+
+def test_apply_extraction_rejects_a_nearby_unrelated_numeric_claim() -> None:
+    """A number near a branch word is not evidence that the company has that many branches."""
+    company = _company()
+    bundle = EvidenceBundle(
+        company_id=company.company_id,
+        items=[
+            EvidenceItem(
+                evidence_id="ev_branch_manager",
+                url="https://acme.com/news",
+                excerpt="Our branch manager won 3 awards for customer service.",
+                provider="exa",
+            )
+        ],
+        raw_records=[],
+        usage_events=[],
+    )
+    facts = {key: ExtractedFact(None, 0.0, []) for key in FACT_KEYS}
+    facts["branch_count"] = ExtractedFact(3, 0.9, ["ev_branch_manager"])
+    result = ExtractionResult(
+        company_id=company.company_id,
+        model=MODEL,
+        facts=facts,
+        usage_event=UsageEvent(provider="deepseek", operation="structured_extraction"),
+    )
+
+    updated = apply_extraction(company, bundle, result)
+
+    assert updated.features["branch_count"] is None
+
+
+def test_apply_extraction_keeps_a_directly_stated_revenue_value() -> None:
+    """A normalized currency amount remains supported when paired with a revenue term."""
+    company = _company()
+    bundle = EvidenceBundle(
+        company_id=company.company_id,
+        items=[
+            EvidenceItem(
+                evidence_id="ev_revenue",
+                url="https://acme.com/about",
+                excerpt="Acme reported revenue of $5,000,000 in 2025.",
+                provider="exa",
+            )
+        ],
+        raw_records=[],
+        usage_events=[],
+    )
+    facts = {key: ExtractedFact(None, 0.0, []) for key in FACT_KEYS}
+    facts["revenue_if_reliably_available"] = ExtractedFact(
+        5_000_000, 0.9, ["ev_revenue"]
+    )
+    result = ExtractionResult(
+        company_id=company.company_id,
+        model=MODEL,
+        facts=facts,
+        usage_event=UsageEvent(provider="deepseek", operation="structured_extraction"),
+    )
+
+    updated = apply_extraction(company, bundle, result)
+
+    assert updated.features["revenue_if_reliably_available"] == 5_000_000
 
 
 def test_deepseek_http_failure_is_sanitized_and_counts_attempt() -> None:

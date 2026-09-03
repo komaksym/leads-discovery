@@ -15,10 +15,9 @@ import httpx
 
 from leads_discovery.dedup import _registrable_http_domain
 from leads_discovery.discovery.base import (
-    classify_http_status,
+    ProviderRequestContext,
     provider_error,
-    request_json,
-    safe_transport_call,
+    request_json_at_boundary,
     utc_timestamp,
 )
 from leads_discovery.models import (
@@ -223,65 +222,56 @@ class ExaEvidenceResearcher:
                 },
                 timeout=_REQUEST_TIMEOUT,
             )
-            response = safe_transport_call(
-                lambda http_request=http_request: self._client.send(http_request, stream=True),
-                provider="exa",
-                request_id=request.request_id,
-                operation="company_research",
-                request_count=delta_request_count,
+            http_request = self._client.build_request(
+                "POST",
+                _EXA_SEARCH_URL,
+                headers={"x-api-key": self._api_key},
+                json={
+                    "query": request.query,
+                    "type": "auto",
+                    "numResults": request.max_results,
+                    "contents": {"highlights": True},
+                },
+                timeout=_REQUEST_TIMEOUT,
             )
-            if not 200 <= response.status_code < 300:
-                status_code = response.status_code
-                response.close()
-                kind, retryable = classify_http_status(status_code)
-                raise provider_error(
-                    provider="exa",
-                    request_id=request.request_id,
-                    operation="company_research",
-                    request_count=delta_request_count,
-                    kind=kind,
-                    retryable=retryable,
-                    status_code=status_code,
-                    metadata={
-                        "company_id": company.company_id,
-                        "attempted_requests": attempted_position,
-                    },
-                ) from None
-            payload = request_json(
-                response,
-                provider="exa",
-                request_id=request.request_id,
-                operation="company_research",
-                request_count=delta_request_count,
+            context = ProviderRequestContext(
+                "exa",
+                request.request_id,
+                "company_research",
+                delta_request_count,
             )
-            if not isinstance(payload.get("results"), list):
-                raise provider_error(
-                    provider="exa",
-                    request_id=request.request_id,
-                    operation="company_research",
-                    request_count=delta_request_count,
+            error_metadata = {
+                "company_id": company.company_id,
+                "attempted_requests": attempted_position,
+            }
+            payload_raw, status_code = request_json_at_boundary(
+                self._client,
+                http_request,
+                context=context,
+                metadata=error_metadata,
+            )
+            if not isinstance(payload_raw, dict):
+                raise context.error(
                     kind="invalid_response",
                     retryable=False,
-                    status_code=response.status_code,
-                    metadata={
-                        "company_id": company.company_id,
-                        "attempted_requests": attempted_position,
-                    },
+                    status_code=status_code,
+                    metadata=error_metadata,
+                ) from None
+            payload = cast(dict[str, Any], payload_raw)
+            if not isinstance(payload.get("results"), list):
+                raise context.error(
+                    kind="invalid_response",
+                    retryable=False,
+                    status_code=status_code,
+                    metadata=error_metadata,
                 ) from None
             results = cast(list[Any], payload["results"])
             if any(not isinstance(row, dict) for row in results):
-                raise provider_error(
-                    provider="exa",
-                    request_id=request.request_id,
-                    operation="company_research",
-                    request_count=delta_request_count,
+                raise context.error(
                     kind="invalid_response",
                     retryable=False,
-                    status_code=response.status_code,
-                    metadata={
-                        "company_id": company.company_id,
-                        "attempted_requests": attempted_position,
-                    },
+                    status_code=status_code,
+                    metadata=error_metadata,
                 ) from None
             bounded_results = results[: request.max_results]
             call_raw_records = [cast(dict[str, Any], raw) for raw in bounded_results]

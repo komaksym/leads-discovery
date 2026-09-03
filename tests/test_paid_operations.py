@@ -2,17 +2,26 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from pathlib import Path
 
 from leads_discovery.models import RunCheckpoint, UsageEvent
 from leads_discovery.pipeline.costs import CostTracker
-from leads_discovery.pipeline.paid_operations import PaidOperationLifecycle, reservation_fits
+from leads_discovery.pipeline.paid_operations import (
+    PaidOperationLifecycle,
+    reservation_fits,
+    transition_checkpoint,
+)
 
 
-def _lifecycle(tmp_path: Path) -> tuple[PaidOperationLifecycle, list[int]]:
+def _lifecycle(
+    tmp_path: Path,
+    events: Iterable[UsageEvent] = (),
+) -> tuple[PaidOperationLifecycle, list[int]]:
     """Build a lifecycle with observable durable callback invocations."""
     checkpoint = RunCheckpoint(run_id="paid")
-    tracker = CostTracker()
+    replayed = list(events)
+    tracker = CostTracker(replayed)
     persisted: list[int] = []
     lifecycle = PaidOperationLifecycle(
         checkpoint=checkpoint,
@@ -20,6 +29,7 @@ def _lifecycle(tmp_path: Path) -> tuple[PaidOperationLifecycle, list[int]]:
         usage_path=tmp_path / "usage.jsonl",
         persist_checkpoint=lambda: persisted.append(1),
         publish_usage=lambda: None,
+        usage_events=replayed,
     )
     return lifecycle, persisted
 
@@ -67,64 +77,66 @@ def test_lifecycle_usage_is_authoritative_for_budget_replay(tmp_path: Path) -> N
     assert reservation_fits(0.99, 1.0, 0.01)
 
 
-
-def test_lifecycle_admits_exact_budget_and_persists_intent(tmp_path: Path) -> None:
-    """Exact-budget work is admitted and becomes durable before dispatch."""
+def test_lifecycle_transition_persists_the_complete_run_state(tmp_path: Path) -> None:
+    """Pause and completion state use the same durable lifecycle transition boundary."""
     lifecycle, persisted = _lifecycle(tmp_path)
 
-    admitted = lifecycle.admit(
-        "exa:one",
-        provider="exa",
-        operation="company_search",
-        ceiling=0.02,
-        reservation_usd=0.02,
-        budget_reason="exa_budget",
-        usage_unknown_reason="exa_usage_unknown",
+    transition_checkpoint(
+        lifecycle.checkpoint,
+        lifecycle.persist_checkpoint,
+        status="paused_unknown",
+        reason="apollo:contact-1",
+        company_id="company-1",
+        stage="people_enrichment",
     )
 
-    assert admitted is True
-    assert lifecycle.operations()["exa:one"]["state"] == "in_flight"
-    assert persisted
-
-
-def test_lifecycle_rejects_known_over_budget_before_intent(tmp_path: Path) -> None:
-    """Known above-budget work is rejected without creating dispatch intent."""
-    lifecycle, _ = _lifecycle(tmp_path)
-    lifecycle.record_usage(
-        UsageEvent(provider="exa", operation="company_search", estimated_cost_usd=0.02)
-    )
-
-    admitted = lifecycle.admit(
-        "exa:two",
-        provider="exa",
-        operation="company_search",
-        ceiling=0.02,
-        reservation_usd=0.001,
-        budget_reason="exa_budget",
-        usage_unknown_reason="exa_usage_unknown",
-    )
-
-    assert admitted is False
-    assert "exa:two" not in lifecycle.operations()
-    assert lifecycle.checkpoint.status == "paused_budget"
-
-
-def test_lifecycle_freezes_when_prior_provider_spend_is_unknown(tmp_path: Path) -> None:
-    """Incomplete authoritative usage cannot authorize another paid dispatch."""
-    lifecycle, _ = _lifecycle(tmp_path)
-    lifecycle.record_usage(UsageEvent(provider="exa", operation="company_search"))
-
-    admitted = lifecycle.admit(
-        "exa:two",
-        provider="exa",
-        operation="company_search",
-        ceiling=1.0,
-        reservation_usd=0.01,
-        budget_reason="exa_budget",
-        usage_unknown_reason="exa_usage_unknown",
-    )
-
-    assert admitted is False
-    assert "exa:two" not in lifecycle.operations()
     assert lifecycle.checkpoint.status == "paused_unknown"
-    assert lifecycle.checkpoint.pause_reason == "exa_usage_unknown"
+    assert lifecycle.checkpoint.pause_reason == "apollo:contact-1"
+    assert lifecycle.checkpoint.pending_company_id == "company-1"
+    assert lifecycle.checkpoint.pending_stage == "people_enrichment"
+    assert len(persisted) == 1
+
+
+def test_lifecycle_replays_provider_quotas_and_excludes_instantly_gets(
+    tmp_path: Path,
+) -> None:
+    """Quota admission counts Apollo credits and Instantly creates from the ledger only."""
+    events = [
+        UsageEvent(
+            provider="apollo",
+            operation="people_enrichment",
+            metadata={"credits_used": 2.0},
+        ),
+        UsageEvent(
+            provider="instantly",
+            operation="email_verification_create",
+            metadata={"credits_used": 1.0},
+        ),
+        UsageEvent(
+            provider="instantly",
+            operation="email_verification_get",
+            metadata={"credits_used": 0.0},
+        ),
+    ]
+    lifecycle, _ = _lifecycle(tmp_path, events)
+
+    assert lifecycle.quota_used("apollo") == 2.0
+    assert not lifecycle.quota_allows("apollo", 2.0, 1.0)
+    assert lifecycle.quota_used(
+        "instantly", operation="email_verification_create"
+    ) == 1.0
+    assert lifecycle.quota_allows(
+        "instantly",
+        2.0,
+        1.0,
+        operation="email_verification_create",
+    )
+
+    lifecycle.record_usage(
+        UsageEvent(
+            provider="instantly",
+            operation="email_verification_get",
+            metadata={"credits_used": 0.0},
+        )
+    )
+    assert lifecycle.quota_used("instantly", operation="email_verification_create") == 1.0
