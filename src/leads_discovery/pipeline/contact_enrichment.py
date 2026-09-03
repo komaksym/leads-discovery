@@ -8,10 +8,17 @@ import math
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Protocol, cast
 
 from leads_discovery.contacts.models import ContactRecord
-from leads_discovery.contacts.providers import ContactProviderError, clay_item_email
+from leads_discovery.contacts.providers import (
+    ApolloResult,
+    ClayResults,
+    ClayStartResult,
+    ContactProviderError,
+    VerificationResult,
+    clay_item_email,
+)
 from leads_discovery.models import CompanyRecord, RunCheckpoint
 from leads_discovery.pipeline.contact_discovery import (
     _accepted,
@@ -48,6 +55,22 @@ _CSV_COLUMNS = (
     "profile_url",
     "email_source",
 )
+
+
+class _ClayProvider(Protocol):
+    def start(self, contacts: list[ContactRecord]) -> ClayStartResult: ...
+
+    def results(self, routine_run_id: str) -> ClayResults: ...
+
+
+class _ApolloProvider(Protocol):
+    def enrich(self, contact: ContactRecord) -> ApolloResult: ...
+
+
+class _InstantlyProvider(Protocol):
+    def create(self, email: str) -> VerificationResult: ...
+
+    def get(self, email: str) -> VerificationResult: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -292,9 +315,9 @@ def _record_error(
 def run_contact_enrichment(
     config: ContactEnrichmentConfig,
     *,
-    clay: Any,
-    apollo: Any,
-    instantly: Any,
+    clay: _ClayProvider,
+    apollo: _ApolloProvider,
+    instantly: _InstantlyProvider,
 ) -> ContactEnrichmentSummary:
     """Run only the paid boundary; every provider call is lifecycle-admitted."""
     if not config.execute_live:
