@@ -178,7 +178,11 @@ def _paid_contacts(
     counts: dict[str, int] = {}
     paid: list[ContactRecord] = []
     for contact in _ordered_contacts(contacts):
-        if contact.company_id not in accepted_ids or not contact.current_employment_confirmed:
+        if (
+            contact.company_id not in accepted_ids
+            or not contact.current_employment_confirmed
+            or contact.decision_rank not in {1, 2}
+        ):
             continue
         count = counts.get(contact.company_id, 0)
         if count >= limit:
