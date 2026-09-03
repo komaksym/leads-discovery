@@ -371,6 +371,34 @@ def test_enrichment_is_bounded_exact_cap_and_idempotent(tmp_path: Path) -> None:
     assert replay.status == "completed"
 
 
+def test_persisted_paused_unknown_freezes_when_operation_evidence_is_torn(
+    tmp_path: Path,
+) -> None:
+    run_id = "torn-unknown"
+    _discover(tmp_path, run_id)
+    checkpoint_path = tmp_path / run_id / "contact_discovery_checkpoint.json"
+    checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    checkpoint["status"] = "paused_unknown"
+    checkpoint["pause_reason"] = "apollo:ctc_123"
+    checkpoint["provider_state"]["operations"] = {}
+    checkpoint_path.write_text(
+        json.dumps(checkpoint, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    frozen = run_contact_enrichment(
+        _config(tmp_path, run_id),
+        clay=_BombClay(),
+        apollo=_BombApollo(),
+        instantly=_BombInstantly(),
+    )
+
+    assert frozen.status == "paused_unknown"
+    persisted = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    assert persisted["status"] == "paused_unknown"
+    assert persisted["pause_reason"] == "apollo:ctc_123"
+
+
 def test_crash_after_clay_intent_freezes_without_replay(tmp_path: Path) -> None:
     run_id = "clay-crash"
     _discover(tmp_path, run_id)
