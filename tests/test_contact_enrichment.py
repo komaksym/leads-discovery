@@ -368,6 +368,43 @@ def test_pending_clay_resume_fails_closed_for_contact_outside_current_paid_bound
     assert persisted_rank3["provider_attempts"] == []
 
 
+
+def test_pending_clay_resume_fails_closed_when_paid_limit_shrinks(
+    tmp_path: Path,
+) -> None:
+    run_id = "pending-clay-limit-shrink"
+    _discover(tmp_path, run_id)
+    clay = _Clay()
+    initial_config = _config(tmp_path, run_id, max_paid=2, clay_cap=2)
+
+    initial = run_contact_enrichment(
+        initial_config,
+        clay=clay,
+        apollo=_BombApollo(),
+        instantly=_BombInstantly(),
+    )
+    assert initial.status == "paused_pending"
+    assert len(clay.started) == 1
+    assert len(clay.started[0]) == 2
+    assert clay.result_calls == 0
+
+    resumed = run_contact_enrichment(
+        _config(tmp_path, run_id, max_paid=1, clay_cap=2),
+        clay=clay,
+        apollo=_BombApollo(),
+        instantly=_BombInstantly(),
+    )
+
+    assert resumed.status == "paused_unknown"
+    assert clay.result_calls == 0
+    rows = [
+        json.loads(line)
+        for line in resumed.contacts_path.read_text(encoding="utf-8").splitlines()
+    ]
+    rank2 = next(row for row in rows if row["decision_rank"] == 2)
+    assert rank2["provider_attempts"] == []
+
+
 def test_enrichment_is_bounded_exact_cap_and_idempotent(tmp_path: Path) -> None:
     run_id = "bounded"
     _discover(tmp_path, run_id)
