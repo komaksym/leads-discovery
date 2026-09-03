@@ -33,9 +33,9 @@ Do not put credentials on the command line or in committed files.
 
 ## Commands
 
-### Full run
+### Batch company run (M1–M3)
 
-A full run is dry by default. Without `--execute-live`, it does not read provider credentials, create provider clients, or make network calls.
+The normal product input is market/search criteria plus independent company limits; it does not accept a company ID or company name as the primary input. A batch company run is dry by default. Without `--execute-live`, it does not read provider credentials, create provider clients, or make network calls.
 
 ```bash
 python -m leads_discovery run \
