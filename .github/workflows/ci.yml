@@ -31,8 +31,15 @@ jobs:
         run: pytest
       - name: Build
         run: python -m build
-      - name: Offline dry run
-        run: python -m leads_discovery run --run-id ci-dry --deepseek-budget-usd 0.01
+      - name: Offline batch dry run
+        run: |
+          python -m leads_discovery run \
+            --run-id ci-dry \
+            --market "PVF" \
+            --search-term "regional distributors" \
+            --max-candidates 7 \
+            --max-evaluated 3 \
+            --deepseek-budget-usd 0.01
       - name: Validate production workflow safety
         run: |
           python - <<'PY'
