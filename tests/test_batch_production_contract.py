@@ -107,7 +107,7 @@ class _BatchDiscovery:
                 city="Houston",
                 region="TX",
                 postal_code="77001",
-                country_code="US",
+                country_code="MX" if company_id == "cmp_zz_delta" else "US",
                 title=name,
                 snippet="Industrial PVF distributor with an RFQ workflow.",
                 raw_metadata={"request": request.request_id},
@@ -190,12 +190,12 @@ class _BatchExtractor:
         facts = {key: ExtractedFact(None, 0.0, []) for key in FACT_KEYS}
         keys = (
             ("pvf_relevant",)
-            if company.company_id == "cmp_gamma"
+            if company.name == "Gamma Valve"
             else tuple(_SUPPORTED_FACTS)
         )
         for key in keys:
             facts[key] = ExtractedFact(_SUPPORTED_FACTS[key], 0.9, [supported_id])
-        if company.company_id != "cmp_gamma":
+        if company.name != "Gamma Valve":
             facts["direct_quotation_pain_evidence"] = ExtractedFact(
                 True,
                 0.9,
@@ -358,11 +358,11 @@ def test_normal_batch_processes_multiple_companies_through_m1_m4(
     assert len(read_jsonl(run_dir / "companies_deduped.jsonl")) == 4
     evaluated = read_jsonl(run_dir / "companies_evaluated.jsonl")
     assert len(evaluated) == 3
-    by_id = {str(row["company_id"]): row for row in evaluated}
-    assert set(by_id) == {"cmp_alpha", "cmp_beta", "cmp_gamma"}
-    assert by_id["cmp_alpha"]["final_decision"] == "accepted"
-    assert by_id["cmp_beta"]["final_decision"] == "accepted"
-    assert by_id["cmp_gamma"]["final_decision"] == "uncertain"
+    by_name = {str(row["name"]): row for row in evaluated}
+    assert set(by_name) == {"Alpha Valve", "Beta Valve", "Gamma Valve"}
+    assert by_name["Alpha Valve"]["final_decision"] == "accepted"
+    assert by_name["Beta Valve"]["final_decision"] == "accepted"
+    assert by_name["Gamma Valve"]["final_decision"] == "uncertain"
 
     for row in evaluated:
         assert row["discovery_sources"] == ["exa"]
@@ -373,8 +373,8 @@ def test_normal_batch_processes_multiple_companies_through_m1_m4(
         assert 1 <= len(evidence) <= 12
         assert sum(len(str(item.get("excerpt") or "")) for item in evidence) <= 20_000
 
-    assert by_id["cmp_alpha"]["features"]["direct_quotation_pain_evidence"] is None
-    assert by_id["cmp_beta"]["features"]["direct_quotation_pain_evidence"] is None
+    assert by_name["Alpha Valve"]["features"]["direct_quotation_pain_evidence"] is None
+    assert by_name["Beta Valve"]["features"]["direct_quotation_pain_evidence"] is None
     assert (run_dir / "research_raw.jsonl").exists()
 
     clay = ClayRoutineScript(
@@ -396,7 +396,11 @@ def test_normal_batch_processes_multiple_companies_through_m1_m4(
     assert enrich_code == 0
 
     contacts = read_jsonl(run_dir / "contacts.jsonl")
-    assert {row["company_id"] for row in contacts} == {"cmp_alpha", "cmp_beta"}
+    accepted_ids = {
+        by_name["Alpha Valve"]["company_id"],
+        by_name["Beta Valve"]["company_id"],
+    }
+    assert {row["company_id"] for row in contacts} == accepted_ids
     assert all(row["email_verification_status"] == "verified" for row in contacts)
     assert len(read_csv(run_dir / "leads.csv")) == 2
     assert len(stub.for_provider("exa")) == 2
