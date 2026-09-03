@@ -337,6 +337,9 @@ def run_contact_enrichment(
         lifecycle.pause(status=status, reason=reason, stage="contact_enrichment")
         return _summary(config, paths, accepted, checkpoint, contacts)
 
+    if checkpoint.status == "paused_unknown":
+        return _summary(config, paths, accepted, checkpoint, contacts)
+
     stored_fingerprint = checkpoint.provider_state.get("accepted_fingerprint")
     current_fingerprint = _accepted_fingerprint(accepted)
     if stored_fingerprint != current_fingerprint:
