@@ -258,6 +258,31 @@ def _people(request: httpx.Request) -> httpx.Response:
     )
 
 
+
+def _batch_run_args(tmp_path: Path, run_id: str) -> list[str]:
+    """Build the shared normal-batch CLI controls used by both contract paths."""
+    return [
+        "run",
+        "--run-id",
+        run_id,
+        "--data-root",
+        str(tmp_path),
+        "--market",
+        "industrial pumps",
+        "--search-term",
+        "regional distributors",
+        "--search-term",
+        "RFQ workflow",
+        "--target-geography",
+        "US",
+        "--max-candidates",
+        "4",
+        "--max-evaluated",
+        "3",
+        "--deepseek-budget-usd",
+        "1",
+    ]
+
 def test_batch_limits_do_not_authorize_live_work(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -268,29 +293,7 @@ def test_batch_limits_do_not_authorize_live_work(
     monkeypatch.setattr(research_module, "ExaEvidenceResearcher", _ConstructorBomb)
     monkeypatch.setattr(research_module, "DeepSeekExtractor", _ConstructorBomb)
 
-    code = cli_main(
-        [
-            "run",
-            "--run-id",
-            "batch-dry",
-            "--data-root",
-            str(tmp_path),
-            "--market",
-            "industrial pumps",
-            "--search-term",
-            "regional distributors",
-            "--search-term",
-            "RFQ workflow",
-            "--target-geography",
-            "US",
-            "--max-candidates",
-            "4",
-            "--max-evaluated",
-            "3",
-            "--deepseek-budget-usd",
-            "1",
-        ]
-    )
+    code = cli_main(_batch_run_args(tmp_path, "batch-dry"))
 
     payload = json.loads(capsys.readouterr().out)
     assert code == 0
@@ -316,30 +319,7 @@ def test_normal_batch_processes_multiple_companies_through_m1_m4(
     monkeypatch.setenv("DEEPSEEK_API_KEY", "offline-deepseek")
 
     run_id = "batch-contract"
-    code = cli_main(
-        [
-            "run",
-            "--run-id",
-            run_id,
-            "--data-root",
-            str(tmp_path),
-            "--market",
-            "industrial pumps",
-            "--search-term",
-            "regional distributors",
-            "--search-term",
-            "RFQ workflow",
-            "--target-geography",
-            "US",
-            "--max-candidates",
-            "4",
-            "--max-evaluated",
-            "3",
-            "--deepseek-budget-usd",
-            "1",
-            "--execute-live",
-        ]
-    )
+    code = cli_main([*_batch_run_args(tmp_path, run_id), "--execute-live"])
     run_payload = json.loads(capsys.readouterr().out)
     assert code == 0
     assert run_payload["evaluation"]["evaluated_count"] == 3
