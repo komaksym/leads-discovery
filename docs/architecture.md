@@ -47,6 +47,8 @@ Only the current accepted-company set authorizes contact work. Persisted stale c
 
 Contact ranking/deduplication is deterministic. Paid enrichment is limited to the configured top eligible contacts. Provider-specific contact transport remains behind the existing M4 orchestration boundary.
 
+M4 is work-email discovery and verification only. It must not add phones, personal emails, outreach, CRM integration, a database, a frontend, or autonomous SDR behavior.
+
 ## Transport and persistence safety
 
 Provider adapters own explicit request timeouts and bounded streamed response reads. Oversized declared bodies are rejected before consumption when possible, and chunked/no-length responses stop at the first chunk crossing the configured ceiling.
@@ -55,7 +57,7 @@ Persisted run state must stay inside the configured run root, reject unsafe path
 
 ## Publication and canary boundaries
 
-Local/dry commands do not authorize live provider work. Public CI must not publish prospect/contact artifacts. The credentialed production canary is manual-only, fixed to intentionally tiny ceilings, and is run only after the offline safety gate is green.
+Local/dry commands and ordinary offline CI do not authorize live provider work or publish prospect/contact artifacts. The credentialed production canary is manual-only, fixed to intentionally tiny ceilings, and is run only after the offline safety gate is green. That explicit canary publication boundary may publish only the approved `leads.csv` and `contacts.jsonl` outputs to the dedicated `generated-leads` branch; checkpoints, usage ledgers, provider payloads, credentials, temporary files, and debug state remain private to the runner.
 
 ## Permanent verification contract
 
