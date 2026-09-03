@@ -3,17 +3,80 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from leads_discovery.models import RunCheckpoint, UsageEvent
 from leads_discovery.pipeline.costs import CostTracker
-from leads_discovery.pipeline.state import append_usage_event, load_usage_events
+from leads_discovery.pipeline.state import append_usage_event
 
 _OPERATION_STATES = frozenset({"in_flight", "completed", "failed", "pending"})
+QuotaUnit = Literal["credits", "requests"]
+
+
+def _finite_nonnegative(value: object, *, field_name: str) -> float:
+    """Validate one persisted quota amount without accepting malformed numbers."""
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+        or value < 0
+    ):
+        raise ValueError(f"{field_name} must be a finite nonnegative number")
+    return float(value)
+
+
+def _event_quota_amount(
+    event: UsageEvent,
+    provider: str,
+    *,
+    operation: str | None,
+    unit: QuotaUnit,
+) -> float:
+    """Return one event's contribution to a provider quota dimension."""
+    if event.provider != provider:
+        return 0.0
+    if operation is not None and event.operation != operation:
+        return 0.0
+    if unit == "requests":
+        return _finite_nonnegative(event.request_count, field_name="request_count")
+
+    raw = event.metadata.get("credits_used")
+    if raw is None and provider == "apollo":
+        raw = event.metadata.get("credits_reserved", 1.0)
+    if raw is None:
+        return 0.0
+    return _finite_nonnegative(raw, field_name=f"{provider} credits")
+
+
+def replay_quota_totals(events: Iterable[UsageEvent]) -> tuple[float, int, float]:
+    """Replay Apollo credits and Instantly create/credit totals from usage events."""
+    apollo = 0.0
+    instantly_create_calls = 0.0
+    instantly_credits = 0.0
+    for event in events:
+        apollo += _event_quota_amount(
+            event,
+            "apollo",
+            operation=None,
+            unit="credits",
+        )
+        instantly_create_calls += _event_quota_amount(
+            event,
+            "instantly",
+            operation="email_verification_create",
+            unit="requests",
+        )
+        instantly_credits += _event_quota_amount(
+            event,
+            "instantly",
+            operation=None,
+            unit="credits",
+        )
+    return apollo, int(instantly_create_calls), instantly_credits
 
 
 def reservation_fits(
@@ -45,6 +108,50 @@ def find_unknown_in_flight(
     return None
 
 
+def checkpoint_has_unknown_paid_work(checkpoint: RunCheckpoint) -> bool:
+    """Fail closed when a run checkpoint records an unresolved paid outcome."""
+    if checkpoint.status == "paused_unknown":
+        return True
+    try:
+        operations = _operation_map(checkpoint)
+    except ValueError:
+        return True
+    return find_unknown_in_flight(operations) is not None
+
+
+def transition_checkpoint(
+    checkpoint: RunCheckpoint,
+    persist: Callable[[], None],
+    *,
+    status: str,
+    reason: str | None,
+    company_id: str | None = None,
+    stage: str | None = None,
+) -> None:
+    """Persist one shared run-state transition through the paid lifecycle boundary."""
+    checkpoint.status = status
+    checkpoint.pause_reason = reason
+    checkpoint.pending_company_id = company_id
+    checkpoint.pending_stage = stage
+    persist()
+
+
+def _operation_map(checkpoint: RunCheckpoint) -> dict[str, dict[str, Any]]:
+    """Return the mutable operation mapping after validating its persisted container shape."""
+    raw = checkpoint.provider_state.setdefault("operations", {})
+    if not isinstance(raw, dict):
+        raise ValueError("checkpoint operations must be an object")
+    operations: dict[str, dict[str, Any]] = {}
+    for operation_id, value in raw.items():
+        if not isinstance(operation_id, str) or not operation_id:
+            raise ValueError("checkpoint operation names must be nonblank strings")
+        if not isinstance(value, dict):
+            raise ValueError("checkpoint operation entries must be objects")
+        operations[operation_id] = cast(dict[str, Any], value)
+    checkpoint.provider_state["operations"] = operations
+    return operations
+
+
 @dataclass(slots=True)
 class PaidOperationLifecycle:
     """Own intent, usage, transition, and replay-barrier mechanics for paid operations."""
@@ -54,23 +161,22 @@ class PaidOperationLifecycle:
     usage_path: Path
     persist_checkpoint: Callable[[], None]
     publish_usage: Callable[[], None]
+    usage_events: Iterable[UsageEvent] = ()
+    _usage_events: list[UsageEvent] = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        """Own a defensive replay snapshot of the authoritative usage ledger."""
+        self._usage_events = [
+            UsageEvent.from_dict(event.to_dict()) for event in self.usage_events
+        ]
 
     def operations(self) -> dict[str, dict[str, Any]]:
         """Return the shared mutable operation map after validating its basic shape."""
-        raw = self.checkpoint.provider_state.setdefault("operations", {})
-        if not isinstance(raw, dict):
-            raise ValueError("checkpoint operations must be an object")
-        operations: dict[str, dict[str, Any]] = {}
-        for operation_id, value in raw.items():
-            if not isinstance(operation_id, str) or not operation_id:
-                raise ValueError("checkpoint operation names must be nonblank strings")
-            if not isinstance(value, dict):
-                raise ValueError("checkpoint operation entries must be objects")
+        operations = _operation_map(self.checkpoint)
+        for value in operations.values():
             state = value.get("state")
             if state not in _OPERATION_STATES:
                 raise ValueError("checkpoint operation has an invalid state")
-            operations[operation_id] = cast(dict[str, Any], value)
-        self.checkpoint.provider_state["operations"] = operations
         return operations
 
     def budget_allows(
@@ -84,225 +190,50 @@ class PaidOperationLifecycle:
             self.tracker.provider_estimated_spend(provider), ceiling, reservation
         )
 
+    def quota_allows(
+        self,
+        provider: str,
+        ceiling: float | None,
+        reservation: float = 0.0,
+        *,
+        operation: str | None = None,
+        unit: QuotaUnit | None = None,
+    ) -> bool:
+        """Apply admission against replayed provider quota owned by this lifecycle."""
+        return reservation_fits(
+            self.quota_used(provider, operation=operation, unit=unit),
+            ceiling,
+            reservation,
+        )
+
     def quota_used(
         self,
         provider: str,
         *,
         operation: str | None = None,
-        metadata_field: str | None = None,
+        unit: QuotaUnit | None = None,
     ) -> float:
-        """Replay a provider quota directly from the authoritative usage ledger."""
-        total = 0.0
-        for event in load_usage_events(self.usage_path):
-            if event.provider != provider:
-                continue
-            if operation is not None and event.operation != operation:
-                continue
-            raw: object = (
-                event.request_count
-                if metadata_field is None
-                else event.metadata.get(metadata_field, 0)
+        """Return committed quota from replayed and newly recorded usage events."""
+        if unit is None:
+            unit = "credits" if provider == "apollo" else "requests"
+        if unit not in {"credits", "requests"}:
+            raise ValueError("quota unit must be credits or requests")
+        return sum(
+            _event_quota_amount(
+                event,
+                provider,
+                operation=operation,
+                unit=unit,
             )
-            if (
-                isinstance(raw, bool)
-                or not isinstance(raw, (int, float))
-                or not math.isfinite(raw)
-                or raw < 0
-            ):
-                raise ValueError("provider quota usage must be a nonnegative finite number")
-            total += float(raw)
-        return total
-
-    def pause(
-        self,
-        *,
-        status: str,
-        reason: str,
-        company_id: str | None = None,
-        stage: str | None = None,
-    ) -> None:
-        """Persist a lifecycle-owned paid-work pause or freeze."""
-        if status not in {"paused_budget", "paused_unknown", "paused_pending"}:
-            raise ValueError("paid lifecycle pause status is invalid")
-        self.checkpoint.status = status
-        self.checkpoint.pause_reason = reason
-        self.checkpoint.pending_company_id = company_id
-        self.checkpoint.pending_stage = stage
-        self.persist_checkpoint()
-
-    def admit(
-        self,
-        operation_id: str,
-        *,
-        provider: str,
-        operation: str,
-        ceiling: float | None,
-        reservation_usd: float = 0.0,
-        budget_reason: str,
-        usage_unknown_reason: str,
-        request_id: str | None = None,
-        company_id: str | None = None,
-        fields: Mapping[str, Any] | None = None,
-        pending_stage: str | None = None,
-        pause_on_budget: bool = True,
-    ) -> bool:
-        """Own budget admission and durable intent as one pre-dispatch decision."""
-        committed = self.tracker.provider_estimated_spend(provider)
-        if ceiling is not None and committed is None:
-            self.pause(
-                status="paused_unknown",
-                reason=usage_unknown_reason,
-                company_id=company_id,
-                stage=pending_stage or operation,
-            )
-            return False
-        if not reservation_fits(committed, ceiling, reservation_usd):
-            if pause_on_budget:
-                self.pause(
-                    status="paused_budget",
-                    reason=budget_reason,
-                    company_id=company_id,
-                    stage=pending_stage or operation,
-                )
-            return False
-        self.begin(
-            operation_id,
-            provider=provider,
-            operation=operation,
-            fields=fields,
-            request_id=request_id,
-            company_id=company_id,
-            reservation_usd=reservation_usd,
-            pending_stage=pending_stage,
+            for event in self._usage_events
         )
-        return True
 
-    def admit_quota(
-        self,
-        operation_id: str,
-        *,
-        provider: str,
-        operation: str,
-        ceiling: float | None,
-        reservation: float,
-        budget_reason: str,
-        quota_operation: str | None = None,
-        metadata_field: str | None = None,
-        company_id: str | None = None,
-        fields: Mapping[str, Any] | None = None,
-        pending_stage: str | None = None,
-    ) -> bool:
-        """Check an event-backed quota and persist intent before dispatch."""
-        used = self.quota_used(
-            provider,
-            operation=quota_operation,
-            metadata_field=metadata_field,
-        )
-        if not reservation_fits(used, ceiling, reservation):
-            self.pause(
-                status="paused_budget",
-                reason=budget_reason,
-                company_id=company_id,
-                stage=pending_stage or operation,
-            )
-            return False
-        self.begin(
-            operation_id,
-            provider=provider,
-            operation=operation,
-            fields=fields,
-            company_id=company_id,
-            pending_stage=pending_stage,
-        )
-        return True
-
-    def reserve_continuation(
-        self,
-        operation_id: str,
-        *,
-        provider: str,
-        ceiling: float | None,
-        reservation_usd: float,
-        budget_reason: str,
-        usage_unknown_reason: str,
-        fields: Mapping[str, Any] | None = None,
-        company_id: str | None = None,
-        stage: str | None = None,
-    ) -> bool:
-        """Own admission for the next call inside an already-authorized resumable operation."""
-        operations = self.operations()
-        if operation_id not in operations:
-            raise ValueError("paid operation intent is missing")
-        entry = operations[operation_id]
-        entry.update(deepcopy(dict(fields or {})))
-        committed = self.tracker.provider_estimated_spend(provider)
-        if ceiling is not None and committed is None:
-            entry["state"] = "pending"
-            entry.pop("reservation_usd", None)
-            self.pause(
-                status="paused_unknown",
-                reason=usage_unknown_reason,
-                company_id=company_id,
-                stage=stage,
-            )
-            return False
-        if not reservation_fits(committed, ceiling, reservation_usd):
-            entry["state"] = "pending"
-            entry["reservation_usd"] = reservation_usd
-            self.pause(
-                status="paused_budget",
-                reason=budget_reason,
-                company_id=company_id,
-                stage=stage,
-            )
-            return False
-        entry["reservation_usd"] = reservation_usd
-        self.persist_checkpoint()
-        return True
-
-    def update_operation(
-        self,
-        operation_id: str,
-        *,
-        fields: Mapping[str, Any] | None = None,
-        state: str | None = None,
-        clear_pending: bool = False,
-    ) -> None:
-        """Update lifecycle-owned persisted operation metadata without exposing storage mutation."""
-        operations = self.operations()
-        if operation_id not in operations:
-            raise ValueError("paid operation intent is missing")
-        entry = operations[operation_id]
-        entry.update(deepcopy(dict(fields or {})))
-        if state is not None:
-            if state not in _OPERATION_STATES:
-                raise ValueError("paid operation has an invalid transition state")
-            entry["state"] = state
-        if clear_pending:
-            self.checkpoint.pending_company_id = None
-            self.checkpoint.pending_stage = None
-        self.persist_checkpoint()
-
-    def freeze_if_unknown(
-        self,
-        *,
-        replayable: Callable[[str, Mapping[str, Any]], bool] | None = None,
-        reason_prefix: str = "unknown_in_flight",
-    ) -> tuple[str, dict[str, Any]] | None:
-        """Freeze the run when unresolved paid work cannot be proven safe to resume."""
-        unknown = self.unknown_in_flight(replayable=replayable)
-        if unknown is None:
-            return None
-        operation_id, entry = unknown
-        company_id = entry.get("company_id")
-        stage = entry.get("operation")
-        self.pause(
-            status="paused_unknown",
-            reason=f"{reason_prefix}:{operation_id}",
-            company_id=company_id if isinstance(company_id, str) else None,
-            stage=stage if isinstance(stage, str) else None,
-        )
-        return unknown
+    @classmethod
+    def replay_quota_totals(
+        cls, events: Iterable[UsageEvent]
+    ) -> tuple[float, int, float]:
+        """Replay the stable M4 quota summary through the lifecycle boundary."""
+        return replay_quota_totals(events)
 
     def begin(
         self,
@@ -370,8 +301,10 @@ class PaidOperationLifecycle:
 
     def record_usage(self, event: UsageEvent) -> None:
         """Append one authoritative usage event and refresh its derived summary."""
-        append_usage_event(self.usage_path, event)
-        self.tracker.record(event)
+        stored = UsageEvent.from_dict(event.to_dict())
+        append_usage_event(self.usage_path, stored)
+        self.tracker.record(stored)
+        self._usage_events.append(stored)
         self.publish_usage()
 
     def unknown_in_flight(
@@ -383,4 +316,11 @@ class PaidOperationLifecycle:
         return find_unknown_in_flight(self.operations(), replayable=replayable)
 
 
-__all__ = ["PaidOperationLifecycle", "find_unknown_in_flight", "reservation_fits"]
+__all__ = [
+    "PaidOperationLifecycle",
+    "checkpoint_has_unknown_paid_work",
+    "find_unknown_in_flight",
+    "replay_quota_totals",
+    "reservation_fits",
+    "transition_checkpoint",
+]
