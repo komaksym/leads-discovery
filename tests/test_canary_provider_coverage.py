@@ -38,7 +38,7 @@ def _company(decision: str) -> CompanyRecord:
         normalized_domain="acme.com",
         country="US",
     )
-    company.final_decision = decision  # type: ignore[assignment]
+    company.final_decision = decision
     company.final_score = 9.0
     company.stage_status["decision"] = "completed"
     return company
