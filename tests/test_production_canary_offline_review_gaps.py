@@ -316,7 +316,7 @@ def test_uncertain_company_makes_zero_normal_m4_provider_calls(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An uncertain evaluated company stays outside normal M4 while exact-company coverage may run."""
+    """An uncertain company stays outside normal M4 while exact-company coverage may run."""
     run_id = "canary-review-uncertain"
     stub = WireStub({"exa": _exa_zero})
     run_dir = _install_contract(monkeypatch, tmp_path, run_id, _uncertain_company(), stub)
