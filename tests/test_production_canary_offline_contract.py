@@ -472,7 +472,9 @@ def test_instantly_invalid_is_provider_success_but_pipeline_remains_inconclusive
     contact = ContactRecord.from_dict(read_jsonl(run_dir / "contacts.jsonl")[0])
     assert contact.work_email == _EMAIL
     assert contact.email_verification_status == "invalid"
-    assert read_csv(run_dir / "leads.csv") == []
+    leads = read_csv(run_dir / "leads.csv")
+    assert len(leads) == 1
+    assert leads[0]["email_verification_status"] == "invalid"
 
     report = _report(run_dir)
     instantly_coverage = _provider(report, "instantly")
