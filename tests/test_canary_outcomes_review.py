@@ -8,7 +8,10 @@ import pytest
 
 from leads_discovery.contacts.models import ContactRecord
 from leads_discovery.models import CompanyRecord, EvidenceItem, RunCheckpoint, UsageEvent
-from leads_discovery.pipeline.canary_outcomes import build_canary_coverage_report
+from leads_discovery.pipeline.canary_outcomes import (
+    CanaryCoverageReport,
+    build_canary_coverage_report,
+)
 from leads_discovery.pipeline.state import (
     append_jsonl,
     write_json_atomic,
@@ -150,9 +153,11 @@ def _write_contact_artifacts(
     )
 
 
-def _provider_outcome(report: object, provider: str) -> tuple[str, str]:
-    providers = getattr(report, "providers")
-    row = next(item for item in providers if item.provider == provider)
+def _provider_outcome(
+    report: CanaryCoverageReport,
+    provider: str,
+) -> tuple[str, str]:
+    row = next(item for item in report.providers if item.provider == provider)
     return row.integration_outcome, row.business_outcome
 
 
