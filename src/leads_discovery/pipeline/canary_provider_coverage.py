@@ -653,6 +653,8 @@ def run_provider_coverage(
         normal_usage,
         contacts,
     )
+    if company.final_decision == "accepted" and not normal_exa_completed:
+        raise ValueError("accepted company lacks normal Exa People provider evidence")
     contact = _exa_contact(paid, company, normal_exa_completed, normal_contact, exa)
     if contact is None:
         return _finish_summary(paid, run_id, pending=False)
