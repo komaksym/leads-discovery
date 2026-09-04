@@ -23,9 +23,11 @@ from m4_contract_fixtures import (
 )
 
 from leads_discovery import production_canary
+from leads_discovery.cli import main as cli_main
 from leads_discovery.contacts.models import ContactRecord
 from leads_discovery.contacts.selection import select_contacts
 from leads_discovery.models import CompanyRecord, RunCheckpoint, UsageEvent
+from leads_discovery.pipeline.canary_provider_coverage import run_live_provider_coverage
 from leads_discovery.pipeline.state import append_jsonl, read_json, write_checkpoint
 
 _EMAIL = "pat.owner@acmevalve.com"
@@ -157,7 +159,7 @@ def _install_seeded_run(
     company: CompanyRecord,
 ) -> Path:
     """Let the canary call its normal run phase while keeping M1-M3 outside this ticket's scope."""
-    real_cli = production_canary.cli_main
+    real_cli = cli_main
     seeded = False
 
     def seeded_cli(argv: Sequence[str] | None = None) -> int:
@@ -686,7 +688,7 @@ def test_present_contact_artifact_without_durable_exa_evidence_does_not_suppress
     run_id = "canary-stale-contact-artifact"
     stub = WireStub({"exa": _exa_zero})
     run_dir = _install_contract(monkeypatch, tmp_path, run_id, _rejected_company(), stub)
-    real_coverage = production_canary.run_live_provider_coverage
+    real_coverage = run_live_provider_coverage
 
     def coverage_with_stale_contact(data_root: Path, *, run_id: str) -> Any:
         evaluated_rows = read_jsonl(data_root / run_id / "companies_evaluated.jsonl")
