@@ -45,7 +45,7 @@ M3 scoring remains deterministic and consumes canonicalized facts.
 
 Only the current accepted-company set authorizes contact work. Persisted stale contacts cannot authorize new paid work.
 
-Contact ranking/deduplication is deterministic. Paid enrichment is limited to the configured top eligible contacts. Provider-specific contact transport remains behind the existing M4 orchestration boundary.
+Contact ranking/deduplication is deterministic. M4 retains at most three contacts per company. Paid enrichment is limited to the first two eligible rank-1/rank-2 contacts; rank-3 contacts never trigger paid enrichment. Provider-specific contact transport remains behind the existing M4 orchestration boundary.
 
 M4 is work-email discovery and verification only. It must not add phones, personal emails, outreach, CRM integration, a database, a frontend, or autonomous SDR behavior.
 
