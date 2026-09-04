@@ -4,9 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from leads_discovery.pipeline.canary_paid_operations import CanaryPaidOperations
-
 from leads_discovery.models import RunCheckpoint, UsageEvent
+from leads_discovery.pipeline.canary_paid_operations import CanaryPaidOperations
 from leads_discovery.pipeline.state import append_usage_event, write_checkpoint
 
 
