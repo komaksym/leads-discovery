@@ -74,12 +74,49 @@ def test_open_rejects_unknown_private_checkpoint_status(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("pause_reason", "unexpected"),
+        ("pending_company_id", "contact-1"),
+        ("pending_stage", "coverage"),
+    ],
+)
+def test_open_rejects_impossible_private_top_level_fields(
+    tmp_path: Path,
+    field: str,
+    value: str,
+) -> None:
+    """Private replay rejects normal-domain pause/pending metadata it never persists."""
+    run_id = f"private-top-level-{field}"
+    run_dir = tmp_path / run_id
+    run_dir.mkdir()
+    checkpoint = RunCheckpoint(
+        run_id=run_id,
+        status="running",
+        provider_state={"operations": {}},
+    )
+    setattr(checkpoint, field, value)
+    write_checkpoint(run_dir / "canary_paid_checkpoint.json", checkpoint)
+
+    with pytest.raises(ValueError, match="canary paid"):
+        CanaryPaidOperations.open(run_dir, run_id=run_id)
+
+
+@pytest.mark.parametrize(
     "mutation",
     [
+        "missing_resource",
         "missing_fingerprint",
+        "missing_dispatch_resource",
+        "missing_dispatch_sequence",
+        "missing_dispatch_id",
+        "invalid_operation_state",
         "invalid_dispatch_resource",
+        "provider_mismatch",
+        "operation_mismatch",
         "completed_with_in_flight",
         "resolved_without_usage",
+        "failed_without_usage",
     ],
 )
 def test_open_rejects_malformed_private_operation_replay(
@@ -101,14 +138,31 @@ def test_open_rejects_malformed_private_operation_replay(
     payload = read_json(state.checkpoint_path)
     assert payload is not None
     operation = payload["provider_state"]["operations"]["coverage:apollo"]
-    if mutation == "missing_fingerprint":
+    if mutation == "missing_resource":
+        operation.pop("resource")
+    elif mutation == "missing_fingerprint":
         operation.pop("input_fingerprint")
+    elif mutation == "missing_dispatch_resource":
+        operation.pop("dispatch_resource")
+    elif mutation == "missing_dispatch_sequence":
+        operation.pop("dispatch_sequence")
+    elif mutation == "missing_dispatch_id":
+        operation.pop("dispatch_id")
+    elif mutation == "invalid_operation_state":
+        operation["state"] = "mystery"
     elif mutation == "invalid_dispatch_resource":
         operation["dispatch_resource"] = "clay_start"
+    elif mutation == "provider_mismatch":
+        operation["provider"] = "clay"
+    elif mutation == "operation_mismatch":
+        operation["operation"] = "work_email_routine_start"
     elif mutation == "completed_with_in_flight":
         payload["status"] = "completed"
     elif mutation == "resolved_without_usage":
         operation["state"] = "completed"
+        operation["dispatch_usage_recorded"] = False
+    elif mutation == "failed_without_usage":
+        operation["state"] = "failed"
         operation["dispatch_usage_recorded"] = False
     else:  # pragma: no cover - parametrization is closed above
         raise AssertionError(mutation)
