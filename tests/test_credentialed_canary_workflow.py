@@ -1,7 +1,5 @@
 """Static security contract for the paid credentialed production canary workflow."""
 
-from __future__ import annotations
-
 from pathlib import Path
 
 
