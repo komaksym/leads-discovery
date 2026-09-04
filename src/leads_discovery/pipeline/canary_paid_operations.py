@@ -38,6 +38,7 @@ _RESERVED_OPERATION_FIELDS: Final[frozenset[str]] = frozenset(
         "provider",
         "operation",
         "resource",
+        "dispatch_resource",
         "input_fingerprint",
         "dispatch_usage_recorded",
     }
@@ -234,12 +235,20 @@ class CanaryPaidOperations:
         quota = _RESOURCE_QUOTAS[resource]
         if entry.get("provider") != quota.provider or entry.get("operation") != quota.operation:
             raise ValueError("canary paid operation identity is invalid")
+        dispatch_resource = entry.get("dispatch_resource")
+        if not isinstance(dispatch_resource, str) or not _usage_resource_allowed(
+            resource, dispatch_resource
+        ):
+            raise ValueError("canary paid dispatch resource is invalid")
         return entry
 
-    def resource_allows(self, resource: ResourceName) -> bool:
-        """Admit one coverage operation against normal plus prior private usage."""
+    def _resource_allows(
+        self,
+        lifecycle: PaidOperationLifecycle,
+        resource: ResourceName,
+    ) -> bool:
+        """Apply fixed shared quota and provider-budget admission to one replay snapshot."""
         quota = _RESOURCE_QUOTAS[resource]
-        lifecycle = self._lifecycle()
         if not lifecycle.quota_allows(
             quota.provider,
             quota.ceiling,
@@ -253,6 +262,10 @@ class CanaryPaidOperations:
             quota.budget_ceiling,
             quota.budget_reservation,
         )
+
+    def resource_allows(self, resource: ResourceName) -> bool:
+        """Admit one coverage operation against normal plus prior private usage."""
+        return self._resource_allows(self._lifecycle(), resource)
 
     def begin(
         self,
@@ -268,13 +281,14 @@ class CanaryPaidOperations:
         self._assert_private_dispatch_available(lifecycle)
         if operation_id in lifecycle.operations():
             raise RuntimeError("canary paid operation already exists")
-        if not self.resource_allows(resource):
+        if not self._resource_allows(lifecycle, resource):
             raise RuntimeError("canary paid resource allowance is exhausted")
         quota = _RESOURCE_QUOTAS[resource]
         entry_fields = deepcopy(dict(fields or {}))
         if _RESERVED_OPERATION_FIELDS.intersection(entry_fields):
             raise ValueError("reserved canary paid operation field")
         entry_fields["resource"] = resource
+        entry_fields["dispatch_resource"] = resource
         entry_fields["input_fingerprint"] = _input_fingerprint(input_value)
         entry_fields["dispatch_usage_recorded"] = False
         lifecycle.begin(
@@ -299,6 +313,38 @@ class CanaryPaidOperations:
             return None
         return deepcopy(self._operation_for_input(lifecycle, operation_id, input_value))
 
+    def reserve_async_read(
+        self,
+        operation_id: str,
+        resource: ResourceName,
+        *,
+        input_value: object,
+    ) -> None:
+        """Persist one bounded status-read intent on the original async operation identity."""
+        self._assert_normal_paid_work_resolved()
+        lifecycle = self._lifecycle()
+        entry = self._operation_for_input(lifecycle, operation_id, input_value)
+        if entry.get("state") != "pending":
+            raise RuntimeError("canary async read requires a pending operation")
+        initial_resource = entry["resource"]
+        if not isinstance(initial_resource, str) or _ASYNC_READ_RESOURCE.get(
+            initial_resource
+        ) != resource:
+            raise ValueError("canary async read resource does not match operation")
+        for other_id, other in lifecycle.operations().items():
+            if other_id != operation_id and other.get("state") in {"in_flight", "pending"}:
+                raise RuntimeError("canary paid work has an unresolved outcome")
+        if not self._resource_allows(lifecycle, resource):
+            raise RuntimeError("canary paid resource allowance is exhausted")
+        lifecycle.finish(
+            operation_id,
+            state="in_flight",
+            fields={
+                "dispatch_resource": resource,
+                "dispatch_usage_recorded": False,
+            },
+        )
+
     def record_usage(
         self,
         operation_id: str,
@@ -317,6 +363,8 @@ class CanaryPaidOperations:
             initial_resource, resource
         ):
             raise ValueError("canary paid usage resource does not match operation")
+        if entry.get("dispatch_resource") != resource:
+            raise ValueError("canary paid usage does not match active dispatch")
         quota = _RESOURCE_QUOTAS[resource]
         if entry.get("provider") != quota.provider:
             raise ValueError("canary paid usage provider does not match operation")
