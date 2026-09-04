@@ -8,6 +8,7 @@ from pathlib import Path
 
 from leads_discovery.cli import main as cli_main
 from leads_discovery.pipeline.canary_outcomes import build_canary_coverage_report
+from leads_discovery.pipeline.canary_provider_coverage import run_live_provider_coverage
 
 _MAX_CANDIDATES = "1"
 _MAX_EVALUATED = "1"
@@ -22,7 +23,6 @@ _INSTANTLY_CALL_CAP = "1"
 
 
 def _parser() -> argparse.ArgumentParser:
-    """Expose only run identity/data location; safety ceilings are intentionally not arguments."""
     parser = argparse.ArgumentParser(prog="python -m leads_discovery.production_canary")
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--data-root", type=Path, default=Path("data"))
@@ -30,7 +30,6 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def _outcome_code(outcome: str) -> int:
-    """Make the workflow green only for decisive overall canary success."""
     if outcome == "success":
         return 0
     if outcome == "inconclusive":
@@ -39,7 +38,6 @@ def _outcome_code(outcome: str) -> int:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Run normal product work first, then derive private readiness evidence from state."""
     args = _parser().parse_args(argv)
     data_root = str(args.data_root)
     run_code = cli_main(
@@ -60,8 +58,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             "--execute-live",
         ]
     )
+
+    coverage_failed = False
     if run_code == 0:
-        cli_main(
+        enrich_code = cli_main(
             [
                 "enrich",
                 "--run-id",
@@ -83,9 +83,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "--execute-live",
             ]
         )
+        if enrich_code == 0:
+            try:
+                run_live_provider_coverage(args.data_root, run_id=args.run_id)
+            except Exception:
+                coverage_failed = True
+
     try:
         report = build_canary_coverage_report(args.data_root, run_id=args.run_id)
     except (OSError, UnicodeError, ValueError):
+        return 1
+    if coverage_failed:
         return 1
     return _outcome_code(report.overall_outcome)
 
