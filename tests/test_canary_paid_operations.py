@@ -263,3 +263,39 @@ def test_unresolved_private_async_read_freezes_future_paid_work(tmp_path: Path) 
             "apollo_enrichment",
             input_value={"contact_id": "contact-2"},
         )
+
+
+def test_completed_private_state_replays_and_refuses_fresh_dispatch(tmp_path: Path) -> None:
+    """A completed canary paid domain is replayable but can never spend again on rerun."""
+    run_id = "completed-rerun"
+    run_dir = tmp_path / run_id
+    run_dir.mkdir()
+    _completed_normal_checkpoints(run_dir, run_id)
+    operation_id = "coverage:apollo"
+    input_value = {"contact_id": "contact-1"}
+    state = CanaryPaidOperations.open(run_dir, run_id=run_id)
+    state.begin(operation_id, "apollo_enrichment", input_value=input_value)
+    state.record_usage(
+        operation_id,
+        "apollo_enrichment",
+        input_value=input_value,
+        event=UsageEvent(
+            provider="apollo",
+            operation="people_enrichment",
+            metadata={"credits_used": 1.0},
+        ),
+    )
+    state.finish(operation_id, input_value=input_value)
+    state.complete()
+
+    reopened = CanaryPaidOperations.open(run_dir, run_id=run_id)
+    operation = reopened.operation(operation_id, input_value=input_value)
+    assert reopened.checkpoint.status == "completed"
+    assert operation is not None
+    assert operation["state"] == "completed"
+    with pytest.raises(RuntimeError, match="completed"):
+        reopened.begin(
+            "coverage:exa-people",
+            "exa_people_search",
+            input_value={"company_id": "company-1"},
+        )
