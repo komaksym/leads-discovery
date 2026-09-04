@@ -9,7 +9,7 @@ from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Final, Literal, cast
+from typing import Any, Final, Literal
 
 from leads_discovery.models import RunCheckpoint, UsageEvent
 from leads_discovery.pipeline.costs import CostTracker
@@ -236,7 +236,7 @@ class CanaryPaidOperations:
             operation_id,
             provider=quota.provider,
             operation=quota.operation,
-            fields=cast(dict[str, Any], entry_fields),
+            fields=entry_fields,
             reservation_usd=(
                 quota.budget_reservation if quota.budget_ceiling is not None else None
             ),
