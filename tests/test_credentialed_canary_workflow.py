@@ -1,9 +1,13 @@
 """Static security contract for the paid credentialed production canary workflow."""
 
+from __future__ import annotations
+
+import re
 from pathlib import Path
 
 _WORKFLOW = ".github/workflows/generate-leads.yml"
-_PAID_SECRET_MARKERS = (
+_CANARY_ENVIRONMENT = "production-canary"
+_LEGACY_REPOSITORY_SECRET_MARKERS = (
     "secrets.EXA_API_KEY",
     "secrets.DEEPSEEK_API_KEY",
     "secrets.CLAY_PUBLIC_API_KEY",
@@ -11,6 +15,15 @@ _PAID_SECRET_MARKERS = (
     "secrets.APOLLO_API_KEY",
     "secrets.INSTANTLY_API_KEY",
 )
+_CANARY_ENV_SECRET_MARKERS = (
+    "secrets.CANARY_EXA_API_KEY",
+    "secrets.CANARY_DEEPSEEK_API_KEY",
+    "secrets.CANARY_CLAY_PUBLIC_API_KEY",
+    "secrets.CANARY_CLAY_CONTACT_ROUTINE_ID",
+    "secrets.CANARY_APOLLO_API_KEY",
+    "secrets.CANARY_INSTANTLY_API_KEY",
+)
+_PAID_SECRET_MARKERS = _LEGACY_REPOSITORY_SECRET_MARKERS + _CANARY_ENV_SECRET_MARKERS
 _REQUIRED_PROVIDERS = (
     "apollo",
     "clay",
@@ -20,6 +33,7 @@ _REQUIRED_PROVIDERS = (
     "exa_research",
     "instantly",
 )
+_JOB_IF = re.compile(r"^\s*if:\s*\$\{\{\s*(?P<expression>.+?)\s*\}\}\s*$", re.MULTILINE)
 
 
 def _root() -> Path:
@@ -28,6 +42,36 @@ def _root() -> Path:
 
 def _workflow_text() -> str:
     return (_root() / _WORKFLOW).read_text(encoding="utf-8")
+
+
+def _canary_job(text: str) -> str:
+    return text.split("\n  canary:", 1)[1]
+
+
+def _job_if_expression(job: str) -> str:
+    match = _JOB_IF.search(job)
+    assert match is not None, "secret-bearing canary job must have an explicit job-level guard"
+    return match.group("expression")
+
+
+def _guard_allows(expression: str, *, event_name: str, ref: str) -> bool:
+    """Evaluate the tiny equality/AND subset used by the canary admission guard."""
+    context = {
+        "github.event_name": event_name,
+        "github.ref": ref,
+    }
+    terms = [term.strip() for term in expression.split("&&")]
+    assert terms
+    results: list[bool] = []
+    for term in terms:
+        left, separator, right = term.partition("==")
+        assert separator == "==", f"unsupported canary guard term: {term}"
+        key = left.strip()
+        literal = right.strip()
+        assert key in context, f"unsupported canary guard context: {key}"
+        assert len(literal) >= 2 and literal[0] == literal[-1] and literal[0] in {"'", '"'}
+        results.append(context[key] == literal[1:-1])
+    return all(results)
 
 
 def test_exactly_one_paid_credentialed_canary_workflow_exists() -> None:
@@ -45,7 +89,7 @@ def test_exactly_one_paid_credentialed_canary_workflow_exists() -> None:
 
 
 def test_paid_canary_is_manual_immutable_and_ci_authorized() -> None:
-    """Dispatch cannot select a ref or widen spend, and exact main CI must authorize execution."""
+    """Dispatch cannot widen spend, and exact main CI must authorize execution."""
     text = _workflow_text()
     trigger = text.split("permissions:", 1)[0]
     assert "workflow_dispatch:" in trigger
@@ -57,14 +101,14 @@ def test_paid_canary_is_manual_immutable_and_ci_authorized() -> None:
     assert "continue-on-error" not in text
 
     authorize = text.split("jobs:\n  authorize:", 1)[1].split("\n  canary:", 1)[0]
-    canary = text.split("\n  canary:", 1)[1]
+    canary = _canary_job(text)
     assert "contents: read" in authorize
     assert "actions: read" in authorize
     assert "secrets." not in authorize
     assert "ref: main" in authorize
-    assert 'git rev-parse HEAD' in authorize
+    assert "git rev-parse HEAD" in authorize
     assert "actions/workflows/ci.yml/runs" in authorize
-    assert '.head_sha == $sha' in authorize
+    assert ".head_sha == $sha" in authorize
     assert '.head_branch == "main"' in authorize
     assert '.event == "push"' in authorize
     assert '.conclusion == "success"' in authorize
@@ -73,10 +117,35 @@ def test_paid_canary_is_manual_immutable_and_ci_authorized() -> None:
     assert "python -m leads_discovery.production_canary" in canary
 
 
+def test_secret_bearing_canary_job_rejects_non_main_dispatch_refs() -> None:
+    """The paid job guard models GitHub runtime event/ref admission, not just checkout text."""
+    canary = _canary_job(_workflow_text())
+    expression = _job_if_expression(canary)
+
+    assert _guard_allows(
+        expression,
+        event_name="workflow_dispatch",
+        ref="refs/heads/main",
+    )
+    for ref in (
+        "refs/heads/feature/credential-exfiltration",
+        "refs/heads/main-like",
+        "refs/tags/main",
+    ):
+        assert not _guard_allows(expression, event_name="workflow_dispatch", ref=ref)
+    assert not _guard_allows(expression, event_name="push", ref="refs/heads/main")
+
+    assert f"environment: {_CANARY_ENVIRONMENT}" in canary
+    for marker in _CANARY_ENV_SECRET_MARKERS:
+        assert marker in canary
+    for marker in _LEGACY_REPOSITORY_SECRET_MARKERS:
+        assert marker not in canary
+
+
 def test_paid_canary_gates_publication_on_decisive_private_coverage() -> None:
     """Only a decisive successful private report may reach the public-output step."""
     text = _workflow_text()
-    canary = text.split("\n  canary:", 1)[1]
+    canary = _canary_job(text)
     run_step = canary.split("- name: Run fixed one-company live canary", 1)[1].split(
         "- name: Publish approved public outputs", 1
     )[0]
