@@ -240,6 +240,8 @@ class CanaryPaidOperations:
             resource, dispatch_resource
         ):
             raise ValueError("canary paid dispatch resource is invalid")
+        if not isinstance(entry.get("dispatch_usage_recorded"), bool):
+            raise ValueError("canary paid usage-recorded flag is invalid")
         return entry
 
     def _resource_allows(
@@ -358,6 +360,8 @@ class CanaryPaidOperations:
         entry = self._operation_for_input(lifecycle, operation_id, input_value)
         if entry.get("state") != "in_flight":
             raise RuntimeError("canary paid usage requires an in-flight operation")
+        if entry["dispatch_usage_recorded"] is True:
+            raise RuntimeError("canary paid usage is already recorded for this dispatch")
         initial_resource = entry["resource"]
         if not isinstance(initial_resource, str) or not _usage_resource_allowed(
             initial_resource, resource
