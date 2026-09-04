@@ -240,9 +240,15 @@ def _load_state(run_dir: Path, run_id: str) -> _State:
         contact_usage = load_usage_events(run_dir / "contact_usage_events.jsonl")
         contacts = [ContactRecord.from_dict(row) for row in load_jsonl(run_dir / "contacts.jsonl")]
         leads = _load_leads(run_dir / "leads.csv")
-        if contact_checkpoint is not None and contact_checkpoint.status == "completed":
-            if not (run_dir / "contacts.jsonl").is_file() or not (run_dir / "leads.csv").is_file():
-                flags.append("canonical_output_invalid")
+        if (
+            contact_checkpoint is not None
+            and contact_checkpoint.status == "completed"
+            and (
+                not (run_dir / "contacts.jsonl").is_file()
+                or not (run_dir / "leads.csv").is_file()
+            )
+        ):
+            flags.append("canonical_output_invalid")
     except (KeyError, TypeError, ValueError):
         flags.append("contact_state_invalid")
         contact_checkpoint = None
