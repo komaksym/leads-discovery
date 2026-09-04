@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -23,7 +23,6 @@ from m4_contract_fixtures import (
 
 from leads_discovery import production_canary
 from leads_discovery.cli import main as cli_main
-from leads_discovery.contacts.models import ContactRecord
 from leads_discovery.contacts.selection import select_contacts
 from leads_discovery.models import CompanyRecord, RunCheckpoint, UsageEvent
 from leads_discovery.pipeline.canary_provider_coverage import (
