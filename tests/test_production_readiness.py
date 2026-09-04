@@ -204,6 +204,7 @@ def test_deepseek_malformed_2xx_is_terminal_without_replay() -> None:
     assert captured.value.retryable is False
     assert captured.value.usage_event.request_count == 1
 
+
 def test_deepseek_schema_invalid_2xx_is_terminal() -> None:
     """Schema-invalid paid model output is terminal after exactly one received response."""
     calls = 0
@@ -227,6 +228,7 @@ def test_deepseek_schema_invalid_2xx_is_terminal() -> None:
     assert captured.value.kind == "invalid_response"
     assert captured.value.retryable is False
     assert captured.value.usage_event.request_count == 1
+
 
 def test_unsupported_hard_negative_becomes_unknown() -> None:
     """A cited ID without explicit negative support cannot reject PVF relevance."""
@@ -440,7 +442,16 @@ def test_canary_limits_are_not_cli_inputs(monkeypatch: pytest.MonkeyPatch) -> No
         calls.append(list(argv))
         return 0
 
+    class _ReadyReport:
+        overall_outcome = "success"
+
+    def fake_report(_data_root: Path | str, *, run_id: str) -> Any:
+        """Keep this CLI-shape test independent from derived report persistence."""
+        assert run_id == "canary-one"
+        return _ReadyReport()
+
     monkeypatch.setattr(production_canary, "cli_main", fake_cli)
+    monkeypatch.setattr(production_canary, "build_canary_coverage_report", fake_report)
     assert production_canary.main(["--run-id", "canary-one"]) == 0
     assert len(calls) == 2
     run, enrich = calls
