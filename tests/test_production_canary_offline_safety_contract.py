@@ -97,11 +97,11 @@ def _seed_authoritative_run(data_root: Path, run_id: str, company: CompanyRecord
         append_jsonl(usage_path, event.to_dict())
 
 
-def test_coverage_transport_safety_failure_is_provider_and_pipeline_failure(
+def test_coverage_transport_safety_failure_is_provider_and_overall_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A bounded-response safety rejection fails closed and never becomes inconclusive."""
+    """A bounded-response safety rejection is provider failure and makes the canary fail."""
     run_id = "canary-coverage-transport-safety"
     company = _rejected_company()
     clay = ClayRoutineScript([])
@@ -139,6 +139,7 @@ def test_coverage_transport_safety_failure_is_provider_and_pipeline_failure(
     run_dir = tmp_path / run_id
     report = read_json(run_dir / "canary_coverage_report.json")
     assert report is not None
+    assert report["pipeline_outcome"] == "inconclusive"
     assert report["overall_outcome"] == "failure"
     assert "coverage_paid_outcome_unresolved" in report["safety_flags"]
     providers = report["providers"]
