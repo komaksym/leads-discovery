@@ -108,12 +108,64 @@ jobs:
           LEADS_MAX_RECORDS: "500"
         shell: bash
         run: |
-          set -euo pipefail
-          python -m leads_discovery.production_canary \
-            --run-id "canary-${GITHUB_RUN_ID}" \
-            --data-root data
+          set -uo pipefail
+          run_id="canary-${GITHUB_RUN_ID}"
+          run_dir="data/$run_id"
+          if python -m leads_discovery.production_canary \
+            --run-id "$run_id" \
+            --data-root data; then
+            canary_code=0
+          else
+            canary_code=$?
+          fi
+
+          report="$run_dir/canary_coverage_report.json"
+          if [[ ! -f "$report" || -L "$report" ]]; then
+            printf '### Production canary readiness\n\n- Overall outcome: `failure`\n- Reason: private coverage report unavailable\n' \
+              >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::Production canary readiness: failure; private coverage report unavailable."
+            exit 1
+          fi
+
+          if ! overall="$(jq -er '.overall_outcome | select(. == "success" or . == "inconclusive" or . == "failure")' "$report")"; then
+            echo "::error::Production canary readiness: failure; private coverage report is invalid."
+            exit 1
+          fi
+          if ! pipeline="$(jq -er '.pipeline_outcome | select(. == "success" or . == "inconclusive" or . == "failure")' "$report")"; then
+            echo "::error::Production canary readiness: failure; private coverage report is invalid."
+            exit 1
+          fi
+
+          coverage_ok=false
+          if jq -e '
+            .providers as $providers
+            | ([$providers[].provider] | sort) ==
+                ["apollo","clay","deepseek","exa_discovery","exa_people","exa_research","instantly"]
+              and all($providers[]; .integration_outcome == "success")
+          ' "$report" >/dev/null; then
+            coverage_ok=true
+          fi
+          coverage_state="not-success"
+          if [[ "$coverage_ok" == true ]]; then
+            coverage_state="success"
+          fi
+
+          printf '### Production canary readiness\n\n- Overall outcome: `%s`\n- Pipeline outcome: `%s`\n- Required live provider coverage: `%s`\n' \
+            "$overall" "$pipeline" "$coverage_state" >> "$GITHUB_STEP_SUMMARY"
+
+          if [[ "$canary_code" -eq 0 && "$overall" == "success" && "$pipeline" == "success" && "$coverage_ok" == true ]]; then
+            echo "Production canary readiness: success"
+            exit 0
+          fi
+          if [[ "$canary_code" -eq 2 && "$overall" == "inconclusive" ]]; then
+            echo "::warning::Production canary readiness: inconclusive; publication is blocked."
+            exit 2
+          fi
+          echo "::error::Production canary readiness: failure; publication is blocked."
+          exit 1
 
       - name: Publish approved public outputs
+        if: ${{ success() }}
         shell: bash
         run: |
           set -euo pipefail
