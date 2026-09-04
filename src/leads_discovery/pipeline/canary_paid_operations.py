@@ -245,6 +245,12 @@ def _validate_private_replay(
     """Fail closed on malformed private checkpoint or authoritative usage replay."""
     if checkpoint.status not in _PRIVATE_CHECKPOINT_STATUSES:
         raise ValueError("canary paid checkpoint status is invalid")
+    if (
+        checkpoint.pause_reason is not None
+        or checkpoint.pending_company_id is not None
+        or checkpoint.pending_stage is not None
+    ):
+        raise ValueError("canary paid checkpoint has unexpected pause or pending state")
     if not isinstance(checkpoint.provider_state, dict):
         raise ValueError("canary paid provider state must be an object")
     raw_operations = checkpoint.provider_state.get("operations")
