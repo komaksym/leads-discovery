@@ -92,3 +92,57 @@ def test_private_begin_persists_fingerprinted_intent_before_dispatch(tmp_path: P
     assert operation["operation"] == "people_search"
     assert len(operation["input_fingerprint"]) == 64
     assert "company-sensitive" not in state.checkpoint_path.read_text(encoding="utf-8")
+
+
+def test_private_usage_precedes_completion_and_replays_on_reopen(tmp_path: Path) -> None:
+    """Known coverage usage is authoritative before a completed result becomes replayable."""
+    run_id = "private-complete"
+    run_dir = tmp_path / run_id
+    run_dir.mkdir()
+    _completed_normal_checkpoints(run_dir, run_id)
+    input_value = {"contact_id": "contact-1"}
+    operation_id = "coverage:apollo"
+    state = CanaryPaidOperations.open(run_dir, run_id=run_id)
+    state.begin(operation_id, "apollo_enrichment", input_value=input_value)
+
+    with pytest.raises(RuntimeError, match="usage"):
+        state.finish(operation_id, input_value=input_value)
+
+    state.record_usage(
+        operation_id,
+        "apollo_enrichment",
+        input_value=input_value,
+        event=UsageEvent(
+            provider="apollo",
+            operation="people_enrichment",
+            metadata={"credits_used": 1.0},
+        ),
+    )
+    state.finish(operation_id, input_value=input_value)
+
+    reopened = CanaryPaidOperations.open(run_dir, run_id=run_id)
+    operation = reopened.operation(operation_id, input_value=input_value)
+    assert operation is not None
+    assert operation["state"] == "completed"
+    assert not reopened.resource_allows("apollo_enrichment")
+    assert len(reopened.usage_path.read_text(encoding="utf-8").splitlines()) == 1
+
+
+def test_private_operation_input_fingerprint_mismatch_fails_closed(tmp_path: Path) -> None:
+    """A persisted operation cannot be replayed against semantically different input."""
+    run_id = "fingerprint-mismatch"
+    run_dir = tmp_path / run_id
+    run_dir.mkdir()
+    _completed_normal_checkpoints(run_dir, run_id)
+    state = CanaryPaidOperations.open(run_dir, run_id=run_id)
+    state.begin(
+        "coverage:clay",
+        "clay_start",
+        input_value={"contact_ids": ["contact-1"], "updated_at": "first"},
+    )
+
+    with pytest.raises(ValueError, match="fingerprint"):
+        state.operation(
+            "coverage:clay",
+            input_value={"contact_ids": ["contact-2"], "updated_at": "second"},
+        )
