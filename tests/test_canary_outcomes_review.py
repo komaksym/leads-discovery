@@ -180,6 +180,7 @@ def test_normal_clay_success_requires_start_and_results_usage(
     report = build_canary_coverage_report(tmp_path, run_id=run_id)
 
     assert _provider_outcome(report, "clay")[0] == "failure"
+    assert report.pipeline_outcome == "failure"
     assert report.overall_outcome == "failure"
 
 
@@ -188,7 +189,7 @@ def test_terminal_instantly_requires_authoritative_create_usage(tmp_path: Path) 
     run_dir = tmp_path / run_id
     run_dir.mkdir()
     _write_m1_m3(run_dir, run_id)
-    _write_contact_artifacts(run_dir, run_id, instant_status="invalid")
+    _write_contact_artifacts(run_dir, run_id, instant_status="verified")
     for event in (
         UsageEvent(provider="exa", operation="people_search"),
         UsageEvent(provider="clay", operation="work_email_routine_start"),
@@ -200,6 +201,7 @@ def test_terminal_instantly_requires_authoritative_create_usage(tmp_path: Path) 
     report = build_canary_coverage_report(tmp_path, run_id=run_id)
 
     assert _provider_outcome(report, "instantly")[0] == "failure"
+    assert report.pipeline_outcome == "failure"
     assert report.overall_outcome == "failure"
 
 
