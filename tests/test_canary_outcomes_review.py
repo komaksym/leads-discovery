@@ -251,3 +251,31 @@ def test_malformed_normal_provider_state_cannot_be_masked_by_verified_outputs(
     assert report.pipeline_outcome == "failure"
     assert report.overall_outcome == "failure"
     assert "contact_state_invalid" in report.safety_flags
+
+
+def test_coverage_only_failure_does_not_change_normal_pipeline_truth(tmp_path: Path) -> None:
+    run_id = "coverage-only-failure"
+    run_dir = tmp_path / run_id
+    run_dir.mkdir()
+    _write_m1_m3(run_dir, run_id)
+    write_json_atomic(
+        run_dir / "contact_checkpoint.json",
+        RunCheckpoint(
+            run_id=run_id,
+            status="completed",
+            provider_state={"operations": {}},
+        ).to_dict(),
+    )
+    write_jsonl_atomic(run_dir / "contacts.jsonl", [])
+    write_text_atomic(
+        run_dir / "leads.csv",
+        "company_id,contact_id,work_email,email_verification_status,email_source\n",
+    )
+
+    report = build_canary_coverage_report(tmp_path, run_id=run_id)
+    exa_people = next(item for item in report.providers if item.provider == "exa_people")
+
+    assert exa_people.source == "coverage_only"
+    assert exa_people.integration_outcome == "failure"
+    assert report.pipeline_outcome == "inconclusive"
+    assert report.overall_outcome == "failure"
