@@ -212,7 +212,11 @@ def _validate_private_operation(
         raise ValueError("canary paid dispatch resource is invalid")
     dispatch_id = value.get("dispatch_id")
     expected_id = _dispatch_identity(run_id, operation_id, dispatch_resource, sequence)
-    if not _is_sha256(dispatch_id) or dispatch_id != expected_id:
+    if (
+        not isinstance(dispatch_id, str)
+        or not _is_sha256(dispatch_id)
+        or dispatch_id != expected_id
+    ):
         raise ValueError("canary paid dispatch identity is invalid")
     usage_recorded = value.get("dispatch_usage_recorded")
     if not isinstance(usage_recorded, bool):
@@ -227,7 +231,7 @@ def _validate_private_operation(
 def _usage_dispatch_id(event: UsageEvent) -> str:
     """Return one validated private dispatch identity from authoritative usage."""
     dispatch_id = event.metadata.get(_DISPATCH_ID_METADATA_KEY)
-    if not _is_sha256(dispatch_id):
+    if not isinstance(dispatch_id, str) or not _is_sha256(dispatch_id):
         raise ValueError("canary paid usage dispatch identity is invalid")
     return dispatch_id
 
