@@ -1,6 +1,7 @@
 """Static security contract for the paid credentialed production canary workflow."""
 
 from pathlib import Path
+
 _WORKFLOW = ".github/workflows/generate-leads.yml"
 _PAID_SECRET_MARKERS = (
     "secrets.EXA_API_KEY",
