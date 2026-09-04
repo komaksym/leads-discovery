@@ -1,4 +1,0 @@
-extend = "pyproject.toml"
-
-[lint.per-file-ignores]
-"src/leads_discovery/pipeline/canary_outcomes.py" = ["SIM102"]
