@@ -24,12 +24,23 @@ ResourceName = Literal[
     "instantly_create",
     "instantly_status_read",
 ]
+OutcomeState = Literal["completed", "pending", "failed"]
 
 _TIMESTAMP_KEYS: Final[frozenset[str]] = frozenset(
     {"created_at", "updated_at", "retrieved_at", "recorded_at"}
 )
 _VALID_STATES: Final[frozenset[str]] = frozenset(
     {"in_flight", "completed", "failed", "pending"}
+)
+_RESERVED_OPERATION_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        "state",
+        "provider",
+        "operation",
+        "resource",
+        "input_fingerprint",
+        "dispatch_usage_recorded",
+    }
 )
 
 
@@ -46,7 +57,7 @@ class _ResourceQuota:
     budget_reservation: float = 0.0
 
 
-_RESOURCE_QUOTAS: Final[dict[ResourceName, _ResourceQuota]] = {
+_RESOURCE_QUOTAS: Final[dict[str, _ResourceQuota]] = {
     "exa_people_search": _ResourceQuota(
         "exa",
         "people_search",
@@ -71,6 +82,10 @@ _RESOURCE_QUOTAS: Final[dict[ResourceName, _ResourceQuota]] = {
     "instantly_status_read": _ResourceQuota(
         "instantly", "email_verification_get", 3.0, 1.0, "requests"
     ),
+}
+_ASYNC_READ_RESOURCE: Final[dict[str, str]] = {
+    "clay_start": "clay_status_read",
+    "instantly_create": "instantly_status_read",
 }
 
 
@@ -124,6 +139,13 @@ def _normal_checkpoint_blocks(payload: dict[str, Any], run_id: str) -> bool:
         if state not in _VALID_STATES or state in {"in_flight", "pending"}:
             return True
     return False
+
+
+def _usage_resource_allowed(initial_resource: str, usage_resource: str) -> bool:
+    """Allow primary usage or a bounded status read for the same async operation."""
+    return usage_resource == initial_resource or _ASYNC_READ_RESOURCE.get(
+        initial_resource
+    ) == usage_resource
 
 
 @dataclass(slots=True)
@@ -192,6 +214,28 @@ class CanaryPaidOperations:
         if any(entry.get("state") == "pending" for entry in lifecycle.operations().values()):
             raise RuntimeError("canary paid work has pending provider work")
 
+    def _operation_for_input(
+        self,
+        lifecycle: PaidOperationLifecycle,
+        operation_id: str,
+        input_value: object,
+    ) -> dict[str, Any]:
+        """Return one private operation only when its persisted input binding is intact."""
+        operations = lifecycle.operations()
+        entry = operations.get(operation_id)
+        if entry is None:
+            raise ValueError("canary paid operation intent is missing")
+        stored = entry.get("input_fingerprint")
+        if not isinstance(stored, str) or stored != _input_fingerprint(input_value):
+            raise ValueError("canary paid operation input fingerprint mismatch")
+        resource = entry.get("resource")
+        if not isinstance(resource, str) or resource not in _RESOURCE_QUOTAS:
+            raise ValueError("canary paid operation resource is invalid")
+        quota = _RESOURCE_QUOTAS[resource]
+        if entry.get("provider") != quota.provider or entry.get("operation") != quota.operation:
+            raise ValueError("canary paid operation identity is invalid")
+        return entry
+
     def resource_allows(self, resource: ResourceName) -> bool:
         """Admit one coverage operation against normal plus prior private usage."""
         quota = _RESOURCE_QUOTAS[resource]
@@ -228,10 +272,11 @@ class CanaryPaidOperations:
             raise RuntimeError("canary paid resource allowance is exhausted")
         quota = _RESOURCE_QUOTAS[resource]
         entry_fields = deepcopy(dict(fields or {}))
-        if "input_fingerprint" in entry_fields or "resource" in entry_fields:
+        if _RESERVED_OPERATION_FIELDS.intersection(entry_fields):
             raise ValueError("reserved canary paid operation field")
         entry_fields["resource"] = resource
         entry_fields["input_fingerprint"] = _input_fingerprint(input_value)
+        entry_fields["dispatch_usage_recorded"] = False
         lifecycle.begin(
             operation_id,
             provider=quota.provider,
@@ -242,5 +287,67 @@ class CanaryPaidOperations:
             ),
         )
 
+    def operation(
+        self,
+        operation_id: str,
+        *,
+        input_value: object,
+    ) -> dict[str, Any] | None:
+        """Reconstruct one persisted operation after validating its input binding."""
+        lifecycle = self._lifecycle()
+        if operation_id not in lifecycle.operations():
+            return None
+        return deepcopy(self._operation_for_input(lifecycle, operation_id, input_value))
 
-__all__ = ["CanaryPaidOperations", "ResourceName"]
+    def record_usage(
+        self,
+        operation_id: str,
+        resource: ResourceName,
+        *,
+        input_value: object,
+        event: UsageEvent,
+    ) -> None:
+        """Persist known provider usage before allowing the operation to leave in-flight."""
+        lifecycle = self._lifecycle()
+        entry = self._operation_for_input(lifecycle, operation_id, input_value)
+        if entry.get("state") != "in_flight":
+            raise RuntimeError("canary paid usage requires an in-flight operation")
+        initial_resource = entry["resource"]
+        if not isinstance(initial_resource, str) or not _usage_resource_allowed(
+            initial_resource, resource
+        ):
+            raise ValueError("canary paid usage resource does not match operation")
+        quota = _RESOURCE_QUOTAS[resource]
+        if entry.get("provider") != quota.provider:
+            raise ValueError("canary paid usage provider does not match operation")
+        if event.provider != quota.provider or event.operation != quota.operation:
+            raise ValueError("canary paid usage event does not match resource")
+        lifecycle.record_usage(event)
+        lifecycle.finish(
+            operation_id,
+            state="in_flight",
+            fields={"dispatch_usage_recorded": True},
+        )
+
+    def finish(
+        self,
+        operation_id: str,
+        *,
+        input_value: object,
+        state: OutcomeState = "completed",
+        fields: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Persist a known result only after its authoritative usage is durable."""
+        lifecycle = self._lifecycle()
+        entry = self._operation_for_input(lifecycle, operation_id, input_value)
+        if entry.get("state") != "in_flight":
+            raise RuntimeError("canary paid finish requires an in-flight operation")
+        if entry.get("dispatch_usage_recorded") is not True:
+            raise RuntimeError("canary paid usage must be recorded before completion")
+        result_fields = deepcopy(dict(fields or {}))
+        if _RESERVED_OPERATION_FIELDS.intersection(result_fields):
+            raise ValueError("reserved canary paid operation field")
+        lifecycle.finish(operation_id, state=state, fields=result_fields)
+
+
+__all__ = ["CanaryPaidOperations", "OutcomeState", "ResourceName"]
