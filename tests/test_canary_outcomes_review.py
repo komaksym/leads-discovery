@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from leads_discovery.contacts.models import ContactRecord
+from leads_discovery.contacts.models import ContactRecord, VerificationStatus
 from leads_discovery.models import CompanyRecord, EvidenceItem, RunCheckpoint, UsageEvent
 from leads_discovery.pipeline.canary_outcomes import (
     CanaryCoverageReport,
@@ -45,7 +45,7 @@ def _accepted_company() -> CompanyRecord:
     )
 
 
-def _contact(*, status: str | None = None) -> ContactRecord:
+def _contact(*, status: VerificationStatus | None = None) -> ContactRecord:
     contact = ContactRecord(
         contact_id="con_acme",
         company_id="cmp_acme",
@@ -108,7 +108,7 @@ def _write_contact_artifacts(
     run_dir: Path,
     run_id: str,
     *,
-    instant_status: str | None = None,
+    instant_status: VerificationStatus | None = None,
     checkpoint_status: str = "completed",
     clay_state: str = "completed",
     malformed_instantly: bool = False,
