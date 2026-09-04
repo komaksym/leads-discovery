@@ -207,12 +207,13 @@ def _operations(path: Path) -> dict[str, Any]:
     return operations
 
 
-def _canonical_and_normal_snapshot(run_dir: Path) -> dict[str, bytes]:
-    """Snapshot every canonical artifact plus authoritative normal M4 fallback state."""
-    return {
-        name: (run_dir / name).read_bytes()
-        for name in _CANONICAL_AND_NORMAL_ARTIFACTS
-    }
+def _canonical_and_normal_snapshot(run_dir: Path) -> dict[str, bytes | None]:
+    """Snapshot canonical artifacts plus authoritative normal M4 state, including absence."""
+    snapshot: dict[str, bytes | None] = {}
+    for name in _CANONICAL_AND_NORMAL_ARTIFACTS:
+        path = run_dir / name
+        snapshot[name] = path.read_bytes() if path.exists() else None
+    return snapshot
 
 
 def test_successful_coverage_only_waterfall_uses_selected_contact_without_mutating_normal_state(
@@ -303,7 +304,7 @@ def test_successful_coverage_only_waterfall_uses_selected_contact_without_mutati
     assert read_jsonl(run_dir / "contacts.jsonl") == []
     assert read_csv(run_dir / "leads.csv") == []
     assert _operations(run_dir / "contact_checkpoint.json") == {}
-    assert (run_dir / "contact_usage_events.jsonl").read_text(encoding="utf-8") == ""
+    assert not (run_dir / "contact_usage_events.jsonl").exists()
 
     private_operations = _operations(run_dir / "canary_paid_checkpoint.json")
     assert private_operations["coverage:exa_people"]["state"] == "completed"
