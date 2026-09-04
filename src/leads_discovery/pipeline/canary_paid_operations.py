@@ -13,7 +13,7 @@ from typing import Any, Final, Literal
 
 from leads_discovery.models import RunCheckpoint, UsageEvent
 from leads_discovery.pipeline.costs import CostTracker
-from leads_discovery.pipeline.paid_operations import PaidOperationLifecycle
+from leads_discovery.pipeline.paid_operations import PaidOperationLifecycle, transition_checkpoint
 from leads_discovery.pipeline.state import load_usage_events, read_json, write_checkpoint
 
 ResourceName = Literal[
@@ -400,6 +400,20 @@ class CanaryPaidOperations:
         if _RESERVED_OPERATION_FIELDS.intersection(result_fields):
             raise ValueError("reserved canary paid operation field")
         lifecycle.finish(operation_id, state=state, fields=result_fields)
+
+    def complete(self) -> None:
+        """Persist terminal private state only after every paid outcome is resolved."""
+        lifecycle = self._lifecycle()
+        if lifecycle.unknown_in_flight() is not None:
+            raise RuntimeError("canary paid work has an unresolved outcome")
+        if any(entry.get("state") == "pending" for entry in lifecycle.operations().values()):
+            raise RuntimeError("canary paid work has pending provider work")
+        transition_checkpoint(
+            self.checkpoint,
+            lambda: write_checkpoint(self.checkpoint_path, self.checkpoint),
+            status="completed",
+            reason=None,
+        )
 
 
 __all__ = ["CanaryPaidOperations", "OutcomeState", "ResourceName"]
