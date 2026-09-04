@@ -40,11 +40,11 @@ _CANONICAL_AND_NORMAL_ARTIFACTS = (
 
 def _canonical_and_normal_snapshot(run_dir: Path) -> dict[str, bytes | None]:
     """Snapshot canonical artifacts plus authoritative normal M4 state, including absence."""
-    return {
-        name: (path.read_bytes() if path.exists() else None)
-        for name in _CANONICAL_AND_NORMAL_ARTIFACTS
-        if (path := run_dir / name)
-    }
+    snapshot: dict[str, bytes | None] = {}
+    for name in _CANONICAL_AND_NORMAL_ARTIFACTS:
+        path = run_dir / name
+        snapshot[name] = path.read_bytes() if path.exists() else None
+    return snapshot
 
 
 def test_successful_coverage_only_waterfall_uses_selected_contact_without_mutating_normal_state(
