@@ -28,7 +28,7 @@ from leads_discovery.contacts.providers import (
 from leads_discovery.contacts.selection import contact_decision_order_key, select_contacts
 from leads_discovery.models import CompanyRecord, RunCheckpoint, UsageEvent
 from leads_discovery.pipeline.canary_paid_operations import CanaryPaidOperations
-from leads_discovery.pipeline.state import load_jsonl, read_json
+from leads_discovery.pipeline.state import load_jsonl, load_usage_events, read_json
 
 CoverageStatus = Literal["completed", "pending"]
 
@@ -106,6 +106,37 @@ def _operations(checkpoint: RunCheckpoint) -> dict[str, dict[str, Any]]:
     return operations
 
 
+def _normal_operation_evidence(
+    operations: dict[str, dict[str, Any]],
+    usage_events: list[UsageEvent],
+    *,
+    operation_id: str,
+    provider: str,
+    operation: str,
+) -> dict[str, Any] | None:
+    """Require durable normal operation and authoritative usage to agree before suppression."""
+    entry = operations.get(operation_id)
+    request_count = sum(
+        event.request_count
+        for event in usage_events
+        if event.provider == provider and event.operation == operation
+    )
+    has_usage = request_count > 0
+    if entry is None:
+        if has_usage:
+            raise ValueError(
+                f"normal {provider} authoritative usage lacks matching provider operation"
+            )
+        return None
+    if entry.get("state") != "completed":
+        raise RuntimeError(f"normal {provider} provider operation is not completed")
+    if not has_usage:
+        raise ValueError(
+            f"normal {provider} completed provider operation lacks authoritative usage"
+        )
+    return entry
+
+
 def _load_contacts(path: Path) -> dict[str, ContactRecord]:
     """Load canonical M4 contacts without granting the artifact provider authority by itself."""
     if not path.exists():
@@ -140,14 +171,19 @@ def _load_company(run_dir: Path) -> CompanyRecord | None:
 def _normal_selected_contact(
     company: CompanyRecord,
     operations: dict[str, dict[str, Any]],
+    usage_events: list[UsageEvent],
     contacts: dict[str, ContactRecord],
 ) -> tuple[bool, ContactRecord | None]:
-    """Use canonical contacts only when a completed normal Exa operation names them."""
-    entry = operations.get(f"exa:{company.company_id}")
+    """Use canonical contacts only when normal Exa operation and usage both prove the call."""
+    entry = _normal_operation_evidence(
+        operations,
+        usage_events,
+        operation_id=f"exa:{company.company_id}",
+        provider="exa",
+        operation="people_search",
+    )
     if entry is None:
         return False, None
-    if entry.get("state") != "completed":
-        raise RuntimeError("normal Exa People operation is not resolved")
     raw_ids = entry.get("contact_ids")
     if not isinstance(raw_ids, list) or any(not isinstance(item, str) for item in raw_ids):
         raise ValueError("normal Exa People contact ids are invalid")
@@ -253,11 +289,30 @@ def _exa_contact(
 def _clay_email(
     paid: CanaryPaidOperations,
     contact: ContactRecord,
+    normal_operations: dict[str, dict[str, Any]],
+    normal_usage: list[UsageEvent],
     clay: _ClayContactProvider,
 ) -> tuple[str | None, bool]:
     """Return production-normalized Clay email and whether composition must pause."""
-    if contact.email_source == "clay" and contact.work_email is not None:
-        return usable_work_email(contact.work_email), False
+    normal_entry = _normal_operation_evidence(
+        normal_operations,
+        normal_usage,
+        operation_id="clay:batch",
+        provider="clay",
+        operation="work_email_routine_start",
+    )
+    if normal_entry is not None:
+        raw_ids = normal_entry.get("contact_ids")
+        if not isinstance(raw_ids, list) or contact.contact_id not in raw_ids:
+            raise ValueError("normal Clay provider operation does not name the selected contact")
+        if contact.email_source != "clay":
+            return None, False
+        email = usable_work_email(contact.work_email)
+        if email is None:
+            raise ValueError("canonical Clay email is not production-usable")
+        return email, False
+    if contact.email_source == "clay":
+        raise ValueError("canonical Clay output lacks durable provider evidence")
 
     input_value = contact.to_dict()
     entry = paid.operation(_CLAY_OPERATION, input_value=input_value)
@@ -363,13 +418,27 @@ def _finite_nonnegative(value: float, label: str) -> float:
 def _apollo_email(
     paid: CanaryPaidOperations,
     contact: ContactRecord,
+    normal_operations: dict[str, dict[str, Any]],
+    normal_usage: list[UsageEvent],
     apollo: _ApolloContactProvider,
 ) -> str | None:
     """Run exactly one private Apollo fallback when normal Apollo did not consume the slot."""
-    if contact.email_source == "apollo" and contact.work_email is not None:
-        normal_email = usable_work_email(contact.work_email)
-    else:
-        normal_email = None
+    normal_entry = _normal_operation_evidence(
+        normal_operations,
+        normal_usage,
+        operation_id=f"apollo:{contact.contact_id}",
+        provider="apollo",
+        operation="people_enrichment",
+    )
+    if normal_entry is not None:
+        if contact.email_source != "apollo":
+            return None
+        email = usable_work_email(contact.work_email)
+        if email is None:
+            raise ValueError("canonical Apollo email is not production-usable")
+        return email
+    if contact.email_source == "apollo":
+        raise ValueError("canonical Apollo output lacks durable provider evidence")
 
     input_value = contact.to_dict()
     entry = paid.operation(_APOLLO_OPERATION, input_value=input_value)
@@ -380,7 +449,7 @@ def _apollo_email(
             raise ValueError("private Apollo work email is invalid")
         return usable_work_email(raw_email)
     if not paid.resource_allows("apollo_enrichment"):
-        return normal_email
+        return None
 
     paid.begin(_APOLLO_OPERATION, "apollo_enrichment", input_value=input_value)
     try:
@@ -424,13 +493,30 @@ def _apollo_email(
 
 def _verify_email(
     paid: CanaryPaidOperations,
+    contact: ContactRecord,
     email: str,
+    normal_operations: dict[str, dict[str, Any]],
+    normal_usage: list[UsageEvent],
     instantly: _InstantlyVerificationProvider,
 ) -> bool:
     """Verify the production-normalized Clay-first/Apollo-second email with bounded replay."""
     normalized = usable_work_email(email)
     if normalized is None or normalized != email:
         raise ValueError("canary verification requires a production-normalized work email")
+    normal_entry = _normal_operation_evidence(
+        normal_operations,
+        normal_usage,
+        operation_id=f"instantly:{contact.contact_id}",
+        provider="instantly",
+        operation="email_verification_create",
+    )
+    if normal_entry is not None:
+        if contact.email_verification_status is None:
+            raise ValueError("normal Instantly provider operation lacks canonical verification state")
+        return False
+    if contact.email_verification_status is not None:
+        raise ValueError("canonical Instantly output lacks durable provider evidence")
+
     input_value: object = normalized
     entry = paid.operation(_INSTANTLY_OPERATION, input_value=input_value)
     if entry is None:
@@ -552,6 +638,7 @@ def run_provider_coverage(
     _completed_checkpoint(run_dir / "checkpoint.json", run_id)
     contact_checkpoint = _completed_checkpoint(run_dir / "contact_checkpoint.json", run_id)
     normal_operations = _operations(contact_checkpoint)
+    normal_usage = load_usage_events(run_dir / "contact_usage_events.jsonl")
     contacts = _load_contacts(run_dir / "contacts.jsonl")
     company = _load_company(run_dir)
     paid = CanaryPaidOperations.open(run_dir, run_id=run_id)
@@ -561,20 +648,40 @@ def run_provider_coverage(
     normal_exa_completed, normal_contact = _normal_selected_contact(
         company,
         normal_operations,
+        normal_usage,
         contacts,
     )
     contact = _exa_contact(paid, company, normal_exa_completed, normal_contact, exa)
     if contact is None:
         return _finish_summary(paid, run_id, pending=False)
 
-    clay_email, clay_pending = _clay_email(paid, contact, clay)
+    clay_email, clay_pending = _clay_email(
+        paid,
+        contact,
+        normal_operations,
+        normal_usage,
+        clay,
+    )
     if clay_pending:
         return _finish_summary(paid, run_id, pending=True)
-    apollo_email = _apollo_email(paid, contact, apollo)
+    apollo_email = _apollo_email(
+        paid,
+        contact,
+        normal_operations,
+        normal_usage,
+        apollo,
+    )
     verification_email = clay_email or apollo_email
     if verification_email is None:
         return _finish_summary(paid, run_id, pending=False)
-    verification_pending = _verify_email(paid, verification_email, instantly)
+    verification_pending = _verify_email(
+        paid,
+        contact,
+        verification_email,
+        normal_operations,
+        normal_usage,
+        instantly,
+    )
     return _finish_summary(paid, run_id, pending=verification_pending)
 
 
