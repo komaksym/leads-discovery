@@ -228,7 +228,7 @@ def test_rejected_company_coverage_uses_production_lineage_without_mutating_cont
 ) -> None:
     """Shadow work may prove providers but cannot rescue or write canonical M4 state."""
     module = _coverage_module()
-    run = getattr(module, "run_provider_coverage")
+    run = module.run_provider_coverage
     company = _company("rejected")
     run_dir = tmp_path / "canary-shadow"
     _write_normal_state(run_dir, company)
@@ -277,7 +277,7 @@ def test_normal_clay_success_only_shadows_apollo_once_and_replay_is_zero_dispatc
 ) -> None:
     """Normal provider evidence suppresses duplicates while skipped Apollo gets one shared slot."""
     module = _coverage_module()
-    run = getattr(module, "run_provider_coverage")
+    run = module.run_provider_coverage
     company = _company("accepted")
     contact = select_contacts(company, [_person_result()], limit=1)[0]
     contact.work_email = "alice.owner@acme.com"
@@ -351,7 +351,7 @@ def test_normal_exa_zero_selection_is_not_repeated_and_downstream_gets_no_input(
 ) -> None:
     """A valid normal zero-contact result is durable coverage, not a reason to search again."""
     module = _coverage_module()
-    run = getattr(module, "run_provider_coverage")
+    run = module.run_provider_coverage
     company = _company("accepted")
     run_dir = tmp_path / "canary-zero"
     _write_normal_state(
