@@ -12,6 +12,10 @@ from leads_discovery.contacts.models import ContactRecord
 from leads_discovery.contacts.providers import usable_work_email
 from leads_discovery.models import CompanyRecord, RunCheckpoint, UsageEvent
 from leads_discovery.pipeline.canary_paid_operations import CanaryPaidOperations
+from leads_discovery.pipeline.contact_enrichment import (
+    ContactEnrichmentConfig,
+    validate_contact_enrichment_state,
+)
 from leads_discovery.pipeline.state import (
     load_jsonl,
     load_usage_events,
@@ -219,6 +223,16 @@ def _load_state(run_dir: Path, run_id: str) -> _State:
         companies = []
 
     try:
+        contact_paths = (
+            run_dir / "contact_checkpoint.json",
+            run_dir / "contact_usage_events.jsonl",
+            run_dir / "contacts.jsonl",
+            run_dir / "leads.csv",
+        )
+        if any(path.exists() for path in contact_paths):
+            validate_contact_enrichment_state(
+                ContactEnrichmentConfig(run_id=run_id, data_root=run_dir.parent)
+            )
         contact_checkpoint = _checkpoint(run_dir / "contact_checkpoint.json", run_id)
         if contact_checkpoint is not None:
             _operations(contact_checkpoint)
@@ -230,9 +244,15 @@ def _load_state(run_dir: Path, run_id: str) -> _State:
             for payload in load_jsonl(run_dir / "contacts.jsonl")
         ]
         lead_rows = _load_leads(run_dir / "leads.csv")
-        if contact_checkpoint is not None and contact_checkpoint.status == "completed":
-            if not (run_dir / "contacts.jsonl").is_file() or not (run_dir / "leads.csv").is_file():
-                flags.append("canonical_output_invalid")
+        if (
+            contact_checkpoint is not None
+            and contact_checkpoint.status == "completed"
+            and (
+                not (run_dir / "contacts.jsonl").is_file()
+                or not (run_dir / "leads.csv").is_file()
+            )
+        ):
+            flags.append("canonical_output_invalid")
     except (KeyError, TypeError, ValueError):
         flags.append("contact_state_invalid")
         contact_checkpoint = None
@@ -430,10 +450,11 @@ def _normal_m4_entry(
     key_prefix: str,
     prerequisite: bool,
     business: str,
+    required_operation: str | None = None,
     completed_requires_operation: str | None = None,
     pending_requires_operation: str | None = None,
 ) -> IntegrationCoverage | None:
-    """Return a normal M4 result when that integration has durable operation state."""
+    """Return a normal M4 result only when durable state has authoritative usage provenance."""
     entries = [
         value
         for key, value in _operations(state.contact_checkpoint).items()
@@ -444,10 +465,23 @@ def _normal_m4_entry(
     usage = _matching_usage(state.contact_usage, provider=provider, operations=operations)
     calls = _request_count(usage)
     states = {cast(str, entry["state"]) for entry in entries}
+    required_calls = (
+        calls
+        if required_operation is None
+        else _request_count(
+            _matching_usage(
+                state.contact_usage,
+                provider=provider,
+                operations=frozenset({required_operation}),
+            )
+        )
+    )
     if "in_flight" in states or "failed" in states:
         outcome: Outcome = "failure"
+    elif required_calls <= 0:
+        outcome = "failure"
     elif "completed" in states and calls > 0:
-        required_calls = (
+        completed_calls = (
             calls
             if completed_requires_operation is None
             else _request_count(
@@ -458,7 +492,7 @@ def _normal_m4_entry(
                 )
             )
         )
-        outcome = "success" if required_calls > 0 else "failure"
+        outcome = "success" if completed_calls > 0 else "failure"
     elif "pending" in states:
         if pending_requires_operation is None:
             outcome = "inconclusive"
@@ -612,6 +646,7 @@ def _m4_coverage(state: _State) -> tuple[IntegrationCoverage, ...]:
         key_prefix="clay:batch",
         prerequisite=contact_prerequisite,
         business=_clay_business(state),
+        required_operation="work_email_routine_start",
         completed_requires_operation="work_email_routine_results",
         pending_requires_operation="work_email_routine_results",
     )
@@ -677,6 +712,7 @@ def _m4_coverage(state: _State) -> tuple[IntegrationCoverage, ...]:
         key_prefix="instantly:",
         prerequisite=email_prerequisite,
         business=_instantly_business(state),
+        required_operation="email_verification_create",
         pending_requires_operation="email_verification_get",
     )
     instantly_private = _private_coverage(
