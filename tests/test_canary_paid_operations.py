@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from leads_discovery.models import RunCheckpoint, UsageEvent
-from leads_discovery.pipeline.canary_paid_operations import CanaryPaidOperations
+from leads_discovery.pipeline.canary_paid_operations import CanaryPaidOperations, ResourceName
 from leads_discovery.pipeline.state import append_usage_event, read_json, write_checkpoint
 
 
@@ -145,4 +145,113 @@ def test_private_operation_input_fingerprint_mismatch_fails_closed(tmp_path: Pat
         state.operation(
             "coverage:clay",
             input_value={"contact_ids": ["contact-2"], "updated_at": "second"},
+        )
+
+
+@pytest.mark.parametrize(
+    ("start_resource", "read_resource", "provider", "start_operation", "read_operation"),
+    [
+        (
+            "clay_start",
+            "clay_status_read",
+            "clay",
+            "work_email_routine_start",
+            "work_email_routine_results",
+        ),
+        (
+            "instantly_create",
+            "instantly_status_read",
+            "instantly",
+            "email_verification_create",
+            "email_verification_get",
+        ),
+    ],
+)
+def test_async_reads_reuse_operation_identity_and_stop_at_three(
+    tmp_path: Path,
+    start_resource: ResourceName,
+    read_resource: ResourceName,
+    provider: str,
+    start_operation: str,
+    read_operation: str,
+) -> None:
+    """Clay and Instantly resume the original operation with at most three paid reads."""
+    run_id = f"async-{provider}"
+    run_dir = tmp_path / run_id
+    run_dir.mkdir()
+    _completed_normal_checkpoints(run_dir, run_id)
+    operation_id = f"coverage:{provider}"
+    input_value = {"contact_ids": ["contact-1"]}
+    state = CanaryPaidOperations.open(run_dir, run_id=run_id)
+    state.begin(operation_id, start_resource, input_value=input_value)
+    state.record_usage(
+        operation_id,
+        start_resource,
+        input_value=input_value,
+        event=UsageEvent(provider=provider, operation=start_operation),
+    )
+    state.finish(
+        operation_id,
+        input_value=input_value,
+        state="pending",
+        fields={"provider_job_id": "job-1"},
+    )
+
+    for index in range(3):
+        state.reserve_async_read(operation_id, read_resource, input_value=input_value)
+        operation = state.operation(operation_id, input_value=input_value)
+        assert operation is not None
+        assert operation["state"] == "in_flight"
+        assert operation["operation"] == start_operation
+        assert set(state.checkpoint.provider_state["operations"]) == {operation_id}
+        state.record_usage(
+            operation_id,
+            read_resource,
+            input_value=input_value,
+            event=UsageEvent(provider=provider, operation=read_operation),
+        )
+        state.finish(operation_id, input_value=input_value, state="pending")
+        assert index + 1 == len(
+            [
+                line
+                for line in state.usage_path.read_text(encoding="utf-8").splitlines()
+                if read_operation in line
+            ]
+        )
+
+    with pytest.raises(RuntimeError, match="allowance"):
+        state.reserve_async_read(operation_id, read_resource, input_value=input_value)
+
+
+def test_unresolved_private_async_read_freezes_future_paid_work(tmp_path: Path) -> None:
+    """A crash after async-read intent leaves one unknown outcome and forbids redispatch."""
+    run_id = "async-unknown"
+    run_dir = tmp_path / run_id
+    run_dir.mkdir()
+    _completed_normal_checkpoints(run_dir, run_id)
+    operation_id = "coverage:clay"
+    input_value = {"contact_ids": ["contact-1"]}
+    state = CanaryPaidOperations.open(run_dir, run_id=run_id)
+    state.begin(operation_id, "clay_start", input_value=input_value)
+    state.record_usage(
+        operation_id,
+        "clay_start",
+        input_value=input_value,
+        event=UsageEvent(provider="clay", operation="work_email_routine_start"),
+    )
+    state.finish(operation_id, input_value=input_value, state="pending")
+    state.reserve_async_read(operation_id, "clay_status_read", input_value=input_value)
+
+    reopened = CanaryPaidOperations.open(run_dir, run_id=run_id)
+    with pytest.raises(RuntimeError, match="pending"):
+        reopened.reserve_async_read(
+            operation_id,
+            "clay_status_read",
+            input_value=input_value,
+        )
+    with pytest.raises(RuntimeError, match="unresolved"):
+        reopened.begin(
+            "coverage:apollo",
+            "apollo_enrichment",
+            input_value={"contact_id": "contact-2"},
         )
