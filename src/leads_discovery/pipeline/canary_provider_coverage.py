@@ -512,7 +512,9 @@ def _verify_email(
     )
     if normal_entry is not None:
         if contact.email_verification_status is None:
-            raise ValueError("normal Instantly provider operation lacks canonical verification state")
+            raise ValueError(
+                "normal Instantly provider operation lacks canonical verification state"
+            )
         return False
     if contact.email_verification_status is not None:
         raise ValueError("canonical Instantly output lacks durable provider evidence")
