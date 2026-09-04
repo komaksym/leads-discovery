@@ -247,7 +247,6 @@ def test_normal_clay_success_shadows_apollo_once_with_exact_selected_contact(
         }
     )
     run_dir = _install_contract(monkeypatch, tmp_path, run_id, _accepted_company(), stub)
-
     assert _run_canary(tmp_path, run_id) == 2
     clay.release_started()
     assert _run_canary(tmp_path, run_id) == 0
@@ -690,7 +689,8 @@ def test_present_contact_artifact_without_durable_exa_evidence_does_not_suppress
     real_coverage = production_canary.run_live_provider_coverage
 
     def coverage_with_stale_contact(data_root: Path, *, run_id: str) -> Any:
-        evaluated = CompanyRecord.from_dict(read_jsonl(data_root / run_id / "companies_evaluated.jsonl")[0])
+        evaluated_rows = read_jsonl(data_root / run_id / "companies_evaluated.jsonl")
+        evaluated = CompanyRecord.from_dict(evaluated_rows[0])
         selected = select_contacts(evaluated, [_person()], limit=1)
         assert len(selected) == 1
         write_jsonl(
