@@ -1,9 +1,15 @@
 """Static security contract for the paid credentialed production canary workflow."""
 
 from pathlib import Path
-
-
 _WORKFLOW = ".github/workflows/generate-leads.yml"
+_PAID_SECRET_MARKERS = (
+    "secrets.EXA_API_KEY",
+    "secrets.DEEPSEEK_API_KEY",
+    "secrets.CLAY_PUBLIC_API_KEY",
+    "secrets.CLAY_CONTACT_ROUTINE_ID",
+    "secrets.APOLLO_API_KEY",
+    "secrets.INSTANTLY_API_KEY",
+)
 _REQUIRED_PROVIDERS = (
     "apollo",
     "clay",
@@ -29,7 +35,10 @@ def test_exactly_one_paid_credentialed_canary_workflow_exists() -> None:
     credentialed = sorted(
         path.name
         for path in workflows.glob("*.y*ml")
-        if "secrets.EXA_API_KEY" in path.read_text(encoding="utf-8")
+        if any(
+            marker in path.read_text(encoding="utf-8")
+            for marker in _PAID_SECRET_MARKERS
+        )
     )
     assert credentialed == ["generate-leads.yml"]
 
