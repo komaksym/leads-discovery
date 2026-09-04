@@ -6,6 +6,7 @@ import json
 import subprocess
 from collections.abc import Sequence
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
@@ -440,7 +441,13 @@ def test_canary_limits_are_not_cli_inputs(monkeypatch: pytest.MonkeyPatch) -> No
         calls.append(list(argv))
         return 0
 
+    def fake_coverage(_data_root: Path, *, run_id: str) -> SimpleNamespace:
+        """Keep this wrapper contract focused on immutable CLI limits."""
+        assert run_id == "canary-one"
+        return SimpleNamespace(status="completed")
+
     monkeypatch.setattr(production_canary, "cli_main", fake_cli)
+    monkeypatch.setattr(production_canary, "run_live_provider_coverage", fake_coverage)
     assert production_canary.main(["--run-id", "canary-one"]) == 0
     assert len(calls) == 2
     run, enrich = calls
