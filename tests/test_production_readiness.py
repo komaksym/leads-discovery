@@ -446,8 +446,13 @@ def test_canary_limits_are_not_cli_inputs(monkeypatch: pytest.MonkeyPatch) -> No
         assert run_id == "canary-one"
         return SimpleNamespace(status="completed")
 
+    def fake_report(_data_root: Path | str, *, run_id: str) -> SimpleNamespace:
+        assert run_id == "canary-one"
+        return SimpleNamespace(overall_outcome="success")
+
     monkeypatch.setattr(production_canary, "cli_main", fake_cli)
     monkeypatch.setattr(production_canary, "run_live_provider_coverage", fake_coverage)
+    monkeypatch.setattr(production_canary, "build_canary_coverage_report", fake_report)
     assert production_canary.main(["--run-id", "canary-one"]) == 0
     assert len(calls) == 2
     run, enrich = calls

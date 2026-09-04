@@ -379,7 +379,7 @@ def test_production_canary_runs_coverage_only_after_normal_run_and_enrich(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """The normal product path always gets first opportunity before shadow coverage."""
+    """Normal work precedes shadow coverage, and the report is derived last."""
     events: list[str] = []
 
     def fake_cli(argv: list[str] | None = None) -> int:
@@ -392,15 +392,16 @@ def test_production_canary_runs_coverage_only_after_normal_run_and_enrich(
         events.append("coverage")
         return SimpleNamespace(status="completed")
 
+    def fake_report(_data_root: Path | str, *, run_id: str) -> SimpleNamespace:
+        assert run_id == "ordered"
+        events.append("report")
+        return SimpleNamespace(overall_outcome="success")
+
     monkeypatch.setattr(production_canary, "cli_main", fake_cli)
-    monkeypatch.setattr(
-        production_canary,
-        "run_live_provider_coverage",
-        fake_coverage,
-        raising=False,
-    )
+    monkeypatch.setattr(production_canary, "run_live_provider_coverage", fake_coverage)
+    monkeypatch.setattr(production_canary, "build_canary_coverage_report", fake_report)
 
     assert production_canary.main(
         ["--run-id", "ordered", "--data-root", str(tmp_path)]
     ) == 0
-    assert events == ["run", "enrich", "coverage"]
+    assert events == ["run", "enrich", "coverage", "report"]
