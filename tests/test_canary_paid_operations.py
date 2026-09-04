@@ -102,6 +102,11 @@ def test_private_usage_precedes_completion_and_replays_on_reopen(tmp_path: Path)
     _completed_normal_checkpoints(run_dir, run_id)
     input_value = {"contact_id": "contact-1"}
     operation_id = "coverage:apollo"
+    usage_event = UsageEvent(
+        provider="apollo",
+        operation="people_enrichment",
+        metadata={"credits_used": 1.0},
+    )
     state = CanaryPaidOperations.open(run_dir, run_id=run_id)
     state.begin(operation_id, "apollo_enrichment", input_value=input_value)
 
@@ -112,12 +117,15 @@ def test_private_usage_precedes_completion_and_replays_on_reopen(tmp_path: Path)
         operation_id,
         "apollo_enrichment",
         input_value=input_value,
-        event=UsageEvent(
-            provider="apollo",
-            operation="people_enrichment",
-            metadata={"credits_used": 1.0},
-        ),
+        event=usage_event,
     )
+    with pytest.raises(RuntimeError, match="already"):
+        state.record_usage(
+            operation_id,
+            "apollo_enrichment",
+            input_value=input_value,
+            event=usage_event,
+        )
     state.finish(operation_id, input_value=input_value)
 
     reopened = CanaryPaidOperations.open(run_dir, run_id=run_id)
