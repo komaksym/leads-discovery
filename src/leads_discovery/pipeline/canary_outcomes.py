@@ -832,7 +832,11 @@ def build_canary_coverage_report(
     if tuple(item.provider for item in providers) != _REQUIRED_INTEGRATIONS:
         raise AssertionError("canary integration order changed unexpectedly")
 
-    if _PIPELINE_FAILURE_FLAGS.intersection(state.safety_flags):
+    normal_provider_failed = any(
+        item.source == "normal" and item.integration_outcome == "failure"
+        for item in providers
+    )
+    if _PIPELINE_FAILURE_FLAGS.intersection(state.safety_flags) or normal_provider_failed:
         pipeline: Outcome = "failure"
     elif _pipeline_success(state):
         pipeline = "success"
