@@ -142,6 +142,18 @@ def test_secret_bearing_canary_job_rejects_non_main_dispatch_refs() -> None:
         assert marker not in canary
 
 
+def test_canary_private_state_never_crosses_runner_boundary() -> None:
+    """The private canary phase must not configure or perform repository publication."""
+    canary = _canary_job(_workflow_text())
+    private_phase = canary.split("- name: Publish approved public outputs", 1)[0]
+
+    assert "LEADS_GIT_JOURNAL_BRANCH" not in private_phase
+    assert "LEADS_GIT_JOURNAL_REMOTE" not in private_phase
+    assert "Prepare durable Git operation journal" not in private_phase
+    assert "git push" not in private_phase
+    assert "git add" not in private_phase
+
+
 def test_paid_canary_gates_publication_on_decisive_private_coverage() -> None:
     """Only a decisive successful private report may reach the public-output step."""
     text = _workflow_text()
