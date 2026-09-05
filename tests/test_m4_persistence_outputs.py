@@ -383,7 +383,7 @@ def test_run_score_and_calibrate_remain_m4_free(
     original_getitem = env_type.__getitem__
     forbidden = {
         "CLAY_PUBLIC_API_KEY",
-        "CLAY_CONTACT_ROUTINE_ID",
+        "CLAY_WORK_EMAIL_FUNCTION_ID",
         "APOLLO_API_KEY",
         "INSTANTLY_API_KEY",
     }
