@@ -391,35 +391,33 @@ class ExaPeopleProvider:
 
 
 class ClayContactProvider:
-    """Start and resume one configured Clay work-email function Routine."""
+    """Call Clay's managed Work Email function through the direct Public API."""
 
     def __init__(self, *, api_key: str, routine_id: str, client: httpx.Client) -> None:
-        """Store nonempty Clay credentials/configuration and an injected HTTP client."""
+        """Store the Clay credential and workspace ID for its managed Work Email function."""
         if not api_key.strip():
             raise ValueError("api_key must be nonempty")
         if not routine_id.strip():
-            raise ValueError("routine_id must be nonempty")
+            raise ValueError("managed Work Email function id must be nonempty")
         self._api_key = api_key
         self._routine_id = routine_id
         self._client = client
 
     def start(self, contacts: list[ContactRecord]) -> ClayStartResult:
-        """Start one asynchronous Clay run for between one and one hundred contacts."""
+        """Start one asynchronous managed Work Email run for 1..100 contacts."""
         if not 1 <= len(contacts) <= 100:
-            raise ValueError("Clay routine start requires 1..100 contacts")
-        items = [
-            {
-                "id": contact.contact_id,
-                "inputs": {
-                    "full_name": contact.full_name,
-                    "company_name": contact.company_name,
-                    "company_domain": contact.company_domain,
-                    "linkedin_url": contact.linkedin_url,
-                    "profile_url": contact.profile_url,
-                },
+            raise ValueError("Clay managed function start requires 1..100 contacts")
+        items: list[dict[str, Any]] = []
+        for contact in contacts:
+            inputs: dict[str, Any] = {
+                "Full Name": contact.full_name,
+                "Company Domain": contact.company_domain,
+                "Company Name": contact.company_name,
             }
-            for contact in contacts
-        ]
+            social_profile_url = contact.linkedin_url or contact.profile_url
+            if social_profile_url is not None:
+                inputs["Social Profile URL"] = social_profile_url
+            items.append({"id": contact.contact_id, "inputs": inputs})
         metadata = {"submitted_contacts": len(items)}
         request = self._client.build_request(
             "POST",
@@ -459,7 +457,7 @@ class ClayContactProvider:
         )
 
     def results(self, routine_run_id: str) -> ClayResults:
-        """Read the same persisted Clay routine run without creating a replacement."""
+        """Read the same persisted managed-function run without creating a replacement."""
         if not routine_run_id.strip():
             raise ValueError("routine_run_id must be nonempty")
         metadata = {"routine_run_id": routine_run_id}
@@ -684,9 +682,12 @@ class InstantlyVerificationProvider:
 
 
 def clay_item_email(item: dict[str, Any]) -> str | None:
-    """Extract only the configured Clay routine's work_email output from one terminal item."""
+    """Extract a work email from Clay's managed Work Email function result."""
     result = item.get("result")
     if isinstance(result, dict):
+        email = usable_work_email(result.get("Work Email"))
+        if email is not None:
+            return email
         email = usable_work_email(result.get("work_email"))
         if email is not None:
             return email

@@ -264,11 +264,10 @@ def test_normal_clay_success_shadows_apollo_once_with_exact_selected_contact(
     clay_item = clay_body["items"][0]
     assert clay_item["id"] == contact.contact_id
     assert clay_item["inputs"] == {
-        "full_name": contact.full_name,
-        "company_name": contact.company_name,
-        "company_domain": contact.company_domain,
-        "linkedin_url": contact.linkedin_url,
-        "profile_url": contact.profile_url,
+        "Full Name": contact.full_name,
+        "Company Domain": contact.company_domain,
+        "Company Name": contact.company_name,
+        "Social Profile URL": contact.linkedin_url or contact.profile_url,
     }
 
     apollo_requests = stub.for_provider("apollo")

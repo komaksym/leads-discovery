@@ -58,6 +58,8 @@ jobs:
 
   canary:
     needs: authorize
+    if: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' }}
+    environment: production-canary
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -77,30 +79,14 @@ jobs:
       - name: Install package
         run: python -m pip install -e .
 
-      - name: Prepare durable Git operation journal
-        shell: bash
-        run: |
-          set -euo pipefail
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          if git fetch origin generated-leads:refs/remotes/origin/generated-leads; then
-            exit 0
-          fi
-          empty_tree="$(git mktree < /dev/null)"
-          root_commit="$(git commit-tree "$empty_tree" -m "Initialize generated lead output")"
-          git push origin "$root_commit:refs/heads/generated-leads"
-          git update-ref refs/remotes/origin/generated-leads "$root_commit"
-
       - name: Run fixed one-company live canary
         env:
           EXA_API_KEY: ${{ secrets.EXA_API_KEY }}
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           CLAY_PUBLIC_API_KEY: ${{ secrets.CLAY_PUBLIC_API_KEY }}
-          CLAY_CONTACT_ROUTINE_ID: ${{ secrets.CLAY_CONTACT_ROUTINE_ID }}
+          CLAY_WORK_EMAIL_FUNCTION_ID: ${{ vars.CLAY_WORK_EMAIL_FUNCTION_ID }}
           APOLLO_API_KEY: ${{ secrets.APOLLO_API_KEY }}
           INSTANTLY_API_KEY: ${{ secrets.INSTANTLY_API_KEY }}
-          LEADS_GIT_JOURNAL_BRANCH: generated-leads
-          LEADS_GIT_JOURNAL_REMOTE: origin
           LEADS_MAX_HTTP_RESPONSE_BYTES: "1048576"
           LEADS_MAX_RECORD_BYTES: "131072"
           LEADS_MAX_FILE_BYTES: "4194304"
@@ -108,12 +94,67 @@ jobs:
           LEADS_MAX_RECORDS: "500"
         shell: bash
         run: |
-          set -euo pipefail
-          python -m leads_discovery.production_canary \
-            --run-id "canary-${GITHUB_RUN_ID}" \
-            --data-root data
+          set -uo pipefail
+          run_id="canary-${GITHUB_RUN_ID}"
+          run_dir="data/$run_id"
+          if python -m leads_discovery.production_canary \
+            --run-id "$run_id" \
+            --data-root data; then
+            canary_code=0
+          else
+            canary_code=$?
+          fi
+
+          report="$run_dir/canary_coverage_report.json"
+          if [[ ! -f "$report" || -L "$report" ]]; then
+            printf '### Production canary readiness\n\n- Overall outcome: `failure`\n- Reason: private coverage report unavailable\n' \
+              >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::Production canary readiness: failure; private coverage report unavailable."
+            exit 1
+          fi
+
+          if ! outcomes="$(
+            jq -er '
+              [.overall_outcome, .pipeline_outcome]
+              | select(all(.[]; . == "success" or . == "inconclusive" or . == "failure"))
+              | @tsv
+            ' "$report"
+          )"; then
+            echo "::error::Production canary readiness: failure; private coverage report is invalid."
+            exit 1
+          fi
+          IFS=$'\t' read -r overall pipeline <<<"$outcomes"
+
+          coverage_ok=false
+          if jq -e '
+            .providers as $providers
+            | ([$providers[].provider] | sort) ==
+                ["apollo","clay","deepseek","exa_discovery","exa_people","exa_research","instantly"]
+              and all($providers[]; .integration_outcome == "success")
+          ' "$report" >/dev/null; then
+            coverage_ok=true
+          fi
+          coverage_state="not-success"
+          if [[ "$coverage_ok" == true ]]; then
+            coverage_state="success"
+          fi
+
+          printf '### Production canary readiness\n\n- Overall outcome: `%s`\n- Pipeline outcome: `%s`\n- Required live provider coverage: `%s`\n' \
+            "$overall" "$pipeline" "$coverage_state" >> "$GITHUB_STEP_SUMMARY"
+
+          if [[ "$canary_code" -eq 0 && "$overall" == "success" && "$pipeline" == "success" && "$coverage_ok" == true ]]; then
+            echo "Production canary readiness: success"
+            exit 0
+          fi
+          if [[ "$canary_code" -eq 2 && "$overall" == "inconclusive" ]]; then
+            echo "::warning::Production canary readiness: inconclusive; publication is blocked."
+            exit 2
+          fi
+          echo "::error::Production canary readiness: failure; publication is blocked."
+          exit 1
 
       - name: Publish approved public outputs
+        if: ${{ success() }}
         shell: bash
         run: |
           set -euo pipefail
@@ -124,7 +165,14 @@ jobs:
           cp -- "$run_dir/leads.csv" "$publish_dir/leads.csv"
           cp -- "$run_dir/contacts.jsonl" "$publish_dir/contacts.jsonl"
 
-          git fetch origin generated-leads:refs/remotes/origin/generated-leads
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if ! git fetch origin generated-leads:refs/remotes/origin/generated-leads; then
+            empty_tree="$(git mktree < /dev/null)"
+            root_commit="$(git commit-tree "$empty_tree" -m "Initialize generated lead output")"
+            git push origin "$root_commit:refs/heads/generated-leads"
+            git update-ref refs/remotes/origin/generated-leads "$root_commit"
+          fi
           git switch --force-create generated-leads refs/remotes/origin/generated-leads
           git rm -rf --ignore-unmatch .
           cp -- "$publish_dir/leads.csv" leads.csv
