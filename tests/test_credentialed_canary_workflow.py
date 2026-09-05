@@ -7,7 +7,7 @@ from pathlib import Path
 
 _WORKFLOW = ".github/workflows/generate-leads.yml"
 _CANARY_ENVIRONMENT = "production-canary"
-_LEGACY_REPOSITORY_SECRET_MARKERS = (
+_EXISTING_SECRET_MARKERS = (
     "secrets.EXA_API_KEY",
     "secrets.DEEPSEEK_API_KEY",
     "secrets.CLAY_PUBLIC_API_KEY",
@@ -15,7 +15,7 @@ _LEGACY_REPOSITORY_SECRET_MARKERS = (
     "secrets.APOLLO_API_KEY",
     "secrets.INSTANTLY_API_KEY",
 )
-_CANARY_ENV_SECRET_MARKERS = (
+_RENAMED_SECRET_MARKERS = (
     "secrets.CANARY_EXA_API_KEY",
     "secrets.CANARY_DEEPSEEK_API_KEY",
     "secrets.CANARY_CLAY_PUBLIC_API_KEY",
@@ -23,7 +23,7 @@ _CANARY_ENV_SECRET_MARKERS = (
     "secrets.CANARY_APOLLO_API_KEY",
     "secrets.CANARY_INSTANTLY_API_KEY",
 )
-_PAID_SECRET_MARKERS = _LEGACY_REPOSITORY_SECRET_MARKERS + _CANARY_ENV_SECRET_MARKERS
+_PAID_SECRET_MARKERS = _EXISTING_SECRET_MARKERS + _RENAMED_SECRET_MARKERS
 _REQUIRED_PROVIDERS = (
     "apollo",
     "clay",
@@ -118,7 +118,7 @@ def test_paid_canary_is_manual_immutable_and_ci_authorized() -> None:
 
 
 def test_secret_bearing_canary_job_rejects_non_main_dispatch_refs() -> None:
-    """The paid job guard models GitHub runtime event/ref admission, not just checkout text."""
+    """Secret release keeps existing names but is gated by exact-main environment admission."""
     canary = _canary_job(_workflow_text())
     expression = _job_if_expression(canary)
 
@@ -136,9 +136,9 @@ def test_secret_bearing_canary_job_rejects_non_main_dispatch_refs() -> None:
     assert not _guard_allows(expression, event_name="push", ref="refs/heads/main")
 
     assert f"environment: {_CANARY_ENVIRONMENT}" in canary
-    for marker in _CANARY_ENV_SECRET_MARKERS:
+    for marker in _EXISTING_SECRET_MARKERS:
         assert marker in canary
-    for marker in _LEGACY_REPOSITORY_SECRET_MARKERS:
+    for marker in _RENAMED_SECRET_MARKERS:
         assert marker not in canary
 
 
