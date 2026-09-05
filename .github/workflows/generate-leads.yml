@@ -84,7 +84,7 @@ jobs:
           EXA_API_KEY: ${{ secrets.EXA_API_KEY }}
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           CLAY_PUBLIC_API_KEY: ${{ secrets.CLAY_PUBLIC_API_KEY }}
-          CLAY_CONTACT_ROUTINE_ID: ${{ secrets.CLAY_CONTACT_ROUTINE_ID }}
+          CLAY_CONTACT_ROUTINE_ID: ${{ vars.CLAY_WORK_EMAIL_FUNCTION_ID }}
           APOLLO_API_KEY: ${{ secrets.APOLLO_API_KEY }}
           INSTANTLY_API_KEY: ${{ secrets.INSTANTLY_API_KEY }}
           LEADS_MAX_HTTP_RESPONSE_BYTES: "1048576"
