@@ -400,15 +400,15 @@ def _enrich_live(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
         InstantlyVerificationProvider,
     )
 
-    names = (
+    credential_names = (
         "EXA_API_KEY",
         "CLAY_PUBLIC_API_KEY",
-        "CLAY_CONTACT_ROUTINE_ID",
         "APOLLO_API_KEY",
         "INSTANTLY_API_KEY",
     )
-    credentials = {name: os.environ.get(name, "") for name in names}
-    if any(not credentials[name] for name in names):
+    credentials = {name: os.environ.get(name, "") for name in credential_names}
+    clay_function_id = os.environ.get("CLAY_WORK_EMAIL_FUNCTION_ID", "")
+    if any(not credentials[name] for name in credential_names) or not clay_function_id:
         return (
             {
                 "command": "enrich",
@@ -424,7 +424,7 @@ def _enrich_live(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
             exa=ExaPeopleProvider(api_key=credentials["EXA_API_KEY"], client=client),
             clay=ClayContactProvider(
                 api_key=credentials["CLAY_PUBLIC_API_KEY"],
-                routine_id=credentials["CLAY_CONTACT_ROUTINE_ID"],
+                routine_id=clay_function_id,
                 client=client,
             ),
             apollo=ApolloContactProvider(api_key=credentials["APOLLO_API_KEY"], client=client),
