@@ -7,11 +7,11 @@ from pathlib import Path
 
 _WORKFLOW = ".github/workflows/generate-leads.yml"
 _CANARY_ENVIRONMENT = "production-canary"
+_CLAY_FUNCTION_ID_MARKER = "vars.CLAY_WORK_EMAIL_FUNCTION_ID"
 _EXISTING_SECRET_MARKERS = (
     "secrets.EXA_API_KEY",
     "secrets.DEEPSEEK_API_KEY",
     "secrets.CLAY_PUBLIC_API_KEY",
-    "secrets.CLAY_CONTACT_ROUTINE_ID",
     "secrets.APOLLO_API_KEY",
     "secrets.INSTANTLY_API_KEY",
 )
@@ -19,7 +19,6 @@ _RENAMED_SECRET_MARKERS = (
     "secrets.CANARY_EXA_API_KEY",
     "secrets.CANARY_DEEPSEEK_API_KEY",
     "secrets.CANARY_CLAY_PUBLIC_API_KEY",
-    "secrets.CANARY_CLAY_CONTACT_ROUTINE_ID",
     "secrets.CANARY_APOLLO_API_KEY",
     "secrets.CANARY_INSTANTLY_API_KEY",
 )
@@ -118,7 +117,7 @@ def test_paid_canary_is_manual_immutable_and_ci_authorized() -> None:
 
 
 def test_secret_bearing_canary_job_rejects_non_main_dispatch_refs() -> None:
-    """Secret release keeps existing names but is gated by exact-main environment admission."""
+    """Secret release keeps credential names and exact-main environment admission."""
     canary = _canary_job(_workflow_text())
     expression = _job_if_expression(canary)
 
@@ -140,6 +139,15 @@ def test_secret_bearing_canary_job_rejects_non_main_dispatch_refs() -> None:
         assert marker in canary
     for marker in _RENAMED_SECRET_MARKERS:
         assert marker not in canary
+
+
+def test_clay_managed_function_id_is_non_secret_environment_config() -> None:
+    """Clay's workspace function identifier is configuration, not a paid credential."""
+    canary = _canary_job(_workflow_text())
+
+    assert _CLAY_FUNCTION_ID_MARKER in canary
+    assert "secrets.CLAY_CONTACT_ROUTINE_ID" not in canary
+    assert "secrets.CANARY_CLAY_CONTACT_ROUTINE_ID" not in canary
 
 
 def test_canary_private_state_never_crosses_runner_boundary() -> None:
