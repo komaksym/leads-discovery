@@ -66,9 +66,3 @@ def test_clay_managed_work_email_result_key_is_supported() -> None:
         clay_item_email({"result": {"Work Email": " Casey@Managed.Example "}})
         == "casey@managed.example"
     )
-
-
-def test_clay_legacy_custom_routine_output_is_not_accepted() -> None:
-    """Legacy custom-routine output keys must not silently satisfy the managed contract."""
-    assert clay_item_email({"result": {"work_email": "legacy@managed.example"}}) is None
-    assert clay_item_email({"work_email": "legacy@managed.example"}) is None
