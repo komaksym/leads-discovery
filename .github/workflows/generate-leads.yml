@@ -81,12 +81,12 @@ jobs:
 
       - name: Run fixed one-company live canary
         env:
-          EXA_API_KEY: ${{ secrets.CANARY_EXA_API_KEY }}
-          DEEPSEEK_API_KEY: ${{ secrets.CANARY_DEEPSEEK_API_KEY }}
-          CLAY_PUBLIC_API_KEY: ${{ secrets.CANARY_CLAY_PUBLIC_API_KEY }}
-          CLAY_CONTACT_ROUTINE_ID: ${{ secrets.CANARY_CLAY_CONTACT_ROUTINE_ID }}
-          APOLLO_API_KEY: ${{ secrets.CANARY_APOLLO_API_KEY }}
-          INSTANTLY_API_KEY: ${{ secrets.CANARY_INSTANTLY_API_KEY }}
+          EXA_API_KEY: ${{ secrets.EXA_API_KEY }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          CLAY_PUBLIC_API_KEY: ${{ secrets.CLAY_PUBLIC_API_KEY }}
+          CLAY_CONTACT_ROUTINE_ID: ${{ secrets.CLAY_CONTACT_ROUTINE_ID }}
+          APOLLO_API_KEY: ${{ secrets.APOLLO_API_KEY }}
+          INSTANTLY_API_KEY: ${{ secrets.INSTANTLY_API_KEY }}
           LEADS_MAX_HTTP_RESPONSE_BYTES: "1048576"
           LEADS_MAX_RECORD_BYTES: "131072"
           LEADS_MAX_FILE_BYTES: "4194304"
@@ -113,14 +113,17 @@ jobs:
             exit 1
           fi
 
-          if ! overall="$(jq -er '.overall_outcome | select(. == "success" or . == "inconclusive" or . == "failure")' "$report")"; then
+          if ! outcomes="$(
+            jq -er '
+              [.overall_outcome, .pipeline_outcome]
+              | select(all(.[]; . == "success" or . == "inconclusive" or . == "failure"))
+              | @tsv
+            ' "$report"
+          )"; then
             echo "::error::Production canary readiness: failure; private coverage report is invalid."
             exit 1
           fi
-          if ! pipeline="$(jq -er '.pipeline_outcome | select(. == "success" or . == "inconclusive" or . == "failure")' "$report")"; then
-            echo "::error::Production canary readiness: failure; private coverage report is invalid."
-            exit 1
-          fi
+          IFS=$'\t' read -r overall pipeline <<<"$outcomes"
 
           coverage_ok=false
           if jq -e '
