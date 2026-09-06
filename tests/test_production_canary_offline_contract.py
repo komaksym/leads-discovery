@@ -513,9 +513,14 @@ def test_coverage_paid_failure_has_durable_intent_and_never_redispatches(
     stub = WireStub({"exa": _exa_one, "clay": clay, "apollo": apollo})
     _install_contract(monkeypatch, tmp_path, run_id, _rejected_company(), stub)
 
-    assert _run_canary(tmp_path, run_id) == 2
-    clay.release_started()
+    def release_on_sleep(_delay: float) -> None:
+        clay.release_started()
+
+    monkeypatch.setattr(production_canary, "sleep", release_on_sleep)
+
     assert _run_canary(tmp_path, run_id) == 1
+    assert len(clay.posts) == 1
+    assert len(clay.gets) == 1
     assert len(observed_intent) == 1
     assert len(stub.for_provider("apollo")) == 1
     assert len(stub.for_provider("instantly")) == 0
@@ -547,8 +552,6 @@ def test_coverage_clay_resumes_same_operation_and_stops_at_three_reads(
     run_dir = _install_contract(monkeypatch, tmp_path, run_id, _rejected_company(), stub)
 
     assert _run_canary(tmp_path, run_id) == 2
-    for _ in range(4):
-        assert _run_canary(tmp_path, run_id) == 2
 
     assert len(clay.posts) == 1
     assert len(clay.gets) == 3
@@ -564,6 +567,10 @@ def test_coverage_clay_resumes_same_operation_and_stops_at_three_reads(
     clay_state = private_operations["coverage:clay"]
     assert clay_state["state"] == "pending"
     assert clay_state["dispatch_sequence"] == 3
+
+    request_count = len(stub.requests)
+    assert _run_canary(tmp_path, run_id) == 2
+    assert len(stub.requests) == request_count
 
 
 def test_coverage_instantly_resumes_same_email_and_stops_at_three_reads(
@@ -600,11 +607,18 @@ def test_coverage_instantly_resumes_same_email_and_stops_at_three_reads(
     )
     run_dir = _install_contract(monkeypatch, tmp_path, run_id, _rejected_company(), stub)
 
+    sleeps: list[float] = []
+
+    def release_on_sleep(delay: float) -> None:
+        sleeps.append(delay)
+        clay.release_started()
+
+    monkeypatch.setattr(production_canary, "sleep", release_on_sleep)
+
     assert _run_canary(tmp_path, run_id) == 2
-    clay.release_started()
-    assert _run_canary(tmp_path, run_id) == 2
-    for _ in range(4):
-        assert _run_canary(tmp_path, run_id) == 2
+    assert len(sleeps) == 6
+    assert len(clay.posts) == 1
+    assert len(clay.gets) == 1
 
     instantly_requests = stub.for_provider("instantly")
     posts = [request for request in instantly_requests if request.method == "POST"]
@@ -620,6 +634,10 @@ def test_coverage_instantly_resumes_same_email_and_stops_at_three_reads(
     instantly_state = private_operations["coverage:instantly"]
     assert instantly_state["state"] == "pending"
     assert instantly_state["dispatch_sequence"] == 3
+
+    request_count = len(stub.requests)
+    assert _run_canary(tmp_path, run_id) == 2
+    assert len(stub.requests) == request_count
 
 
 def test_company_fingerprint_mismatch_fails_closed_without_new_provider_dispatch(
