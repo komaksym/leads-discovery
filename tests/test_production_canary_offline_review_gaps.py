@@ -11,6 +11,7 @@ from m4_contract_fixtures import ClayRoutineScript, WireStub, json_body, read_js
 from test_production_canary_offline_contract import (
     _EMAIL,
     _PROFILE,
+    _accepted_company,
     _exa_one,
     _install_contract,
     _person,
@@ -21,11 +22,12 @@ from test_production_canary_offline_contract import (
 
 from leads_discovery import production_canary
 from leads_discovery.contacts.selection import select_contacts
-from leads_discovery.models import CompanyRecord
+from leads_discovery.models import CompanyRecord, RunCheckpoint
 from leads_discovery.pipeline.canary_provider_coverage import (
     CanaryProviderCoverageSummary,
     run_live_provider_coverage,
 )
+from leads_discovery.pipeline.state import write_checkpoint
 
 _CANONICAL_AND_NORMAL_ARTIFACTS = (
     "companies_evaluated.jsonl",
@@ -47,11 +49,21 @@ def _canonical_and_normal_snapshot(run_dir: Path) -> dict[str, bytes | None]:
     return snapshot
 
 
+def _write_contact_status(data_root: Path, run_id: str, status: str) -> None:
+    """Persist the durable normal-M4 status that controls canary-only resume admission."""
+    run_dir = data_root / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    write_checkpoint(
+        run_dir / "contact_checkpoint.json",
+        RunCheckpoint(run_id=run_id, status=status),
+    )
+
+
 def test_successful_coverage_only_waterfall_uses_selected_contact_without_mutating_normal_state(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Coverage-only Clay/Apollo use selector output and cannot change canonical M4 state."""
+    """Coverage-only Clay resumes in one canary call and cannot change canonical M4 state."""
     run_id = "canary-review-coverage-immutability"
     clay = ClayRoutineScript([])
 
@@ -85,15 +97,21 @@ def test_successful_coverage_only_waterfall_uses_selected_contact_without_mutati
         assert _canonical_and_normal_snapshot(data_root / run_id) == before
         return summary
 
+    sleeps: list[float] = []
+
+    def release_on_sleep(delay: float) -> None:
+        sleeps.append(delay)
+        clay.release_started()
+
     monkeypatch.setattr(
         production_canary,
         "run_live_provider_coverage",
         coverage_with_snapshot,
     )
+    monkeypatch.setattr(production_canary, "sleep", release_on_sleep, raising=False)
 
     assert _run_canary(tmp_path, run_id) == 2
-    clay.release_started()
-    assert _run_canary(tmp_path, run_id) == 2
+    assert len(sleeps) == 1
 
     evaluated_rows = read_jsonl(run_dir / "companies_evaluated.jsonl")
     assert len(evaluated_rows) == 1
@@ -103,6 +121,10 @@ def test_successful_coverage_only_waterfall_uses_selected_contact_without_mutati
     expected = expected_selected[0]
 
     assert len(clay.posts) == 1
+    assert len(clay.gets) == 1
+    routine_run_id = clay.latest_run_id
+    assert routine_run_id is not None
+    assert clay.gets[0].url.path == f"/public/v0/routines/run/{routine_run_id}/results"
     clay_item = json_body(clay.posts[0])["items"][0]
     assert clay_item["id"] == expected.contact_id
     assert clay_item["inputs"] == {
@@ -126,6 +148,116 @@ def test_successful_coverage_only_waterfall_uses_selected_contact_without_mutati
         "organization_name": expected.company_name,
         "linkedin_url": expected.linkedin_url,
     }
+
+
+def test_normal_m4_completes_after_same_run_pending_resume_without_second_clay_start(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Normal M4 waits, resumes its persisted Clay run, and completes in one canary call."""
+    run_id = "canary-normal-same-run-resume"
+    clay = ClayRoutineScript([{"work_email": _EMAIL}])
+
+    def apollo(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "credits_used": 1,
+                "person": {"email": "shadow.owner@acmevalve.com", "linkedin_url": _PROFILE},
+            },
+        )
+
+    stub = WireStub(
+        {
+            "exa": _exa_one,
+            "clay": clay,
+            "apollo": apollo,
+            "instantly": _terminal_instantly("verified", expected_email=_EMAIL),
+        }
+    )
+    _install_contract(monkeypatch, tmp_path, run_id, _accepted_company(), stub)
+    sleeps: list[float] = []
+
+    def release_on_sleep(delay: float) -> None:
+        sleeps.append(delay)
+        clay.release_started()
+
+    monkeypatch.setattr(production_canary, "sleep", release_on_sleep, raising=False)
+
+    assert _run_canary(tmp_path, run_id) == 0
+    assert len(sleeps) == 1
+    assert len(clay.posts) == 1
+    assert len(clay.gets) == 1
+    routine_run_id = clay.latest_run_id
+    assert routine_run_id is not None
+    assert clay.gets[0].url.path == f"/public/v0/routines/run/{routine_run_id}/results"
+
+
+def test_normal_m4_permanent_pending_stops_after_three_same_run_reads(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Normal M4 never starts replacement Clay work and stops after three pending reads."""
+    run_id = "canary-normal-pending-ceiling"
+    clay = ClayRoutineScript([{"work_email": _EMAIL}])
+    stub = WireStub({"exa": _exa_one, "clay": clay})
+    _install_contract(monkeypatch, tmp_path, run_id, _accepted_company(), stub)
+    sleeps: list[float] = []
+    monkeypatch.setattr(production_canary, "sleep", sleeps.append, raising=False)
+
+    assert _run_canary(tmp_path, run_id) == 2
+    assert len(sleeps) == 3
+    assert len(clay.posts) == 1
+    assert len(clay.gets) == 3
+    routine_run_id = clay.latest_run_id
+    assert routine_run_id is not None
+    assert {request.url.path for request in clay.gets} == {
+        f"/public/v0/routines/run/{routine_run_id}/results"
+    }
+
+
+@pytest.mark.parametrize("status", ["paused_budget", "paused_unknown"])
+def test_main_never_redispatches_non_pending_code_two(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    status: str,
+) -> None:
+    """CLI code 2 is resumable only when the durable M4 checkpoint says paused_pending."""
+    run_id = f"non-resumable-{status}"
+    enrich_calls = 0
+    sleeps: list[float] = []
+
+    def fake_cli(argv: list[str] | None = None) -> int:
+        nonlocal enrich_calls
+        assert argv is not None
+        if argv[0] == "run":
+            return 0
+        assert argv[0] == "enrich"
+        enrich_calls += 1
+        _write_contact_status(tmp_path, run_id, status)
+        return 2
+
+    def unexpected_coverage(
+        _data_root: Path,
+        *,
+        run_id: str,
+    ) -> CanaryProviderCoverageSummary:
+        raise AssertionError("coverage must not start after non-resumable normal M4")
+
+    monkeypatch.setattr(production_canary, "cli_main", fake_cli)
+    monkeypatch.setattr(production_canary, "run_live_provider_coverage", unexpected_coverage)
+    monkeypatch.setattr(
+        production_canary,
+        "build_canary_coverage_report",
+        lambda _data_root, *, run_id: SimpleNamespace(overall_outcome="inconclusive"),
+    )
+    monkeypatch.setattr(production_canary, "sleep", sleeps.append, raising=False)
+
+    assert production_canary.main(
+        ["--run-id", run_id, "--data-root", str(tmp_path)]
+    ) == 2
+    assert enrich_calls == 1
+    assert sleeps == []
 
 
 def test_main_polls_pending_coverage_to_completion_in_same_invocation(
@@ -176,7 +308,7 @@ def test_main_stops_polling_pending_coverage_after_fixed_ceiling(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Perpetually pending async coverage stops after seven passes and is inconclusive."""
+    """Seven passes cover three Clay reads plus three Instantly reads, then stop."""
     run_id = "bounded-polling"
     coverage_calls = 0
     sleeps: list[float] = []
