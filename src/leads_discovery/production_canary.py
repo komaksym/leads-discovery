@@ -131,7 +131,7 @@ def _normal_m4_status_read_count(
 
 
 def _normal_m4_resume_allowed(data_root: Path, run_id: str) -> bool:
-    """Admit a real pending resume only while its durable status-read quota remains."""
+    """Admit only new or valid pending M4 work while its durable read quota remains."""
     checkpoint_path = data_root / run_id / "contact_checkpoint.json"
     try:
         payload = read_json(checkpoint_path)
@@ -141,14 +141,15 @@ def _normal_m4_resume_allowed(data_root: Path, run_id: str) -> bool:
         return True
     if not isinstance(payload, dict) or payload.get("run_id") != run_id:
         return False
-    if payload.get("status") != "paused_pending":
+    status = payload.get("status")
+    if status == "completed":
         return True
+    if status != "paused_pending":
+        return False
 
     operation = _normal_m4_pending_identity(data_root, run_id)
     if operation is None:
-        # Keep synthetic/legacy orchestration seams on the normal M4 validator path.
-        # Real provider state is validated there before any provider can be called.
-        return True
+        return False
     reads = _normal_m4_status_read_count(data_root, run_id, operation)
     return reads is not None and reads < _NORMAL_ASYNC_READ_LIMIT
 
@@ -201,8 +202,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             str(_NORMAL_ASYNC_READ_LIMIT),
             "--execute-live",
         ]
+        persisted_pending = _normal_m4_pending_operation(args.data_root, args.run_id)
         if _normal_m4_resume_allowed(args.data_root, args.run_id):
-            enrich_code = cli_main(enrich_args)
+            if persisted_pending is not None:
+                sleep(_ASYNC_POLL_DELAY_SECONDS)
+            if _normal_m4_resume_allowed(args.data_root, args.run_id):
+                enrich_code = cli_main(enrich_args)
+            else:
+                enrich_code = 2
+                normal_pending = True
         else:
             enrich_code = 2
             normal_pending = True
