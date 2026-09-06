@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from urllib.parse import quote
 
 import httpx
 import pytest
@@ -66,7 +65,7 @@ def test_pending_instantly_read_ceiling_survives_canary_process_restart(
                 },
             )
         assert request.method == "GET"
-        assert request.url.path == f"/api/v2/email-verification/{quote(_EMAIL, safe='')}"
+        assert request.url.path == f"/api/v2/email-verification/{_EMAIL}"
         instantly_gets.append(request)
         return httpx.Response(
             202,
