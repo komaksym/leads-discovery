@@ -56,7 +56,7 @@ def _normal_m4_pending_operation(data_root: Path, run_id: str) -> str | None:
         return None
     reason = payload.get("pause_reason")
     if reason == "clay_pending":
-        return reason
+        return "clay_pending"
     if isinstance(reason, str) and reason.startswith("instantly:") and reason != "instantly:":
         return reason
     return None
