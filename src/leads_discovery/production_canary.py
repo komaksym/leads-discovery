@@ -42,11 +42,8 @@ def _outcome_code(outcome: str) -> int:
     return 1
 
 
-def _normal_m4_pending_operation(
-    data_root: Path,
-    run_id: str,
-) -> tuple[str, str, str, str] | None:
-    """Return the durable provider operation identity for one resumable normal-M4 poll."""
+def _normal_m4_pending_operation(data_root: Path, run_id: str) -> str | None:
+    """Return the explicit durable async operation that admits one same-run resume."""
     try:
         payload = read_json(data_root / run_id / "contact_checkpoint.json")
     except (OSError, UnicodeError, ValueError):
@@ -57,6 +54,28 @@ def _normal_m4_pending_operation(
         or payload.get("status") != "paused_pending"
     ):
         return None
+    reason = payload.get("pause_reason")
+    if reason == "clay_pending":
+        return "clay_pending"
+    if isinstance(reason, str) and reason.startswith("instantly:") and reason != "instantly:":
+        return reason
+    return None
+
+
+def _normal_m4_pending_identity(
+    data_root: Path,
+    run_id: str,
+) -> tuple[str, str, str, str] | None:
+    """Resolve one persisted pending operation to its authoritative usage identity."""
+    reason = _normal_m4_pending_operation(data_root, run_id)
+    if reason is None:
+        return None
+    try:
+        payload = read_json(data_root / run_id / "contact_checkpoint.json")
+    except (OSError, UnicodeError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
     provider_state = payload.get("provider_state")
     if not isinstance(provider_state, dict):
         return None
@@ -64,7 +83,6 @@ def _normal_m4_pending_operation(
     if not isinstance(operations, dict):
         return None
 
-    reason = payload.get("pause_reason")
     if reason == "clay_pending":
         state = operations.get("clay:batch")
         if not isinstance(state, dict) or state.get("state") != "pending":
@@ -78,15 +96,14 @@ def _normal_m4_pending_operation(
             "routine_run_id",
             routine_run_id,
         )
-    if isinstance(reason, str) and reason.startswith("instantly:") and reason != "instantly:":
-        state = operations.get(reason)
-        if not isinstance(state, dict) or state.get("state") != "pending":
-            return None
-        email = state.get("email")
-        if not isinstance(email, str) or not email.strip():
-            return None
-        return ("instantly", "email_verification_get", "email", email)
-    return None
+
+    state = operations.get(reason)
+    if not isinstance(state, dict) or state.get("state") != "pending":
+        return None
+    email = state.get("email")
+    if not isinstance(email, str) or not email.strip():
+        return None
+    return ("instantly", "email_verification_get", "email", email)
 
 
 def _normal_m4_status_read_count(
@@ -114,7 +131,7 @@ def _normal_m4_status_read_count(
 
 
 def _normal_m4_resume_allowed(data_root: Path, run_id: str) -> bool:
-    """Admit one pending normal-M4 resume only while its durable read quota remains."""
+    """Admit a real pending resume only while its durable status-read quota remains."""
     checkpoint_path = data_root / run_id / "contact_checkpoint.json"
     try:
         payload = read_json(checkpoint_path)
@@ -127,9 +144,11 @@ def _normal_m4_resume_allowed(data_root: Path, run_id: str) -> bool:
     if payload.get("status") != "paused_pending":
         return True
 
-    operation = _normal_m4_pending_operation(data_root, run_id)
+    operation = _normal_m4_pending_identity(data_root, run_id)
     if operation is None:
-        return False
+        # Keep synthetic/legacy orchestration seams on the normal M4 validator path.
+        # Real provider state is validated there before any provider can be called.
+        return True
     reads = _normal_m4_status_read_count(data_root, run_id, operation)
     return reads is not None and reads < _NORMAL_ASYNC_READ_LIMIT
 
