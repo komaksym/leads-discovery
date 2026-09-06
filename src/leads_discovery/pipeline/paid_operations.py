@@ -52,6 +52,33 @@ def _event_quota_amount(
     return _finite_nonnegative(raw, field_name=f"{provider} credits")
 
 
+def _event_matches_quota_identity(
+    event: UsageEvent,
+    provider: str,
+    *,
+    operation: str | None,
+    metadata: Mapping[str, object] | None,
+) -> bool:
+    """Match exact quota identity while rejecting malformed relevant ledger evidence."""
+    if event.provider != provider:
+        return False
+    if operation is not None and event.operation != operation:
+        return False
+    if metadata is None:
+        return True
+    for key, expected in metadata.items():
+        if key not in event.metadata:
+            raise ValueError(f"usage event is missing quota identity metadata: {key}")
+        recorded = event.metadata[key]
+        if isinstance(expected, str) and (
+            not isinstance(recorded, str) or not recorded.strip()
+        ):
+            raise ValueError(f"usage event has malformed quota identity metadata: {key}")
+        if recorded != expected:
+            return False
+    return True
+
+
 def replay_quota_totals(events: Iterable[UsageEvent]) -> tuple[float, int, float]:
     """Replay Apollo credits and Instantly create/credit totals from usage events."""
     apollo = 0.0
@@ -233,8 +260,12 @@ class PaidOperationLifecycle:
                 unit=unit,
             )
             for event in self._usage_events
-            if metadata is None
-            or all(event.metadata.get(key) == value for key, value in metadata.items())
+            if _event_matches_quota_identity(
+                event,
+                provider,
+                operation=operation,
+                metadata=metadata,
+            )
         )
 
     @classmethod
