@@ -197,6 +197,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             _APOLLO_CREDIT_CAP,
             "--instantly-verification-call-cap",
             _INSTANTLY_CALL_CAP,
+            "--async-status-read-cap",
+            str(_NORMAL_ASYNC_READ_LIMIT),
             "--execute-live",
         ]
         if _normal_m4_resume_allowed(args.data_root, args.run_id):
