@@ -28,15 +28,18 @@ def test_pending_clay_read_ceiling_survives_canary_process_restart(
     clay = ClayRoutineScript([{"work_email": _EMAIL}])
     stub = WireStub({"exa": _exa_one, "clay": clay})
     _install_contract(monkeypatch, tmp_path, run_id, _accepted_company(), stub)
-    monkeypatch.setattr(production_canary, "sleep", lambda _delay: None, raising=False)
+    sleeps: list[float] = []
+    monkeypatch.setattr(production_canary, "sleep", sleeps.append, raising=False)
 
     assert _run_canary(tmp_path, run_id) == 2
     assert len(clay.posts) == 1
     assert len(clay.gets) == 3
+    assert len(sleeps) == 3
 
     assert _run_canary(tmp_path, run_id) == 2
     assert len(clay.posts) == 1
     assert len(clay.gets) == 3
+    assert len(sleeps) == 3
 
 
 def test_pending_instantly_read_ceiling_survives_canary_process_restart(
@@ -95,8 +98,10 @@ def test_pending_instantly_read_ceiling_survives_canary_process_restart(
     assert len(clay.posts) == 1
     assert len(instantly_posts) == 1
     assert len(instantly_gets) == 3
+    assert sleeps == 4
 
     assert _run_canary(tmp_path, run_id) == 2
     assert len(clay.posts) == 1
     assert len(instantly_posts) == 1
     assert len(instantly_gets) == 3
+    assert sleeps == 4
