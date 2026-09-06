@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -16,6 +17,30 @@ from test_production_canary_offline_contract import (
 )
 
 from leads_discovery import production_canary
+from leads_discovery.models import RunCheckpoint
+from leads_discovery.pipeline.state import write_checkpoint
+
+
+def _write_contact_pause(
+    data_root: Path,
+    run_id: str,
+    status: str,
+    *,
+    pause_reason: str,
+    operations: dict[str, object] | None = None,
+) -> None:
+    """Persist one synthetic contact pause for orchestration admission tests."""
+    run_dir = data_root / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    write_checkpoint(
+        run_dir / "contact_checkpoint.json",
+        RunCheckpoint(
+            run_id=run_id,
+            status=status,
+            pause_reason=pause_reason,
+            provider_state={"operations": operations or {}},
+        ),
+    )
 
 
 def test_pending_clay_read_ceiling_survives_canary_process_restart(
@@ -104,3 +129,141 @@ def test_pending_instantly_read_ceiling_survives_canary_process_restart(
     assert len(instantly_posts) == 1
     assert len(instantly_gets) == 3
     assert sleeps == 4
+
+
+def test_fresh_process_waits_before_next_persisted_status_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A process restart cannot turn the next durable Clay read into a zero-delay poll."""
+    run_id = "normal-clay-restart-delay"
+    clay = ClayRoutineScript([{"work_email": _EMAIL}])
+    stub = WireStub({"exa": _exa_one, "clay": clay})
+    _install_contract(monkeypatch, tmp_path, run_id, _accepted_company(), stub)
+    first_sleeps = 0
+
+    def interrupt_after_first_read(_delay: float) -> None:
+        nonlocal first_sleeps
+        first_sleeps += 1
+        if first_sleeps == 2:
+            raise RuntimeError("simulated process restart")
+
+    monkeypatch.setattr(
+        production_canary,
+        "sleep",
+        interrupt_after_first_read,
+        raising=False,
+    )
+
+    with pytest.raises(RuntimeError, match="simulated process restart"):
+        _run_canary(tmp_path, run_id)
+    assert len(clay.posts) == 1
+    assert len(clay.gets) == 1
+
+    restart_sleeps: list[float] = []
+
+    def record_restart_sleep(delay: float) -> None:
+        if not restart_sleeps:
+            assert len(clay.gets) == 1
+        restart_sleeps.append(delay)
+
+    monkeypatch.setattr(
+        production_canary,
+        "sleep",
+        record_restart_sleep,
+        raising=False,
+    )
+
+    assert _run_canary(tmp_path, run_id) == 2
+    assert restart_sleeps[0] == pytest.approx(10.0)
+    assert len(clay.posts) == 1
+    assert len(clay.gets) == 3
+
+
+@pytest.mark.parametrize("status", ["paused_budget", "paused_unknown"])
+def test_non_pending_pause_is_not_redispatched_by_fresh_canary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    status: str,
+) -> None:
+    """A durable non-resumable code-2 checkpoint is never sent through M4 again."""
+    run_id = f"fresh-{status}"
+    enrich_calls = 0
+
+    def fake_cli(argv: list[str] | None = None) -> int:
+        nonlocal enrich_calls
+        assert argv is not None
+        if argv[0] == "run":
+            return 0
+        assert argv[0] == "enrich"
+        enrich_calls += 1
+        _write_contact_pause(
+            tmp_path,
+            run_id,
+            status,
+            pause_reason="synthetic_non_resumable",
+        )
+        return 2
+
+    monkeypatch.setattr(production_canary, "cli_main", fake_cli)
+    monkeypatch.setattr(
+        production_canary,
+        "build_canary_coverage_report",
+        lambda _data_root, *, run_id: SimpleNamespace(overall_outcome="inconclusive"),
+    )
+    monkeypatch.setattr(
+        production_canary,
+        "run_live_provider_coverage",
+        lambda *_args, **_kwargs: pytest.fail("coverage must not run"),
+    )
+
+    assert production_canary.main(
+        ["--run-id", run_id, "--data-root", str(tmp_path)]
+    ) == 2
+    assert enrich_calls == 1
+
+    assert production_canary.main(
+        ["--run-id", run_id, "--data-root", str(tmp_path)]
+    ) == 2
+    assert enrich_calls == 1
+
+
+def test_malformed_pending_identity_fails_closed_before_redispatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A paused-pending reason without its durable provider identity is not resumable."""
+    run_id = "malformed-pending-identity"
+    enrich_calls = 0
+    sleeps: list[float] = []
+
+    def fake_cli(argv: list[str] | None = None) -> int:
+        nonlocal enrich_calls
+        assert argv is not None
+        if argv[0] == "run":
+            return 0
+        assert argv[0] == "enrich"
+        enrich_calls += 1
+        if enrich_calls > 1:
+            raise AssertionError("malformed pending work must not be redispatched")
+        _write_contact_pause(
+            tmp_path,
+            run_id,
+            "paused_pending",
+            pause_reason="clay_pending",
+        )
+        return 2
+
+    monkeypatch.setattr(production_canary, "cli_main", fake_cli)
+    monkeypatch.setattr(
+        production_canary,
+        "build_canary_coverage_report",
+        lambda _data_root, *, run_id: SimpleNamespace(overall_outcome="inconclusive"),
+    )
+    monkeypatch.setattr(production_canary, "sleep", sleeps.append, raising=False)
+
+    assert production_canary.main(
+        ["--run-id", run_id, "--data-root", str(tmp_path)]
+    ) == 2
+    assert enrich_calls == 1
+    assert sleeps == []
