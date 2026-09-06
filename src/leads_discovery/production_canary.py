@@ -23,7 +23,7 @@ _CLAY_MAX_CONTACTS = "1"
 _APOLLO_CREDIT_CAP = "1"
 _INSTANTLY_CALL_CAP = "1"
 _ASYNC_POLL_DELAY_SECONDS = 10.0
-_NORMAL_PENDING_RESUME_LIMIT = 3
+_NORMAL_ASYNC_READ_LIMIT = 3
 _COVERAGE_MAX_PASSES = 7
 
 
@@ -42,17 +42,24 @@ def _outcome_code(outcome: str) -> int:
     return 1
 
 
-def _normal_m4_is_paused_pending(data_root: Path, run_id: str) -> bool:
-    """Admit a same-run M4 resume only from its explicit durable pending checkpoint."""
+def _normal_m4_pending_operation(data_root: Path, run_id: str) -> str | None:
+    """Return the explicit durable async operation that admits one same-run resume."""
     try:
         payload = read_json(data_root / run_id / "contact_checkpoint.json")
     except (OSError, UnicodeError, ValueError):
-        return False
-    return (
-        isinstance(payload, dict)
-        and payload.get("run_id") == run_id
-        and payload.get("status") == "paused_pending"
-    )
+        return None
+    if (
+        not isinstance(payload, dict)
+        or payload.get("run_id") != run_id
+        or payload.get("status") != "paused_pending"
+    ):
+        return None
+    reason = payload.get("pause_reason")
+    if reason == "clay_pending":
+        return reason
+    if isinstance(reason, str) and reason.startswith("instantly:") and reason != "instantly:":
+        return reason
+    return None
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -79,6 +86,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     coverage_failed = False
     coverage_pending = False
+    normal_pending = False
     if run_code == 0:
         enrich_args = [
             "enrich",
@@ -101,11 +109,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             "--execute-live",
         ]
         enrich_code = cli_main(enrich_args)
-        for _ in range(_NORMAL_PENDING_RESUME_LIMIT):
-            if enrich_code != 2 or not _normal_m4_is_paused_pending(
-                args.data_root, args.run_id
-            ):
+        reads_by_operation: dict[str, int] = {}
+        while enrich_code == 2:
+            pending_operation = _normal_m4_pending_operation(
+                args.data_root,
+                args.run_id,
+            )
+            if pending_operation is None:
                 break
+            reads = reads_by_operation.get(pending_operation, 0)
+            if reads >= _NORMAL_ASYNC_READ_LIMIT:
+                normal_pending = True
+                break
+            reads_by_operation[pending_operation] = reads + 1
             sleep(_ASYNC_POLL_DELAY_SECONDS)
             enrich_code = cli_main(enrich_args)
 
@@ -130,7 +146,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
     if coverage_failed:
         return 1
-    if coverage_pending and report.overall_outcome == "success":
+    if (normal_pending or coverage_pending) and report.overall_outcome == "success":
         return 2
     return _outcome_code(report.overall_outcome)
 
