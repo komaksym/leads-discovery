@@ -16,6 +16,8 @@ from test_production_canary_offline_contract import (
     _run_canary,
 )
 
+from leads_discovery import production_canary
+
 
 def test_coverage_transport_safety_failure_is_provider_and_overall_failure(
     tmp_path: Path,
@@ -32,9 +34,14 @@ def test_coverage_transport_safety_failure_is_provider_and_overall_failure(
     stub = WireStub({"exa": _exa_one, "clay": clay, "apollo": apollo})
     run_dir = _install_contract(monkeypatch, tmp_path, run_id, _rejected_company(), stub)
 
-    assert _run_canary(tmp_path, run_id) == 2
-    clay.release_started()
+    def release_on_sleep(_delay: float) -> None:
+        clay.release_started()
+
+    monkeypatch.setattr(production_canary, "sleep", release_on_sleep)
+
     assert _run_canary(tmp_path, run_id) == 1
+    assert len(clay.posts) == 1
+    assert len(clay.gets) == 1
     assert len(stub.for_provider("apollo")) == 1
     assert len(stub.for_provider("instantly")) == 0
 
