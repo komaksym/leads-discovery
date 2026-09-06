@@ -196,6 +196,22 @@ def _run_canary(data_root: Path, run_id: str) -> int:
     )
 
 
+def _release_clay_on_first_poll(
+    monkeypatch: pytest.MonkeyPatch,
+    clay: ClayRoutineScript,
+) -> None:
+    """Make a synthetic Clay run terminal before its first admitted status read."""
+    released = False
+
+    def release(_delay: float) -> None:
+        nonlocal released
+        if not released:
+            clay.release_started()
+            released = True
+
+    monkeypatch.setattr(production_canary, "sleep", release, raising=False)
+
+
 def _report(run_dir: Path) -> dict[str, Any]:
     """Read the derived sanitized report produced by the canary itself."""
     payload = json.loads((run_dir / "canary_coverage_report.json").read_text(encoding="utf-8"))
@@ -249,8 +265,7 @@ def test_normal_clay_success_shadows_apollo_once_with_exact_selected_contact(
         }
     )
     run_dir = _install_contract(monkeypatch, tmp_path, run_id, _accepted_company(), stub)
-    assert _run_canary(tmp_path, run_id) == 2
-    clay.release_started()
+    _release_clay_on_first_poll(monkeypatch, clay)
     assert _run_canary(tmp_path, run_id) == 0
 
     contacts = read_jsonl(run_dir / "contacts.jsonl")
@@ -338,9 +353,8 @@ def test_normal_apollo_fallback_consumes_shared_slot_and_verifies_exact_fallback
         }
     )
     run_dir = _install_contract(monkeypatch, tmp_path, run_id, _accepted_company(), stub)
+    _release_clay_on_first_poll(monkeypatch, clay)
 
-    assert _run_canary(tmp_path, run_id) == 2
-    clay.release_started()
     assert _run_canary(tmp_path, run_id) == 0
 
     assert len(stub.for_provider("apollo")) == 1
@@ -418,9 +432,8 @@ def test_valid_clay_no_email_and_apollo_no_match_are_provider_successes(
 
     stub = WireStub({"exa": _exa_one, "clay": clay, "apollo": apollo})
     run_dir = _install_contract(monkeypatch, tmp_path, run_id, _accepted_company(), stub)
+    _release_clay_on_first_poll(monkeypatch, clay)
 
-    assert _run_canary(tmp_path, run_id) == 2
-    clay.release_started()
     assert _run_canary(tmp_path, run_id) == 2
 
     assert len(stub.for_provider("apollo")) == 1
@@ -463,9 +476,8 @@ def test_instantly_invalid_is_provider_success_but_pipeline_remains_inconclusive
         }
     )
     run_dir = _install_contract(monkeypatch, tmp_path, run_id, _accepted_company(), stub)
+    _release_clay_on_first_poll(monkeypatch, clay)
 
-    assert _run_canary(tmp_path, run_id) == 2
-    clay.release_started()
     assert _run_canary(tmp_path, run_id) == 2
 
     contact = ContactRecord.from_dict(read_jsonl(run_dir / "contacts.jsonl")[0])
@@ -683,9 +695,8 @@ def test_contact_fingerprint_mismatch_fails_closed_without_reusing_shadow_apollo
         }
     )
     run_dir = _install_contract(monkeypatch, tmp_path, run_id, _accepted_company(), stub)
+    _release_clay_on_first_poll(monkeypatch, clay)
 
-    assert _run_canary(tmp_path, run_id) == 2
-    clay.release_started()
     assert _run_canary(tmp_path, run_id) == 0
     request_count = len(stub.requests)
 
