@@ -22,12 +22,12 @@ from test_production_canary_offline_contract import (
 
 from leads_discovery import production_canary
 from leads_discovery.contacts.selection import select_contacts
-from leads_discovery.models import CompanyRecord, RunCheckpoint
+from leads_discovery.models import CompanyRecord, RunCheckpoint, UsageEvent
 from leads_discovery.pipeline.canary_provider_coverage import (
     CanaryProviderCoverageSummary,
     run_live_provider_coverage,
 )
-from leads_discovery.pipeline.state import write_checkpoint
+from leads_discovery.pipeline.state import append_jsonl, write_checkpoint
 
 _CANONICAL_AND_NORMAL_ARTIFACTS = (
     "companies_evaluated.jsonl",
@@ -55,13 +55,19 @@ def _write_contact_status(
     status: str,
     *,
     pause_reason: str | None = None,
+    operations: dict[str, object] | None = None,
 ) -> None:
-    """Persist the durable normal-M4 status that controls canary-only resume admission."""
+    """Persist the durable normal-M4 state that controls canary-only resume admission."""
     run_dir = data_root / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
     write_checkpoint(
         run_dir / "contact_checkpoint.json",
-        RunCheckpoint(run_id=run_id, status=status, pause_reason=pause_reason),
+        RunCheckpoint(
+            run_id=run_id,
+            status=status,
+            pause_reason=pause_reason,
+            provider_state={"operations": operations or {}},
+        ),
     )
 
 
@@ -231,12 +237,24 @@ def test_normal_m4_gives_sequential_async_stages_independent_read_ceilings(
     enrich_calls = 0
     coverage_calls = 0
     sleeps: list[float] = []
-    pending_reasons = [
-        "clay_pending",
-        "clay_pending",
-        "clay_pending",
-        "instantly:contact-1",
-    ]
+    clay_run_id = "routine-sequential"
+    instant_email = "owner@example.com"
+    usage_path = tmp_path / run_id / "contact_usage_events.jsonl"
+
+    def write_clay_pending() -> None:
+        _write_contact_status(
+            tmp_path,
+            run_id,
+            "paused_pending",
+            pause_reason="clay_pending",
+            operations={
+                "clay:batch": {
+                    "state": "pending",
+                    "routine_run_id": clay_run_id,
+                    "contact_ids": [],
+                }
+            },
+        )
 
     def fake_cli(argv: list[str] | None = None) -> int:
         nonlocal enrich_calls
@@ -245,15 +263,73 @@ def test_normal_m4_gives_sequential_async_stages_independent_read_ceilings(
             return 0
         assert argv[0] == "enrich"
         enrich_calls += 1
-        if enrich_calls <= len(pending_reasons):
+        if enrich_calls == 1:
+            write_clay_pending()
+            usage_path.touch()
+            return 2
+        if enrich_calls in {2, 3}:
+            append_jsonl(
+                usage_path,
+                UsageEvent(
+                    provider="clay",
+                    operation="work_email_routine_results",
+                    metadata={"routine_run_id": clay_run_id},
+                ).to_dict(),
+            )
+            write_clay_pending()
+            return 2
+        if enrich_calls == 4:
+            append_jsonl(
+                usage_path,
+                UsageEvent(
+                    provider="clay",
+                    operation="work_email_routine_results",
+                    metadata={"routine_run_id": clay_run_id},
+                ).to_dict(),
+            )
             _write_contact_status(
                 tmp_path,
                 run_id,
                 "paused_pending",
-                pause_reason=pending_reasons[enrich_calls - 1],
+                pause_reason="instantly:contact-1",
+                operations={
+                    "clay:batch": {
+                        "state": "completed",
+                        "routine_run_id": clay_run_id,
+                        "contact_ids": [],
+                    },
+                    "instantly:contact-1": {
+                        "state": "pending",
+                        "email": instant_email,
+                    },
+                },
             )
             return 2
-        _write_contact_status(tmp_path, run_id, "completed")
+        append_jsonl(
+            usage_path,
+            UsageEvent(
+                provider="instantly",
+                operation="email_verification_get",
+                metadata={"email": instant_email},
+            ).to_dict(),
+        )
+        _write_contact_status(
+            tmp_path,
+            run_id,
+            "completed",
+            operations={
+                "clay:batch": {
+                    "state": "completed",
+                    "routine_run_id": clay_run_id,
+                    "contact_ids": [],
+                },
+                "instantly:contact-1": {
+                    "state": "completed",
+                    "email": instant_email,
+                    "status": "verified",
+                },
+            },
+        )
         return 0
 
     def fake_coverage(
