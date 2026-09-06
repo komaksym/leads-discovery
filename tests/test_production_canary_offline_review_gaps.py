@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -125,3 +126,84 @@ def test_successful_coverage_only_waterfall_uses_selected_contact_without_mutati
         "organization_name": expected.company_name,
         "linkedin_url": expected.linkedin_url,
     }
+
+
+def test_main_polls_pending_coverage_to_completion_in_same_invocation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pending async coverage is retried with bounded sleeps before reporting success."""
+    run_id = "same-run-polling"
+    summaries = iter(
+        [
+            CanaryProviderCoverageSummary(run_id=run_id, status="pending"),
+            CanaryProviderCoverageSummary(run_id=run_id, status="pending"),
+            CanaryProviderCoverageSummary(run_id=run_id, status="completed"),
+        ]
+    )
+    coverage_calls = 0
+    sleeps: list[float] = []
+    timeline: list[str] = []
+
+    def fake_coverage(_data_root: Path, *, run_id: str) -> CanaryProviderCoverageSummary:
+        nonlocal coverage_calls
+        coverage_calls += 1
+        timeline.append("coverage")
+        return next(summaries)
+
+    def fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
+        timeline.append("sleep")
+
+    monkeypatch.setattr(production_canary, "cli_main", lambda _argv=None: 0)
+    monkeypatch.setattr(production_canary, "run_live_provider_coverage", fake_coverage)
+    monkeypatch.setattr(
+        production_canary,
+        "build_canary_coverage_report",
+        lambda _data_root, *, run_id: SimpleNamespace(overall_outcome="success"),
+    )
+    monkeypatch.setattr(production_canary, "sleep", fake_sleep, raising=False)
+
+    assert production_canary.main(
+        ["--run-id", run_id, "--data-root", str(tmp_path)]
+    ) == 0
+    assert coverage_calls == 3
+    assert timeline == ["coverage", "sleep", "coverage", "sleep", "coverage"]
+    assert all(0 < delay <= 30 for delay in sleeps)
+
+
+def test_main_stops_polling_pending_coverage_after_fixed_ceiling(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Perpetually pending async coverage stops after seven passes and is inconclusive."""
+    run_id = "bounded-polling"
+    coverage_calls = 0
+    sleeps: list[float] = []
+    timeline: list[str] = []
+
+    def fake_coverage(_data_root: Path, *, run_id: str) -> CanaryProviderCoverageSummary:
+        nonlocal coverage_calls
+        coverage_calls += 1
+        timeline.append("coverage")
+        return CanaryProviderCoverageSummary(run_id=run_id, status="pending")
+
+    def fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
+        timeline.append("sleep")
+
+    monkeypatch.setattr(production_canary, "cli_main", lambda _argv=None: 0)
+    monkeypatch.setattr(production_canary, "run_live_provider_coverage", fake_coverage)
+    monkeypatch.setattr(
+        production_canary,
+        "build_canary_coverage_report",
+        lambda _data_root, *, run_id: SimpleNamespace(overall_outcome="inconclusive"),
+    )
+    monkeypatch.setattr(production_canary, "sleep", fake_sleep, raising=False)
+
+    assert production_canary.main(
+        ["--run-id", run_id, "--data-root", str(tmp_path)]
+    ) == 2
+    assert coverage_calls == 7
+    assert timeline == ["coverage", "sleep"] * 6 + ["coverage"]
+    assert all(0 < delay <= 30 for delay in sleeps)
