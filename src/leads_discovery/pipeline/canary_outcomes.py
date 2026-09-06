@@ -547,10 +547,11 @@ def _m4(state: _State) -> tuple[IntegrationCoverage, ...]:
         and clay.integration_outcome == "success"
         and clay.business_outcome != "pending"
     )
-    apollo_required = (
+    apollo_deferred_by_pending_poll = (
         apollo_prerequisite
         and state.contact_checkpoint is not None
-        and state.contact_checkpoint.status == "completed"
+        and state.contact_checkpoint.status == "paused_pending"
+        and _instantly_business(state) == "pending"
     )
     apollo = _normal_integration(
         state, "apollo", "apollo", {"people_enrichment"}, "apollo:",
@@ -561,7 +562,11 @@ def _m4(state: _State) -> tuple[IntegrationCoverage, ...]:
     if apollo is None:
         apollo = _coverage(
             "apollo", "coverage_only",
-            "failure" if apollo_required else "inconclusive",
+            (
+                "failure"
+                if apollo_prerequisite and not apollo_deferred_by_pending_poll
+                else "inconclusive"
+            ),
             "not_exercised", 0, 0,
         )
 
