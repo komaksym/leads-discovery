@@ -198,10 +198,16 @@ class PaidOperationLifecycle:
         *,
         operation: str | None = None,
         unit: QuotaUnit | None = None,
+        metadata: Mapping[str, object] | None = None,
     ) -> bool:
         """Apply admission against replayed provider quota owned by this lifecycle."""
         return reservation_fits(
-            self.quota_used(provider, operation=operation, unit=unit),
+            self.quota_used(
+                provider,
+                operation=operation,
+                unit=unit,
+                metadata=metadata,
+            ),
             ceiling,
             reservation,
         )
@@ -212,6 +218,7 @@ class PaidOperationLifecycle:
         *,
         operation: str | None = None,
         unit: QuotaUnit | None = None,
+        metadata: Mapping[str, object] | None = None,
     ) -> float:
         """Return committed quota from replayed and newly recorded usage events."""
         if unit is None:
@@ -226,6 +233,8 @@ class PaidOperationLifecycle:
                 unit=unit,
             )
             for event in self._usage_events
+            if metadata is None
+            or all(event.metadata.get(key) == value for key, value in metadata.items())
         )
 
     @classmethod
