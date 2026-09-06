@@ -134,6 +134,7 @@ class ContactEnrichmentConfig:
     clay_max_contacts: int = 10
     apollo_credit_cap: float = 5.0
     instantly_verification_call_cap: int = 5
+    async_status_read_cap: int | None = None
     execute_live: bool = False
 
 
@@ -208,6 +209,15 @@ def _validate_config(config: ContactEnrichmentConfig) -> _Paths:
         or config.instantly_verification_call_cap < 0
     ):
         raise ValueError("instantly_verification_call_cap must be a nonnegative integer")
+    if (
+        config.async_status_read_cap is not None
+        and (
+            isinstance(config.async_status_read_cap, bool)
+            or not isinstance(config.async_status_read_cap, int)
+            or config.async_status_read_cap < 0
+        )
+    ):
+        raise ValueError("async_status_read_cap must be a nonnegative integer")
     if config.exa_people_budget_usd is not None:
         _finite_nonnegative("exa_people_budget_usd", config.exa_people_budget_usd)
     _finite_nonnegative("apollo_credit_cap", config.apollo_credit_cap)
@@ -699,6 +709,27 @@ def _finish_operation(
     lifecycle.finish(operation_id, state=state, fields=fields, replace=True)
 
 
+def _status_read_allowed(
+    lifecycle: PaidOperationLifecycle,
+    config: ContactEnrichmentConfig,
+    *,
+    provider: str,
+    operation: str,
+    metadata: dict[str, object],
+) -> bool:
+    """Admit one canary-bounded async status request from authoritative usage history."""
+    if config.async_status_read_cap is None:
+        return True
+    return lifecycle.quota_allows(
+        provider,
+        float(config.async_status_read_cap),
+        1.0,
+        operation=operation,
+        unit="requests",
+        metadata=metadata,
+    )
+
+
 def _safe_csv(value: object) -> str:
     """Render an external cell with the repository's formula-injection protection."""
     if value is None:
@@ -1023,6 +1054,21 @@ def run_contact_enrichment(
                     "clay_authorization_changed",
                 )
             run_id = cast(str, clay_state["routine_run_id"])
+            if not _status_read_allowed(
+                lifecycle,
+                config,
+                provider="clay",
+                operation="work_email_routine_results",
+                metadata={"routine_run_id": run_id},
+            ):
+                return _pause(
+                    config,
+                    paths,
+                    checkpoint,
+                    contacts,
+                    "paused_pending",
+                    "clay_pending",
+                )
             try:
                 clay_result = clay.results(run_id)
             except ContactProviderError as error:
@@ -1229,6 +1275,21 @@ def run_contact_enrichment(
                 persisted_email = cast(str, persisted_state["email"])
                 if persisted_email != email:
                     raise ValueError("pending Instantly email does not match contact email")
+                if not _status_read_allowed(
+                    lifecycle,
+                    config,
+                    provider="instantly",
+                    operation="email_verification_get",
+                    metadata={"email": email},
+                ):
+                    return _pause(
+                        config,
+                        paths,
+                        checkpoint,
+                        contacts,
+                        "paused_pending",
+                        key,
+                    )
                 verification = instantly.get(email)
             else:
                 _attempt(contact, "instantly", "email_verification", "in_flight")
