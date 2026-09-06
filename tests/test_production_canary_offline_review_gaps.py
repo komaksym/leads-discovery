@@ -49,13 +49,19 @@ def _canonical_and_normal_snapshot(run_dir: Path) -> dict[str, bytes | None]:
     return snapshot
 
 
-def _write_contact_status(data_root: Path, run_id: str, status: str) -> None:
+def _write_contact_status(
+    data_root: Path,
+    run_id: str,
+    status: str,
+    *,
+    pause_reason: str | None = None,
+) -> None:
     """Persist the durable normal-M4 status that controls canary-only resume admission."""
     run_dir = data_root / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
     write_checkpoint(
         run_dir / "contact_checkpoint.json",
-        RunCheckpoint(run_id=run_id, status=status),
+        RunCheckpoint(run_id=run_id, status=status, pause_reason=pause_reason),
     )
 
 
@@ -214,6 +220,66 @@ def test_normal_m4_permanent_pending_stops_after_three_same_run_reads(
     assert {request.url.path for request in clay.gets} == {
         f"/public/v0/routines/run/{routine_run_id}/results"
     }
+
+
+def test_normal_m4_gives_sequential_async_stages_independent_read_ceilings(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Three Clay reads may transition to Instantly and still allow same-run Instantly polling."""
+    run_id = "normal-sequential-pending"
+    enrich_calls = 0
+    coverage_calls = 0
+    sleeps: list[float] = []
+    pending_reasons = [
+        "clay_pending",
+        "clay_pending",
+        "clay_pending",
+        "instantly:contact-1",
+    ]
+
+    def fake_cli(argv: list[str] | None = None) -> int:
+        nonlocal enrich_calls
+        assert argv is not None
+        if argv[0] == "run":
+            return 0
+        assert argv[0] == "enrich"
+        enrich_calls += 1
+        if enrich_calls <= len(pending_reasons):
+            _write_contact_status(
+                tmp_path,
+                run_id,
+                "paused_pending",
+                pause_reason=pending_reasons[enrich_calls - 1],
+            )
+            return 2
+        _write_contact_status(tmp_path, run_id, "completed")
+        return 0
+
+    def fake_coverage(
+        _data_root: Path,
+        *,
+        run_id: str,
+    ) -> CanaryProviderCoverageSummary:
+        nonlocal coverage_calls
+        coverage_calls += 1
+        return CanaryProviderCoverageSummary(run_id=run_id, status="completed")
+
+    monkeypatch.setattr(production_canary, "cli_main", fake_cli)
+    monkeypatch.setattr(production_canary, "run_live_provider_coverage", fake_coverage)
+    monkeypatch.setattr(
+        production_canary,
+        "build_canary_coverage_report",
+        lambda _data_root, *, run_id: SimpleNamespace(overall_outcome="success"),
+    )
+    monkeypatch.setattr(production_canary, "sleep", sleeps.append, raising=False)
+
+    assert production_canary.main(
+        ["--run-id", run_id, "--data-root", str(tmp_path)]
+    ) == 0
+    assert enrich_calls == 5
+    assert coverage_calls == 1
+    assert len(sleeps) == 4
 
 
 @pytest.mark.parametrize("status", ["paused_budget", "paused_unknown"])
