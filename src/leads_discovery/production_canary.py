@@ -10,7 +10,7 @@ from time import sleep
 from leads_discovery.cli import main as cli_main
 from leads_discovery.pipeline.canary_outcomes import build_canary_coverage_report
 from leads_discovery.pipeline.canary_provider_coverage import run_live_provider_coverage
-from leads_discovery.pipeline.state import read_json
+from leads_discovery.pipeline.state import load_usage_events, read_json
 
 _MAX_CANDIDATES = "1"
 _MAX_EVALUATED = "1"
@@ -42,8 +42,11 @@ def _outcome_code(outcome: str) -> int:
     return 1
 
 
-def _normal_m4_pending_operation(data_root: Path, run_id: str) -> str | None:
-    """Return the explicit durable async operation that admits one same-run resume."""
+def _normal_m4_pending_operation(
+    data_root: Path,
+    run_id: str,
+) -> tuple[str, str, str, str] | None:
+    """Return the durable provider operation identity for one resumable normal-M4 poll."""
     try:
         payload = read_json(data_root / run_id / "contact_checkpoint.json")
     except (OSError, UnicodeError, ValueError):
@@ -54,12 +57,81 @@ def _normal_m4_pending_operation(data_root: Path, run_id: str) -> str | None:
         or payload.get("status") != "paused_pending"
     ):
         return None
+    provider_state = payload.get("provider_state")
+    if not isinstance(provider_state, dict):
+        return None
+    operations = provider_state.get("operations")
+    if not isinstance(operations, dict):
+        return None
+
     reason = payload.get("pause_reason")
     if reason == "clay_pending":
-        return "clay_pending"
+        state = operations.get("clay:batch")
+        if not isinstance(state, dict) or state.get("state") != "pending":
+            return None
+        routine_run_id = state.get("routine_run_id")
+        if not isinstance(routine_run_id, str) or not routine_run_id.strip():
+            return None
+        return (
+            "clay",
+            "work_email_routine_results",
+            "routine_run_id",
+            routine_run_id,
+        )
     if isinstance(reason, str) and reason.startswith("instantly:") and reason != "instantly:":
-        return reason
+        state = operations.get(reason)
+        if not isinstance(state, dict) or state.get("state") != "pending":
+            return None
+        email = state.get("email")
+        if not isinstance(email, str) or not email.strip():
+            return None
+        return ("instantly", "email_verification_get", "email", email)
     return None
+
+
+def _normal_m4_status_read_count(
+    data_root: Path,
+    run_id: str,
+    operation: tuple[str, str, str, str],
+) -> int | None:
+    """Replay authoritative normal usage and count reads for exactly one async operation."""
+    provider, event_operation, identity_key, identity_value = operation
+    try:
+        events = load_usage_events(data_root / run_id / "contact_usage_events.jsonl")
+    except (OSError, UnicodeError, ValueError):
+        return None
+
+    reads = 0
+    for event in events:
+        if event.provider != provider or event.operation != event_operation:
+            continue
+        recorded_identity = event.metadata.get(identity_key)
+        if not isinstance(recorded_identity, str) or not recorded_identity.strip():
+            return None
+        if recorded_identity == identity_value:
+            reads += event.request_count
+    return reads
+
+
+def _normal_m4_resume_allowed(data_root: Path, run_id: str) -> bool:
+    """Admit one pending normal-M4 resume only while its durable read quota remains."""
+    checkpoint_path = data_root / run_id / "contact_checkpoint.json"
+    try:
+        payload = read_json(checkpoint_path)
+    except (OSError, UnicodeError, ValueError):
+        return False
+    if payload is None:
+        return True
+    if not isinstance(payload, dict) or payload.get("run_id") != run_id:
+        return False
+    if payload.get("status") != "paused_pending":
+        return True
+
+    operation = _normal_m4_pending_operation(data_root, run_id)
+    if operation is None:
+        return False
+    reads = _normal_m4_status_read_count(data_root, run_id, operation)
+    return reads is not None and reads < _NORMAL_ASYNC_READ_LIMIT
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -108,8 +180,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             _INSTANTLY_CALL_CAP,
             "--execute-live",
         ]
-        enrich_code = cli_main(enrich_args)
-        reads_by_operation: dict[str, int] = {}
+        if _normal_m4_resume_allowed(args.data_root, args.run_id):
+            enrich_code = cli_main(enrich_args)
+        else:
+            enrich_code = 2
+            normal_pending = True
+
         while enrich_code == 2:
             pending_operation = _normal_m4_pending_operation(
                 args.data_root,
@@ -117,12 +193,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             if pending_operation is None:
                 break
-            reads = reads_by_operation.get(pending_operation, 0)
-            if reads >= _NORMAL_ASYNC_READ_LIMIT:
+            if not _normal_m4_resume_allowed(args.data_root, args.run_id):
                 normal_pending = True
                 break
-            reads_by_operation[pending_operation] = reads + 1
             sleep(_ASYNC_POLL_DELAY_SECONDS)
+            if not _normal_m4_resume_allowed(args.data_root, args.run_id):
+                normal_pending = True
+                break
             enrich_code = cli_main(enrich_args)
 
         if enrich_code == 0:
