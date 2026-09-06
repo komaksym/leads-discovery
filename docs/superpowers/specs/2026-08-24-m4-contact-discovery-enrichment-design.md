@@ -23,7 +23,7 @@ retain <=3 distinct contacts/company
         |
         | top 2 only, rank 1/2 only
         v
-Clay Routine -> Apollo fallback -> Instantly verification
+Clay managed Work Email function -> Apollo fallback -> Instantly verification
         |
         v
 contacts.jsonl + leads.csv
@@ -162,25 +162,29 @@ retained contacts, filtered again to decision rank 1 or 2.
 
 ## Clay
 
-Current Clay Public API documentation (checked 2026-08-24) uses `clay-api-key` authentication
-and asynchronous routines. M4 requires:
+Current Clay Public API documentation (rechecked 2026-09-05) uses `clay-api-key`
+authentication and exposes Clay-managed functions through the Routines API primitive. M4 calls
+Clay directly; it does not require a user-authored Clay workflow or custom function. M4
+requires:
 
-- `CLAY_PUBLIC_API_KEY`;
-- `CLAY_CONTACT_ROUTINE_ID`;
+- `CLAY_PUBLIC_API_KEY` as the credential;
+- `CLAY_WORK_EMAIL_FUNCTION_ID` as the non-secret workspace identifier for Clay's managed
+  Work Email function;
 - `POST https://api.clay.com/public/v0/routines/{routine_id}/run` with 1-100 `items`;
 - `GET https://api.clay.com/public/v0/routines/run/{routine_run_id}/results`.
 
-Reference: https://developers.clay.com/ and its routines API index.
+Reference: https://developers.clay.com/ and its Routines / managed-functions documentation.
 
-M4 batches all currently eligible paid contacts into one bounded run when possible, limited by
-`clay_max_contacts` (default 10). Each item uses `contact_id` as its stable item ID and inputs:
-`full_name`, `company_name`, `company_domain`, `linkedin_url`, and `profile_url`.
+M4 batches all currently eligible paid contacts into one bounded managed-function run when
+possible, limited by `clay_max_contacts` (default 10). Each item uses `contact_id` as its stable
+item ID. The managed Work Email function receives Clay's documented input names:
+`Full Name`, `Company Domain`, `Company Name`, and optional `Social Profile URL`.
 
-The configured routine contract must return a work email under `work_email`. M4 accepts only a
-syntactically valid non-personal email. It never requests or persists phones or personal
-emails. The returned `routine_run_id` is checkpointed immediately before any result polling.
-A restart with that ID polls the same run; a start whose response was lost is `paused_unknown`
-and is not replaced.
+The managed function returns the work email under `Work Email`. M4 accepts only a syntactically
+valid non-personal email. It never requests or persists phones or personal emails. The returned
+`routine_run_id` is checkpointed immediately before any result polling. That run identifier is
+provider execution state, not configuration for a user-authored workflow. A restart with that
+ID polls the same run; a start whose response was lost is `paused_unknown` and is not replaced.
 
 ## Apollo fallback
 
@@ -303,12 +307,15 @@ python -m leads_discovery enrich --run-id RUN [controls] [--execute-live]
 Without `--execute-live`, the command validates local scalar arguments and prints a dry-run
 summary without reading credentials, importing live provider composition, touching run files,
 or accessing the network. Live execution requires Exa, Clay, Apollo, and Instantly credentials
-because the configured waterfall is explicit; a missing credential fails before dispatch.
+plus `CLAY_WORK_EMAIL_FUNCTION_ID`; missing required credential/configuration fails before
+dispatch.
 
 A separate `workflow_dispatch` GitHub Actions workflow performs manual live enrichment using
-repository secrets and publishes only `leads.csv` and `contacts.jsonl` to the dedicated
-`generated-leads` branch. The other M4 run artifacts remain in the ephemeral runner workspace.
-It has no schedule, no outreach step, and no write-back to a CRM.
+the `production-canary` Environment. Paid-provider credentials are Environment secrets, while
+`CLAY_WORK_EMAIL_FUNCTION_ID` is a non-secret Environment variable. The workflow publishes only
+`leads.csv` and `contacts.jsonl` to the dedicated `generated-leads` branch. The other M4 run
+artifacts remain in the ephemeral runner workspace. It has no schedule, no outreach step, and
+no write-back to a CRM.
 
 ## Completion gate
 

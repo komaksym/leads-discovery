@@ -322,18 +322,16 @@ def test_decision_proximity_caps_candidates_contacts_and_paid_enrichment(
     assert len(items) == 2
     expected_inputs = [
         {
-            "full_name": "Pat Owner",
-            "company_name": "Acme Valve",
-            "company_domain": "acmevalve.com",
-            "linkedin_url": "https://www.linkedin.com/in/pat-owner",
-            "profile_url": "https://www.linkedin.com/in/pat-owner",
+            "Full Name": "Pat Owner",
+            "Company Domain": "acmevalve.com",
+            "Company Name": "Acme Valve",
+            "Social Profile URL": "https://www.linkedin.com/in/pat-owner",
         },
         {
-            "full_name": "Vera Ops",
-            "company_name": "Acme Valve",
-            "company_domain": "acmevalve.com",
-            "linkedin_url": "https://www.linkedin.com/in/vera-ops",
-            "profile_url": "https://www.linkedin.com/in/vera-ops",
+            "Full Name": "Vera Ops",
+            "Company Domain": "acmevalve.com",
+            "Company Name": "Acme Valve",
+            "Social Profile URL": "https://www.linkedin.com/in/vera-ops",
         },
     ]
     submitted_inputs: list[dict[str, Any]] = []
@@ -345,11 +343,10 @@ def test_decision_proximity_caps_candidates_contacts_and_paid_enrichment(
         inputs = item["inputs"]
         assert isinstance(inputs, dict)
         assert set(inputs) == {
-            "full_name",
-            "company_name",
-            "company_domain",
-            "linkedin_url",
-            "profile_url",
+            "Full Name",
+            "Company Domain",
+            "Company Name",
+            "Social Profile URL",
         }
         for forbidden in ("phone", "personal_email", "personal"):
             assert forbidden not in inputs

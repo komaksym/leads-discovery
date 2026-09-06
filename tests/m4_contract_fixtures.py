@@ -22,7 +22,7 @@ ClayResultFactory = Callable[[httpx.Request, str], list[dict[str, Any]]]
 _M4_PROVIDER_KEYS = {
     "EXA_API_KEY": "exa-contract-key",
     "CLAY_PUBLIC_API_KEY": "clay-contract-key",
-    "CLAY_CONTACT_ROUTINE_ID": "clay-contact-routine-contract",
+    "CLAY_WORK_EMAIL_FUNCTION_ID": "function:t_work_email_contract",
     "APOLLO_API_KEY": "apollo-contract-key",
     "INSTANTLY_API_KEY": "instantly-contract-key",
 }
@@ -66,7 +66,7 @@ def prepare_evaluated_run(
 
 
 def set_m4_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Install inert fake credentials so provider composition never needs real secrets."""
+    """Install inert fake credentials/config so provider composition never needs real secrets."""
     for key, value in _M4_PROVIDER_KEYS.items():
         monkeypatch.setenv(key, value)
 

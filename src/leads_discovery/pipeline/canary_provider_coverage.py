@@ -46,13 +46,13 @@ class _ExaPeopleProvider(Protocol):
 
 
 class _ClayContactProvider(Protocol):
-    """Expose the production Clay async routine boundary used by M4."""
+    """Expose the production Clay managed-function async boundary used by M4."""
 
     def start(self, contacts: list[ContactRecord]) -> ClayStartResult:
-        """Start one bounded work-email routine."""
+        """Start one bounded managed Work Email function run."""
 
     def results(self, routine_run_id: str) -> ClayResults:
-        """Read one bounded work-email routine status."""
+        """Read one bounded managed-function run status."""
 
 
 class _ApolloContactProvider(Protocol):
@@ -695,16 +695,16 @@ def run_live_provider_coverage(
     run_id: str,
 ) -> CanaryProviderCoverageSummary:
     """Construct the same production M4 adapters only after normal canary execution succeeds."""
-    names = (
+    credential_names = (
         "EXA_API_KEY",
         "CLAY_PUBLIC_API_KEY",
-        "CLAY_CONTACT_ROUTINE_ID",
         "APOLLO_API_KEY",
         "INSTANTLY_API_KEY",
     )
-    credentials = {name: os.environ.get(name, "") for name in names}
-    if any(not credentials[name] for name in names):
-        raise RuntimeError("required provider credentials missing")
+    credentials = {name: os.environ.get(name, "") for name in credential_names}
+    clay_function_id = os.environ.get("CLAY_WORK_EMAIL_FUNCTION_ID", "")
+    if any(not credentials[name] for name in credential_names) or not clay_function_id:
+        raise RuntimeError("required provider credentials or Clay function configuration missing")
     with httpx.Client(timeout=httpx.Timeout(30.0, connect=5.0)) as client:
         return run_provider_coverage(
             data_root / run_id,
@@ -712,7 +712,7 @@ def run_live_provider_coverage(
             exa=ExaPeopleProvider(api_key=credentials["EXA_API_KEY"], client=client),
             clay=ClayContactProvider(
                 api_key=credentials["CLAY_PUBLIC_API_KEY"],
-                routine_id=credentials["CLAY_CONTACT_ROUTINE_ID"],
+                routine_id=clay_function_id,
                 client=client,
             ),
             apollo=ApolloContactProvider(

@@ -105,11 +105,10 @@ def test_successful_coverage_only_waterfall_uses_selected_contact_without_mutati
     clay_item = json_body(clay.posts[0])["items"][0]
     assert clay_item["id"] == expected.contact_id
     assert clay_item["inputs"] == {
-        "full_name": expected.full_name,
-        "company_name": expected.company_name,
-        "company_domain": expected.company_domain,
-        "linkedin_url": expected.linkedin_url,
-        "profile_url": expected.profile_url,
+        "Full Name": expected.full_name,
+        "Company Domain": expected.company_domain,
+        "Company Name": expected.company_name,
+        "Social Profile URL": expected.linkedin_url or expected.profile_url,
     }
 
     apollo_requests = stub.for_provider("apollo")

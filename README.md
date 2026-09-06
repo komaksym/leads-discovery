@@ -20,11 +20,11 @@ DEEPSEEK_API_KEY=
 APIFY_TOKEN=        # optional; missing token disables optional Apify discovery
 ```
 
-For explicit live M4 enrichment, additionally configure:
+For explicit live M4 enrichment, additionally configure the provider credentials plus Clay's non-secret managed Work Email function identifier:
 
 ```text
 CLAY_PUBLIC_API_KEY=
-CLAY_CONTACT_ROUTINE_ID=
+CLAY_WORK_EMAIL_FUNCTION_ID=   # non-secret workspace identifier for Clay's managed Work Email function
 APOLLO_API_KEY=
 INSTANTLY_API_KEY=
 ```
@@ -143,10 +143,10 @@ Selection is deterministic. Exa returns at most 10 people per accepted company; 
 Only the first two retained contacts whose decision rank is 1 or 2 can enter the paid waterfall:
 
 ```text
-Clay work-email Routine -> Apollo work-email fallback -> Instantly verification
+Clay managed Work Email function (Public API) -> Apollo work-email fallback -> Instantly verification
 ```
 
-Clay uses the configured asynchronous Routine and persists its `routine_run_id` before polling. Apollo is called only when Clay has no usable work email and always disables personal email, phones, and both waterfall flags. Instantly is used only for `/api/v2/email-verification`; a persisted `pending` result resumes with GET and never repeats POST. Missing email never removes a useful contact.
+Clay is called directly through its Public API using Clay's managed Work Email function; the pipeline does not require a user-authored Clay workflow or custom function. Clay's API exposes managed functions through the Routines execution primitive, so the non-secret `CLAY_WORK_EMAIL_FUNCTION_ID` identifies that Clay-managed function and the returned `routine_run_id` is persisted before polling. Apollo is called only when Clay has no usable work email and always disables personal email, phones, and both waterfall flags. Instantly is used only for `/api/v2/email-verification`; a persisted `pending` result resumes with GET and never repeats POST. Missing email never removes a useful contact.
 
 The Exa People USD ceiling, Clay submitted-contact cap, Apollo credit cap, and Instantly verification-call cap are independent. Known budget exhaustion publishes the best partial artifacts. Unknown paid in-flight outcomes fail closed instead of being blindly replayed.
 
@@ -277,7 +277,7 @@ M4 adds contact discovery and work-email verification only. The project still do
 
 ## Production canary
 
-Production execution does not depend on a local computer. The production entry point is the manual `Production lead canary` GitHub Actions workflow on a standard GitHub-hosted `ubuntu-latest` runner. Provider credentials live only in GitHub Actions repository secrets.
+Production execution does not depend on a local computer. The production entry point is the manual `Production lead canary` GitHub Actions workflow on a standard GitHub-hosted `ubuntu-latest` runner. Paid-provider credentials are supplied only to the `production-canary` GitHub Environment; the Clay managed-function identifier is a non-secret Environment variable.
 
 The canary is deliberately a credentialed smoke test, not the normal batch entry point. Its command surface exposes only run identity/data location and hard-codes one candidate, one evaluation, and one paid contact. Market/search criteria and batch cardinality belong to the normal `run` + `enrich` flow above; the canary cannot be widened into that configuration.
 
