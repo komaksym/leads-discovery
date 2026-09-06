@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import httpx
 import pytest
 from m4_contract_fixtures import ClayRoutineScript, WireStub, json_body
@@ -17,7 +19,7 @@ from leads_discovery import production_canary
 
 
 def test_pending_clay_read_ceiling_survives_canary_process_restart(
-    tmp_path,
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A persisted Clay run gets at most three status GET attempts for its lifetime."""
@@ -37,7 +39,7 @@ def test_pending_clay_read_ceiling_survives_canary_process_restart(
 
 
 def test_pending_instantly_read_ceiling_survives_canary_process_restart(
-    tmp_path,
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A persisted Instantly verification gets three GET attempts without another POST."""
