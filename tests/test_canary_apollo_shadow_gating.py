@@ -445,7 +445,10 @@ def test_legacy_private_apollo_without_normal_clay_skip_is_not_reused(
         include_legacy_apollo=True,
     )
 
-    with pytest.raises(ValueError, match="private Apollo coverage lacks normal Clay skip prerequisite"):
+    with pytest.raises(
+        ValueError,
+        match="private Apollo coverage lacks normal Clay skip prerequisite",
+    ):
         run_provider_coverage(
             run_dir,
             run_id=run_id,
