@@ -150,16 +150,21 @@ def test_clay_managed_function_id_is_non_secret_environment_config() -> None:
     assert "secrets.CANARY_CLAY_CONTACT_ROUTINE_ID" not in canary
 
 
-def test_canary_private_state_never_crosses_runner_boundary() -> None:
-    """The private canary phase must not configure or perform repository publication."""
+def test_canary_paid_intent_has_remote_barrier_before_live_dispatch() -> None:
+    """Paid intent must survive loss of the GitHub-hosted runner before any live dispatch."""
     canary = _canary_job(_workflow_text())
-    private_phase = canary.split("- name: Publish approved public outputs", 1)[0]
+    before_run, after_run_marker = canary.split(
+        "- name: Run fixed one-company live canary", 1
+    )
+    run_step = after_run_marker.split("- name: Publish approved public outputs", 1)[0]
 
-    assert "LEADS_GIT_JOURNAL_BRANCH" not in private_phase
-    assert "LEADS_GIT_JOURNAL_REMOTE" not in private_phase
-    assert "Prepare durable Git operation journal" not in private_phase
-    assert "git push" not in private_phase
-    assert "git add" not in private_phase
+    assert "- name: Prepare durable Git operation journal" in before_run
+    assert "git fetch origin generated-leads:refs/remotes/origin/generated-leads" in before_run
+    assert 'root_commit="$(git commit-tree "$empty_tree"' in before_run
+    assert 'git push origin "$root_commit:refs/heads/generated-leads"' in before_run
+    assert 'git update-ref refs/remotes/origin/generated-leads "$root_commit"' in before_run
+    assert "LEADS_GIT_JOURNAL_BRANCH: generated-leads" in run_step
+    assert "LEADS_GIT_JOURNAL_REMOTE: origin" in run_step
 
 
 def test_paid_canary_gates_publication_on_decisive_private_coverage() -> None:
