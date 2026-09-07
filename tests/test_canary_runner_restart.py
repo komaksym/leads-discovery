@@ -206,7 +206,10 @@ def test_crash_after_remote_pending_state_restores_same_clay_identity_without_re
     first_clay = _RestartableClay(contact.contact_id)
     original_write_json_atomic = state_module.write_json_atomic
 
-    def crash_before_private_checkpoint_replace(path: Path, payload: dict[str, object]) -> None:
+    def crash_before_private_checkpoint_replace(
+        path: Path,
+        payload: dict[str, object],
+    ) -> None:
         provider_state = payload.get("provider_state")
         operations = provider_state.get("operations") if isinstance(provider_state, dict) else None
         clay_state = operations.get("coverage:clay") if isinstance(operations, dict) else None
@@ -277,7 +280,9 @@ def test_production_canary_fresh_runner_restores_before_normal_cli_dispatch(
     data_root = second_work / "data"
 
     def forbid_normal_cli(_argv: object = None) -> int:
-        raise AssertionError("normal run/enrich must not be re-dispatched from durable restart state")
+        raise AssertionError(
+            "normal run/enrich must not be re-dispatched from durable restart state"
+        )
 
     def fake_coverage(root: Path, *, run_id: str) -> SimpleNamespace:
         restored = root / run_id
@@ -426,6 +431,10 @@ def test_workflow_rejects_existing_nonempty_journal_before_live_canary() -> None
         "- name: Run fixed one-company live canary", 1
     )[0]
 
-    assert 'journal_tree="$(git rev-parse "refs/remotes/origin/canary-operation-journal^{tree}")"' in prepare
+    journal_tree_check = (
+        'journal_tree="$(git rev-parse '
+        '"refs/remotes/origin/canary-operation-journal^{tree}")"'
+    )
+    assert journal_tree_check in prepare
     assert '"$journal_tree" != "$empty_tree"' in prepare
     assert "journal branch tree must be empty" in prepare
