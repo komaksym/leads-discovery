@@ -34,7 +34,6 @@ class _PendingStatusRead:
     """Bind one persisted async operation to its exact status-read quota identity."""
 
     pause_reason: str
-    operation_id: str
     provider: str
     event_operation: str
     identity_key: str
@@ -89,8 +88,7 @@ def _normal_m4_pending_identity(
 
     reason = payload.get("pause_reason")
     if reason == "clay_pending":
-        operation_id = "clay:batch"
-        state = operations.get(operation_id)
+        state = operations.get("clay:batch")
         if not isinstance(state, dict) or state.get("state") != "pending":
             return None
         routine_run_id = state.get("routine_run_id")
@@ -103,7 +101,6 @@ def _normal_m4_pending_identity(
             return None
         return _PendingStatusRead(
             pause_reason=reason,
-            operation_id=operation_id,
             provider="clay",
             event_operation="work_email_routine_results",
             identity_key="routine_run_id",
@@ -122,19 +119,12 @@ def _normal_m4_pending_identity(
         return None
     return _PendingStatusRead(
         pause_reason=reason,
-        operation_id=reason,
         provider="instantly",
         event_operation="email_verification_get",
         identity_key="email",
         identity_value=email,
         admitted_reads=admitted_reads,
     )
-
-
-def _normal_m4_pending_operation(data_root: Path, run_id: str) -> str | None:
-    """Return the explicit durable async operation that admits one same-run resume."""
-    pending = _normal_m4_pending_identity(data_root, run_id)
-    return None if pending is None else pending.pause_reason
 
 
 def _normal_m4_status_read_count(
@@ -232,7 +222,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             str(_NORMAL_ASYNC_READ_LIMIT),
             "--execute-live",
         ]
-        persisted_pending = _normal_m4_pending_operation(args.data_root, args.run_id)
+        persisted_pending = _normal_m4_pending_identity(args.data_root, args.run_id)
         if _normal_m4_resume_allowed(args.data_root, args.run_id):
             if persisted_pending is not None:
                 sleep(_ASYNC_POLL_DELAY_SECONDS)
@@ -246,7 +236,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             normal_pending = True
 
         while enrich_code == 2:
-            pending_operation = _normal_m4_pending_operation(
+            pending_operation = _normal_m4_pending_identity(
                 args.data_root,
                 args.run_id,
             )
