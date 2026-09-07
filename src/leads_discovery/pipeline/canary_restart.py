@@ -11,6 +11,7 @@ from leads_discovery.contacts.models import ContactRecord
 from leads_discovery.models import CompanyRecord, RunCheckpoint, UsageEvent
 from leads_discovery.pipeline.git_journal import (
     git_journal_configured,
+    load_canary_private_state,
     load_canary_restart_state,
     persist_canary_restart_state,
 )
@@ -183,6 +184,14 @@ def snapshot_canary_restart_state(run_dir: Path, *, run_id: str) -> None:
         },
         run_id=run_id,
     )
+    durable_payload = load_canary_restart_state(run_id)
+    if durable_payload is not None:
+        durable = CanaryRestartState.from_dict(durable_payload, run_id=run_id)
+        if durable != state:
+            raise RuntimeError(
+                "completed normal canary state disagrees with durable restart state"
+            )
+        return
     persist_canary_restart_state(run_id, state.to_dict())
 
 
@@ -217,6 +226,10 @@ def restore_canary_restart_state(data_root: Path, *, run_id: str) -> bool:
         return False
     payload = load_canary_restart_state(run_id)
     if payload is None:
+        if load_canary_private_state(run_id) is not None:
+            raise RuntimeError(
+                "canary private state lacks durable normal restart prerequisites"
+            )
         return False
     state = CanaryRestartState.from_dict(payload, run_id=run_id)
     run_dir = _run_dir(data_root, run_id, require_existing=False)
