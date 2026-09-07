@@ -267,3 +267,41 @@ def test_malformed_pending_identity_fails_closed_before_redispatch(
     ) == 2
     assert enrich_calls == 1
     assert sleeps == []
+
+
+def test_status_read_admission_survives_crash_before_usage_bookkeeping(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A dispatched third Clay GET cannot disappear from the lifetime ceiling on restart."""
+    import leads_discovery.pipeline.contact_enrichment as contact_enrichment
+
+    run_id = "normal-clay-crash-after-dispatch"
+    clay = ClayRoutineScript([{"work_email": _EMAIL}])
+    stub = WireStub({"exa": _exa_one, "clay": clay})
+    _install_contract(monkeypatch, tmp_path, run_id, _accepted_company(), stub)
+    monkeypatch.setattr(production_canary, "sleep", lambda _delay: None, raising=False)
+
+    original_record_event = contact_enrichment._record_event
+
+    def crash_before_third_status_event(lifecycle: object, event: object) -> None:
+        if (
+            getattr(event, "provider", None) == "clay"
+            and getattr(event, "operation", None) == "work_email_routine_results"
+            and len(clay.gets) == 3
+        ):
+            raise RuntimeError("simulated crash after status GET")
+        original_record_event(lifecycle, event)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(contact_enrichment, "_record_event", crash_before_third_status_event)
+
+    with pytest.raises(RuntimeError, match="simulated crash after status GET"):
+        _run_canary(tmp_path, run_id)
+    assert len(clay.posts) == 1
+    assert len(clay.gets) == 3
+
+    monkeypatch.setattr(contact_enrichment, "_record_event", original_record_event)
+
+    assert _run_canary(tmp_path, run_id) == 2
+    assert len(clay.posts) == 1
+    assert len(clay.gets) == 3
