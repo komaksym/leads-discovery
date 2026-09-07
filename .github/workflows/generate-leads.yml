@@ -85,10 +85,15 @@ jobs:
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          empty_tree="$(git mktree < /dev/null)"
           if git fetch origin canary-operation-journal:refs/remotes/origin/canary-operation-journal; then
+            journal_tree="$(git rev-parse "refs/remotes/origin/canary-operation-journal^{tree}")"
+            if [[ "$journal_tree" != "$empty_tree" ]]; then
+              echo "::error::canary operation journal branch tree must be empty"
+              exit 1
+            fi
             exit 0
           fi
-          empty_tree="$(git mktree < /dev/null)"
           root_commit="$(git commit-tree "$empty_tree" -m "Initialize canary operation journal")"
           git push origin "$root_commit:refs/heads/canary-operation-journal"
           git update-ref refs/remotes/origin/canary-operation-journal "$root_commit"
