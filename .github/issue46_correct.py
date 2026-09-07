@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from textwrap import dedent
+from textwrap import dedent, indent
 
 
 def replace_once(path: str, old: str, new: str) -> None:
@@ -38,6 +38,10 @@ def edit_region(
             raise SystemExit(f"{path}: expected {expected}, found {count}: {old[:100]!r}")
         region = region.replace(old, new, expected)
     file.write_text(text[:start_index] + region + text[end_index:], encoding="utf-8", newline="\n")
+
+
+def body(text: str) -> str:
+    return indent(dedent(text), "    ")
 
 
 coverage = "src/leads_discovery/pipeline/canary_provider_coverage.py"
@@ -90,48 +94,48 @@ def _normal_clay_skip_prerequisite(
 replace_once(coverage, helper_marker, coverage_helper + helper_marker)
 replace_once(
     coverage,
-    dedent('''\
-        input_value = contact.to_dict()
-        entry = paid.operation(_APOLLO_OPERATION, input_value=input_value)
-        if entry is not None:
-            _completed_sync_entry(entry, "Apollo")
-            raw_email = entry.get("work_email")
-            if raw_email is not None and not isinstance(raw_email, str):
-                raise ValueError("private Apollo work email is invalid")
-            return usable_work_email(raw_email)
-        if not allow_shadow_dispatch:
-            return None
+    body('''\
+    input_value = contact.to_dict()
+    entry = paid.operation(_APOLLO_OPERATION, input_value=input_value)
+    if entry is not None:
+        _completed_sync_entry(entry, "Apollo")
+        raw_email = entry.get("work_email")
+        if raw_email is not None and not isinstance(raw_email, str):
+            raise ValueError("private Apollo work email is invalid")
+        return usable_work_email(raw_email)
+    if not allow_shadow_dispatch:
+        return None
 '''),
-    dedent('''\
-        input_value = contact.to_dict()
-        entry = paid.operation(_APOLLO_OPERATION, input_value=input_value)
-        if not allow_shadow_dispatch:
-            if entry is not None:
-                raise ValueError(
-                    "private Apollo coverage lacks normal Clay skip prerequisite"
-                )
-            return None
+    body('''\
+    input_value = contact.to_dict()
+    entry = paid.operation(_APOLLO_OPERATION, input_value=input_value)
+    if not allow_shadow_dispatch:
         if entry is not None:
-            _completed_sync_entry(entry, "Apollo")
-            raw_email = entry.get("work_email")
-            if raw_email is not None and not isinstance(raw_email, str):
-                raise ValueError("private Apollo work email is invalid")
-            return usable_work_email(raw_email)
+            raise ValueError(
+                "private Apollo coverage lacks normal Clay skip prerequisite"
+            )
+        return None
+    if entry is not None:
+        _completed_sync_entry(entry, "Apollo")
+        raw_email = entry.get("work_email")
+        if raw_email is not None and not isinstance(raw_email, str):
+            raise ValueError("private Apollo work email is invalid")
+        return usable_work_email(raw_email)
 '''),
 )
 replace_once(
     coverage,
     "    apollo_email = _apollo_email(\n",
-    dedent('''\
-        normal_clay_skip_prerequisite = _normal_clay_skip_prerequisite(
-            company,
-            contact,
-            normal_contact,
-            normal_exa_completed,
-            normal_operations,
-            normal_usage,
-        )
-        apollo_email = _apollo_email(
+    body('''\
+    normal_clay_skip_prerequisite = _normal_clay_skip_prerequisite(
+        company,
+        contact,
+        normal_contact,
+        normal_exa_completed,
+        normal_operations,
+        normal_usage,
+    )
+    apollo_email = _apollo_email(
 '''),
 )
 replace_once(
@@ -210,58 +214,58 @@ replace_region(
     outcomes,
     "    apollo_prerequisite = (\n",
     "    has_email = any(\n",
-    dedent('''\
-        apollo_prerequisite = _normal_clay_skip_prerequisite(state)
-        apollo_deferred_by_pending_poll = (
-            apollo_prerequisite
-            and state.contact_checkpoint is not None
-            and state.contact_checkpoint.status == "paused_pending"
-            and _instantly_business(state) == "pending"
-        )
-        normal_apollo = _normal_integration(
-            state, "apollo", "apollo", {"people_enrichment"}, "apollo:",
-            False, _apollo_business(state),
-        )
-        private_apollo = _private_integration(
-            state, "apollo", "coverage:apollo", "apollo", {"people_enrichment"}
-        )
-        if normal_apollo is not None:
-            apollo = normal_apollo
-        elif private_apollo is not None:
-            apollo = (
-                private_apollo
-                if apollo_prerequisite
-                else _coverage(
-                    "apollo", "coverage_only", "failure", "invalid_evidence",
-                    private_apollo.operation_count, private_apollo.request_count,
-                )
+    body('''\
+    apollo_prerequisite = _normal_clay_skip_prerequisite(state)
+    apollo_deferred_by_pending_poll = (
+        apollo_prerequisite
+        and state.contact_checkpoint is not None
+        and state.contact_checkpoint.status == "paused_pending"
+        and _instantly_business(state) == "pending"
+    )
+    normal_apollo = _normal_integration(
+        state, "apollo", "apollo", {"people_enrichment"}, "apollo:",
+        False, _apollo_business(state),
+    )
+    private_apollo = _private_integration(
+        state, "apollo", "coverage:apollo", "apollo", {"people_enrichment"}
+    )
+    if normal_apollo is not None:
+        apollo = normal_apollo
+    elif private_apollo is not None:
+        apollo = (
+            private_apollo
+            if apollo_prerequisite
+            else _coverage(
+                "apollo", "coverage_only", "failure", "invalid_evidence",
+                private_apollo.operation_count, private_apollo.request_count,
             )
-        else:
-            apollo = _coverage(
-                "apollo", "coverage_only",
-                (
-                    "failure"
-                    if apollo_prerequisite and not apollo_deferred_by_pending_poll
-                    else "inconclusive"
-                ),
-                "not_exercised", 0, 0,
-            )
+        )
+    else:
+        apollo = _coverage(
+            "apollo", "coverage_only",
+            (
+                "failure"
+                if apollo_prerequisite and not apollo_deferred_by_pending_poll
+                else "inconclusive"
+            ),
+            "not_exercised", 0, 0,
+        )
 
 '''),
 )
 
 replace_once(
     "tests/test_canary_provider_coverage.py",
-    dedent('''\
-        assert clay.result_ids == ["shadow-clay-run"]
-        assert len(apollo.contacts) == 1
-        assert apollo.contacts[0].to_dict() == expected.to_dict()
-        assert instantly.created == ["alice.owner@acme.com"]
+    body('''\
+    assert clay.result_ids == ["shadow-clay-run"]
+    assert len(apollo.contacts) == 1
+    assert apollo.contacts[0].to_dict() == expected.to_dict()
+    assert instantly.created == ["alice.owner@acme.com"]
 '''),
-    dedent('''\
-        assert clay.result_ids == ["shadow-clay-run"]
-        assert apollo.contacts == []
-        assert instantly.created == ["alice.owner@acme.com"]
+    body('''\
+    assert clay.result_ids == ["shadow-clay-run"]
+    assert apollo.contacts == []
+    assert instantly.created == ["alice.owner@acme.com"]
 '''),
 )
 
