@@ -32,7 +32,9 @@ from leads_discovery.models import CompanyRecord, RunCheckpoint, UsageEvent
 from leads_discovery.pipeline.costs import CostTracker
 from leads_discovery.pipeline.paid_operations import (
     PaidOperationLifecycle,
+    STATUS_READS_ADMITTED_KEY,
     checkpoint_has_unknown_paid_work,
+    read_status_reads_admitted,
     replay_quota_totals,
     transition_checkpoint,
 )
@@ -51,7 +53,6 @@ _SHA256: Final[re.Pattern[str]] = re.compile(r"^[0-9a-f]{64}$")
 _FORMULA_PREFIXES: Final[frozenset[str]] = frozenset("=+-@")
 _EXA_PEOPLE_RESERVATION_USD: Final[float] = 0.017
 _M3_INPUT_FINGERPRINT_KEY: Final[str] = "m3_input_fingerprint"
-_STATUS_READS_ADMITTED_KEY: Final[str] = "status_reads_admitted"
 _TIMESTAMP_KEYS: Final[frozenset[str]] = frozenset(
     {"created_at", "updated_at", "retrieved_at", "recorded_at"}
 )
@@ -349,12 +350,12 @@ def _nonblank_string(operation: str, value: object) -> str:
     return value
 
 
-def _status_reads_admitted(operation: str, value: dict[str, Any]) -> int:
-    """Return the durable number of async status reads admitted for one pending operation."""
-    raw = value.get(_STATUS_READS_ADMITTED_KEY, 0)
-    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
+def _required_status_reads_admitted(operation: str, value: dict[str, Any]) -> int:
+    """Read one durable status-read count or reject malformed M4 operation state."""
+    admitted = read_status_reads_admitted(value)
+    if admitted is None:
         raise ValueError(f"malformed contact checkpoint operation: {operation}")
-    return raw
+    return admitted
 
 
 def _validate_operation(operation: str, value: object) -> None:
@@ -382,12 +383,12 @@ def _validate_operation(operation: str, value: object) -> None:
             return
         if state == "pending":
             expected = {"state", "routine_run_id", "contact_ids"}
-            if _STATUS_READS_ADMITTED_KEY in value:
-                expected.add(_STATUS_READS_ADMITTED_KEY)
+            if STATUS_READS_ADMITTED_KEY in value:
+                expected.add(STATUS_READS_ADMITTED_KEY)
             _require_exact_keys(operation, value, expected)
             _nonblank_string(operation, value["routine_run_id"])
             _contact_ids(operation, value["contact_ids"])
-            _status_reads_admitted(operation, value)
+            _required_status_reads_admitted(operation, value)
             return
         if state == "completed":
             _require_exact_keys(
@@ -419,11 +420,11 @@ def _validate_operation(operation: str, value: object) -> None:
             return
         if state == "pending":
             expected = {"state", "email"}
-            if _STATUS_READS_ADMITTED_KEY in value:
-                expected.add(_STATUS_READS_ADMITTED_KEY)
+            if STATUS_READS_ADMITTED_KEY in value:
+                expected.add(STATUS_READS_ADMITTED_KEY)
             _require_exact_keys(operation, value, expected)
             _nonblank_string(operation, value["email"])
-            _status_reads_admitted(operation, value)
+            _required_status_reads_admitted(operation, value)
             return
         if state == "completed":
             _require_exact_keys(operation, value, {"state", "email", "status"})
@@ -750,7 +751,7 @@ def _status_read_allowed(
     state = lifecycle.operations().get(operation_id)
     if not isinstance(state, dict) or state.get("state") != "pending":
         raise ValueError("status read admission requires one pending persisted operation")
-    admitted = _status_reads_admitted(operation_id, state)
+    admitted = _required_status_reads_admitted(operation_id, state)
     recorded = lifecycle.quota_used(
         provider,
         operation=operation,
@@ -762,7 +763,7 @@ def _status_read_allowed(
     used = max(admitted, int(recorded))
     if used >= config.async_status_read_cap:
         return False
-    state[_STATUS_READS_ADMITTED_KEY] = used + 1
+    state[STATUS_READS_ADMITTED_KEY] = used + 1
     lifecycle.persist_checkpoint()
     return True
 

@@ -11,6 +11,7 @@ from time import sleep
 from leads_discovery.cli import main as cli_main
 from leads_discovery.pipeline.canary_outcomes import build_canary_coverage_report
 from leads_discovery.pipeline.canary_provider_coverage import run_live_provider_coverage
+from leads_discovery.pipeline.paid_operations import read_status_reads_admitted
 from leads_discovery.pipeline.state import load_usage_events, read_json
 
 _MAX_CANDIDATES = "1"
@@ -26,7 +27,6 @@ _INSTANTLY_CALL_CAP = "1"
 _ASYNC_POLL_DELAY_SECONDS = 10.0
 _NORMAL_ASYNC_READ_LIMIT = 3
 _COVERAGE_MAX_PASSES = 7
-_STATUS_READS_ADMITTED_KEY = "status_reads_admitted"
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,14 +54,6 @@ def _outcome_code(outcome: str) -> int:
     if outcome == "inconclusive":
         return 2
     return 1
-
-
-def _persisted_status_read_count(state: dict[str, object]) -> int | None:
-    """Read the durable pre-dispatch status-read count, accepting old checkpoints as zero."""
-    raw = state.get(_STATUS_READS_ADMITTED_KEY, 0)
-    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
-        return None
-    return raw
 
 
 def _normal_m4_pending_identity(
@@ -92,7 +84,7 @@ def _normal_m4_pending_identity(
         if not isinstance(state, dict) or state.get("state") != "pending":
             return None
         routine_run_id = state.get("routine_run_id")
-        admitted_reads = _persisted_status_read_count(state)
+        admitted_reads = read_status_reads_admitted(state)
         if (
             not isinstance(routine_run_id, str)
             or not routine_run_id.strip()
@@ -114,7 +106,7 @@ def _normal_m4_pending_identity(
     if not isinstance(state, dict) or state.get("state") != "pending":
         return None
     email = state.get("email")
-    admitted_reads = _persisted_status_read_count(state)
+    admitted_reads = read_status_reads_admitted(state)
     if not isinstance(email, str) or not email.strip() or admitted_reads is None:
         return None
     return _PendingStatusRead(

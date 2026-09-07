@@ -14,6 +14,7 @@ from leads_discovery.pipeline.costs import CostTracker
 from leads_discovery.pipeline.state import append_usage_event
 
 _OPERATION_STATES = frozenset({"in_flight", "completed", "failed", "pending"})
+STATUS_READS_ADMITTED_KEY = "status_reads_admitted"
 QuotaUnit = Literal["credits", "requests"]
 
 
@@ -27,6 +28,14 @@ def _finite_nonnegative(value: object, *, field_name: str) -> float:
     ):
         raise ValueError(f"{field_name} must be a finite nonnegative number")
     return float(value)
+
+
+def read_status_reads_admitted(state: Mapping[str, object]) -> int | None:
+    """Read durable async status-read admissions, accepting old state as zero."""
+    raw = state.get(STATUS_READS_ADMITTED_KEY, 0)
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
+        return None
+    return raw
 
 
 def _event_quota_amount(
@@ -358,8 +367,10 @@ class PaidOperationLifecycle:
 
 __all__ = [
     "PaidOperationLifecycle",
+    "STATUS_READS_ADMITTED_KEY",
     "checkpoint_has_unknown_paid_work",
     "find_unknown_in_flight",
+    "read_status_reads_admitted",
     "replay_quota_totals",
     "reservation_fits",
     "transition_checkpoint",
