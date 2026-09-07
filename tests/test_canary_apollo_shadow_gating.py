@@ -102,11 +102,11 @@ def _normal_usage(*, include_apollo: bool) -> tuple[UsageEvent, ...]:
 
 
 @pytest.mark.parametrize("decision", ["rejected", "uncertain"])
-def test_nonaccepted_shadow_clay_email_keeps_apollo_coverage_legal(
+def test_nonaccepted_shadow_clay_email_never_unlocks_apollo(
     tmp_path: Path,
     decision: str,
 ) -> None:
-    """Rejected/uncertain Exa + Clay coverage may still exercise Apollo on the selected contact."""
+    """Rejected/uncertain shadow Clay may feed Instantly but never authorizes Apollo."""
     company = coverage_helpers._company(decision)
     run_dir = tmp_path / f"coverage-{decision}"
     coverage_helpers._write_normal_state(run_dir, company)
@@ -137,8 +137,7 @@ def test_nonaccepted_shadow_clay_email_keeps_apollo_coverage_legal(
     assert [item.company_id for item in exa.companies] == [company.company_id]
     assert len(clay.starts) == 1
     assert clay.result_ids == ["shadow-clay-run"]
-    assert len(apollo.contacts) == 1
-    assert apollo.contacts[0].company_id == company.company_id
+    assert apollo.contacts == []
     assert instantly.created == ["alice.owner@acme.com"]
 
     checkpoint = read_json(run_dir / "canary_paid_checkpoint.json")
@@ -146,7 +145,7 @@ def test_nonaccepted_shadow_clay_email_keeps_apollo_coverage_legal(
     operations = checkpoint["provider_state"]["operations"]
     assert "coverage:exa_people" in operations
     assert "coverage:clay" in operations
-    assert "coverage:apollo" in operations
+    assert "coverage:apollo" not in operations
     assert "coverage:instantly" in operations
 
 
@@ -274,6 +273,7 @@ def _write_private_exa_and_clay(
     run_id: str,
     *,
     clay_email: str | None,
+    include_legacy_apollo: bool = False,
 ) -> None:
     """Persist legal rejected-company coverage through one terminal Clay outcome."""
     outcome_helpers._write_normal(run_dir, run_id)
@@ -365,6 +365,28 @@ def _write_private_exa_and_clay(
             "business_outcome": "email" if clay_email is not None else "no_email",
         },
     )
+
+    if include_legacy_apollo:
+        private.begin("coverage:apollo", "apollo_enrichment", input_value=contact_input)
+        private.record_usage(
+            "coverage:apollo",
+            "apollo_enrichment",
+            input_value=contact_input,
+            event=UsageEvent(
+                provider="apollo",
+                operation="people_enrichment",
+                metadata={"matched": False, "credits_used": 1.0},
+            ),
+        )
+        private.finish(
+            "coverage:apollo",
+            input_value=contact_input,
+            fields={
+                "credits_used": 1.0,
+                "work_email": None,
+                "business_outcome": "no_email",
+            },
+        )
     private.complete()
 
 
@@ -390,8 +412,8 @@ def test_shadow_clay_no_email_without_normal_apollo_reports_inconclusive(
     assert report.overall_outcome == "inconclusive"
 
 
-def test_shadow_clay_usable_email_makes_missing_apollo_a_failure(tmp_path: Path) -> None:
-    """Coverage-only Clay success makes Apollo coverage required even for a rejected company."""
+def test_shadow_clay_usable_email_does_not_make_apollo_required(tmp_path: Path) -> None:
+    """Coverage-only Clay success never creates an Apollo coverage prerequisite."""
     run_id = "report-clay-email"
     run_dir = tmp_path / run_id
     run_dir.mkdir()
@@ -400,8 +422,60 @@ def test_shadow_clay_usable_email_makes_missing_apollo_a_failure(tmp_path: Path)
     report = build_canary_coverage_report(tmp_path, run_id=run_id)
 
     apollo = outcome_helpers._provider(report, "apollo")
+    instantly = outcome_helpers._provider(report, "instantly")
+    assert (apollo.integration_outcome, apollo.business_outcome) == (
+        "inconclusive",
+        "not_exercised",
+    )
+    assert instantly.integration_outcome == "failure"
+    assert report.overall_outcome == "failure"
+
+
+def test_legacy_private_apollo_without_normal_clay_skip_is_not_reused(
+    tmp_path: Path,
+) -> None:
+    """Replay fails closed on private Apollo created without the normal-Clay skip prerequisite."""
+    run_id = "legacy-private-apollo-replay"
+    run_dir = tmp_path / run_id
+    run_dir.mkdir()
+    _write_private_exa_and_clay(
+        run_dir,
+        run_id,
+        clay_email="alice.owner@acme.com",
+        include_legacy_apollo=True,
+    )
+
+    with pytest.raises(ValueError, match="private Apollo coverage lacks normal Clay skip prerequisite"):
+        run_provider_coverage(
+            run_dir,
+            run_id=run_id,
+            exa=coverage_helpers._BombExa(),
+            clay=coverage_helpers._BombClay(),
+            apollo=coverage_helpers._BombApollo(),
+            instantly=coverage_helpers._CoverageInstantly(),
+        )
+
+
+def test_legacy_private_apollo_without_normal_clay_skip_reports_failure(
+    tmp_path: Path,
+) -> None:
+    """Legacy private Apollo evidence cannot make readiness green without its prerequisite."""
+    run_id = "legacy-private-apollo-report"
+    run_dir = tmp_path / run_id
+    run_dir.mkdir()
+    _write_private_exa_and_clay(
+        run_dir,
+        run_id,
+        clay_email="alice.owner@acme.com",
+        include_legacy_apollo=True,
+    )
+
+    report = build_canary_coverage_report(tmp_path, run_id=run_id)
+
+    apollo = outcome_helpers._provider(report, "apollo")
+    assert apollo.source == "coverage_only"
     assert (apollo.integration_outcome, apollo.business_outcome) == (
         "failure",
-        "not_exercised",
+        "invalid_evidence",
     )
     assert report.overall_outcome == "failure"
