@@ -284,18 +284,22 @@ def test_status_read_admission_survives_crash_before_usage_bookkeeping(
 
     original_record_event = contact_enrichment._record_event
 
-    def crash_before_third_status_event(lifecycle: object, event: object) -> None:
+    def interrupt_before_third_status_event(lifecycle: object, event: object) -> None:
         if (
             getattr(event, "provider", None) == "clay"
             and getattr(event, "operation", None) == "work_email_routine_results"
             and len(clay.gets) == 3
         ):
-            raise RuntimeError("simulated crash after status GET")
+            raise KeyboardInterrupt
         original_record_event(lifecycle, event)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(contact_enrichment, "_record_event", crash_before_third_status_event)
+    monkeypatch.setattr(
+        contact_enrichment,
+        "_record_event",
+        interrupt_before_third_status_event,
+    )
 
-    with pytest.raises(RuntimeError, match="simulated crash after status GET"):
+    with pytest.raises(KeyboardInterrupt):
         _run_canary(tmp_path, run_id)
     assert len(clay.posts) == 1
     assert len(clay.gets) == 3
