@@ -292,8 +292,8 @@ def _clay_email(
     normal_operations: dict[str, dict[str, Any]],
     normal_usage: list[UsageEvent],
     clay: _ClayContactProvider,
-) -> tuple[str | None, bool]:
-    """Return production-normalized Clay email and whether composition must pause."""
+) -> tuple[str | None, bool, bool]:
+    """Return Clay email, pause state, and normal-Clay Apollo-shadow eligibility."""
     normal_entry = _normal_operation_evidence(
         normal_operations,
         normal_usage,
@@ -306,11 +306,11 @@ def _clay_email(
         if not isinstance(raw_ids, list) or contact.contact_id not in raw_ids:
             raise ValueError("normal Clay provider operation does not name the selected contact")
         if contact.email_source != "clay":
-            return None, False
+            return None, False, False
         email = usable_work_email(contact.work_email)
         if email is None:
             raise ValueError("canonical Clay email is not production-usable")
-        return email, False
+        return email, False, True
     if contact.email_source == "clay":
         raise ValueError("canonical Clay output lacks durable provider evidence")
 
@@ -318,7 +318,7 @@ def _clay_email(
     entry = paid.operation(_CLAY_OPERATION, input_value=input_value)
     if entry is None:
         if not paid.resource_allows("clay_start"):
-            return None, False
+            return None, False, False
         paid.begin(_CLAY_OPERATION, "clay_start", input_value=input_value)
         try:
             started = clay.start([contact])
@@ -343,18 +343,18 @@ def _clay_email(
             state="pending",
             fields={"routine_run_id": started.routine_run_id, "business_outcome": "pending"},
         )
-        return None, True
+        return None, True, False
 
     state = entry.get("state")
     if state == "completed":
         raw_email = entry.get("work_email")
         if raw_email is not None and not isinstance(raw_email, str):
             raise ValueError("private Clay work email is invalid")
-        return usable_work_email(raw_email), False
+        return usable_work_email(raw_email), False, False
     if state != "pending":
         raise RuntimeError("canary Clay outcome is unresolved")
     if not paid.resource_allows("clay_status_read"):
-        return None, True
+        return None, True, False
     routine_run_id = entry.get("routine_run_id")
     if not isinstance(routine_run_id, str) or not routine_run_id:
         raise ValueError("private Clay routine id is invalid")
@@ -388,7 +388,7 @@ def _clay_email(
             state="pending",
             fields={"routine_run_id": routine_run_id, "business_outcome": "pending"},
         )
-        return None, True
+        return None, True, False
 
     by_id = {
         str(item.get("id")): item
@@ -405,7 +405,7 @@ def _clay_email(
             "business_outcome": "email" if email is not None else "no_email",
         },
     )
-    return email, False
+    return email, False, False
 
 
 def _finite_nonnegative(value: float, label: str) -> float:
@@ -421,8 +421,10 @@ def _apollo_email(
     normal_operations: dict[str, dict[str, Any]],
     normal_usage: list[UsageEvent],
     apollo: _ApolloContactProvider,
+    *,
+    shadow_eligible: bool,
 ) -> str | None:
-    """Run exactly one private Apollo fallback when normal Apollo did not consume the slot."""
+    """Reuse normal Apollo, or run one legal private shadow after normal Clay success."""
     normal_entry = _normal_operation_evidence(
         normal_operations,
         normal_usage,
@@ -439,6 +441,8 @@ def _apollo_email(
         return email
     if contact.email_source == "apollo":
         raise ValueError("canonical Apollo output lacks durable provider evidence")
+    if not shadow_eligible:
+        return None
 
     input_value = contact.to_dict()
     entry = paid.operation(_APOLLO_OPERATION, input_value=input_value)
@@ -659,7 +663,7 @@ def run_provider_coverage(
     if contact is None:
         return _finish_summary(paid, run_id, pending=False)
 
-    clay_email, clay_pending = _clay_email(
+    clay_email, clay_pending, apollo_shadow_eligible = _clay_email(
         paid,
         contact,
         normal_operations,
@@ -674,6 +678,7 @@ def run_provider_coverage(
         normal_operations,
         normal_usage,
         apollo,
+        shadow_eligible=apollo_shadow_eligible,
     )
     verification_email = clay_email or apollo_email
     if verification_email is None:
