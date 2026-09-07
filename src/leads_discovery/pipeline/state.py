@@ -457,7 +457,7 @@ def _persist_canary_private_state(path: Path, checkpoint: RunCheckpoint) -> None
 
 def write_checkpoint(path: Path, checkpoint: RunCheckpoint) -> None:
     """Durably publish paid-operation barriers before atomically replacing local checkpoint."""
-    previous_payload = read_json(path) if path.exists() else None
+    previous_payload = _read_json_file(path) if path.exists() else None
     previous = (
         None if previous_payload is None else RunCheckpoint.from_dict(previous_payload)
     )
