@@ -14,6 +14,7 @@ from leads_discovery.pipeline.costs import CostTracker
 from leads_discovery.pipeline.state import append_usage_event
 
 _OPERATION_STATES = frozenset({"in_flight", "completed", "failed", "pending"})
+STATUS_READS_ADMITTED_KEY = "status_reads_admitted"
 QuotaUnit = Literal["credits", "requests"]
 
 
@@ -27,6 +28,14 @@ def _finite_nonnegative(value: object, *, field_name: str) -> float:
     ):
         raise ValueError(f"{field_name} must be a finite nonnegative number")
     return float(value)
+
+
+def read_status_reads_admitted(state: Mapping[str, object]) -> int | None:
+    """Read durable async status-read admissions, accepting old state as zero."""
+    raw = state.get(STATUS_READS_ADMITTED_KEY, 0)
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
+        return None
+    return raw
 
 
 def _event_quota_amount(
@@ -50,6 +59,33 @@ def _event_quota_amount(
     if raw is None:
         return 0.0
     return _finite_nonnegative(raw, field_name=f"{provider} credits")
+
+
+def _event_matches_quota_identity(
+    event: UsageEvent,
+    provider: str,
+    *,
+    operation: str | None,
+    metadata: Mapping[str, object] | None,
+) -> bool:
+    """Match exact quota identity while rejecting malformed relevant ledger evidence."""
+    if event.provider != provider:
+        return False
+    if operation is not None and event.operation != operation:
+        return False
+    if metadata is None:
+        return True
+    for key, expected in metadata.items():
+        if key not in event.metadata:
+            raise ValueError(f"usage event is missing quota identity metadata: {key}")
+        recorded = event.metadata[key]
+        if isinstance(expected, str) and (
+            not isinstance(recorded, str) or not recorded.strip()
+        ):
+            raise ValueError(f"usage event has malformed quota identity metadata: {key}")
+        if recorded != expected:
+            return False
+    return True
 
 
 def replay_quota_totals(events: Iterable[UsageEvent]) -> tuple[float, int, float]:
@@ -198,10 +234,16 @@ class PaidOperationLifecycle:
         *,
         operation: str | None = None,
         unit: QuotaUnit | None = None,
+        metadata: Mapping[str, object] | None = None,
     ) -> bool:
         """Apply admission against replayed provider quota owned by this lifecycle."""
         return reservation_fits(
-            self.quota_used(provider, operation=operation, unit=unit),
+            self.quota_used(
+                provider,
+                operation=operation,
+                unit=unit,
+                metadata=metadata,
+            ),
             ceiling,
             reservation,
         )
@@ -212,6 +254,7 @@ class PaidOperationLifecycle:
         *,
         operation: str | None = None,
         unit: QuotaUnit | None = None,
+        metadata: Mapping[str, object] | None = None,
     ) -> float:
         """Return committed quota from replayed and newly recorded usage events."""
         if unit is None:
@@ -226,6 +269,12 @@ class PaidOperationLifecycle:
                 unit=unit,
             )
             for event in self._usage_events
+            if _event_matches_quota_identity(
+                event,
+                provider,
+                operation=operation,
+                metadata=metadata,
+            )
         )
 
     @classmethod
@@ -318,8 +367,10 @@ class PaidOperationLifecycle:
 
 __all__ = [
     "PaidOperationLifecycle",
+    "STATUS_READS_ADMITTED_KEY",
     "checkpoint_has_unknown_paid_work",
     "find_unknown_in_flight",
+    "read_status_reads_admitted",
     "replay_quota_totals",
     "reservation_fits",
     "transition_checkpoint",

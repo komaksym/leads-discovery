@@ -86,6 +86,7 @@ def _parser() -> argparse.ArgumentParser:
     enrich.add_argument("--clay-max-contacts", type=int, default=10)
     enrich.add_argument("--apollo-credit-cap", type=float, default=5.0)
     enrich.add_argument("--instantly-verification-call-cap", type=int, default=5)
+    enrich.add_argument("--async-status-read-cap", type=int, help=argparse.SUPPRESS)
     enrich.add_argument("--execute-live", action="store_true")
     return parser
 
@@ -171,6 +172,15 @@ def _validate_enrich_inputs(args: argparse.Namespace) -> None:
         or args.instantly_verification_call_cap < 0
     ):
         raise ValueError("instantly_verification_call_cap must be a nonnegative integer")
+    if (
+        args.async_status_read_cap is not None
+        and (
+            isinstance(args.async_status_read_cap, bool)
+            or not isinstance(args.async_status_read_cap, int)
+            or args.async_status_read_cap < 0
+        )
+    ):
+        raise ValueError("async_status_read_cap must be a nonnegative integer")
     _validate_number("apollo_credit_cap", args.apollo_credit_cap)
     if args.exa_people_budget_usd is not None:
         _validate_number("exa_people_budget_usd", args.exa_people_budget_usd)
@@ -385,6 +395,7 @@ def _enrich_live(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
         clay_max_contacts=args.clay_max_contacts,
         apollo_credit_cap=args.apollo_credit_cap,
         instantly_verification_call_cap=args.instantly_verification_call_cap,
+        async_status_read_cap=args.async_status_read_cap,
         execute_live=True,
     )
     validate_contact_enrichment_state(config)

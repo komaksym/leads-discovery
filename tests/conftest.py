@@ -7,6 +7,8 @@ from typing import Any
 
 import pytest
 
+from leads_discovery import production_canary
+
 
 @pytest.fixture(autouse=True)
 def zero_network(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -20,3 +22,9 @@ def zero_network(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(socket, "getaddrinfo", blocked)
     monkeypatch.setattr(socket.socket, "connect", blocked)
     monkeypatch.setattr(socket.socket, "connect_ex", blocked)
+
+
+@pytest.fixture(autouse=True)
+def zero_canary_poll_delay(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep offline canary tests deterministic without changing production poll cadence."""
+    monkeypatch.setattr(production_canary, "sleep", lambda _delay: None)

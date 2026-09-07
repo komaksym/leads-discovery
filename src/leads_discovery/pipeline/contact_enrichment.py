@@ -31,8 +31,10 @@ from leads_discovery.contacts.selection import (
 from leads_discovery.models import CompanyRecord, RunCheckpoint, UsageEvent
 from leads_discovery.pipeline.costs import CostTracker
 from leads_discovery.pipeline.paid_operations import (
+    STATUS_READS_ADMITTED_KEY,
     PaidOperationLifecycle,
     checkpoint_has_unknown_paid_work,
+    read_status_reads_admitted,
     replay_quota_totals,
     transition_checkpoint,
 )
@@ -134,6 +136,7 @@ class ContactEnrichmentConfig:
     clay_max_contacts: int = 10
     apollo_credit_cap: float = 5.0
     instantly_verification_call_cap: int = 5
+    async_status_read_cap: int | None = None
     execute_live: bool = False
 
 
@@ -208,6 +211,15 @@ def _validate_config(config: ContactEnrichmentConfig) -> _Paths:
         or config.instantly_verification_call_cap < 0
     ):
         raise ValueError("instantly_verification_call_cap must be a nonnegative integer")
+    if (
+        config.async_status_read_cap is not None
+        and (
+            isinstance(config.async_status_read_cap, bool)
+            or not isinstance(config.async_status_read_cap, int)
+            or config.async_status_read_cap < 0
+        )
+    ):
+        raise ValueError("async_status_read_cap must be a nonnegative integer")
     if config.exa_people_budget_usd is not None:
         _finite_nonnegative("exa_people_budget_usd", config.exa_people_budget_usd)
     _finite_nonnegative("apollo_credit_cap", config.apollo_credit_cap)
@@ -338,6 +350,14 @@ def _nonblank_string(operation: str, value: object) -> str:
     return value
 
 
+def _required_status_reads_admitted(operation: str, value: dict[str, Any]) -> int:
+    """Read one durable status-read count or reject malformed M4 operation state."""
+    admitted = read_status_reads_admitted(value)
+    if admitted is None:
+        raise ValueError(f"malformed contact checkpoint operation: {operation}")
+    return admitted
+
+
 def _validate_operation(operation: str, value: object) -> None:
     """Validate one operation against the exact M4 persisted replay state machine."""
     if not isinstance(value, dict):
@@ -361,7 +381,16 @@ def _validate_operation(operation: str, value: object) -> None:
             _require_exact_keys(operation, value, {"state", "contact_ids"})
             _contact_ids(operation, value["contact_ids"])
             return
-        if state in {"pending", "completed"}:
+        if state == "pending":
+            expected = {"state", "routine_run_id", "contact_ids"}
+            if STATUS_READS_ADMITTED_KEY in value:
+                expected.add(STATUS_READS_ADMITTED_KEY)
+            _require_exact_keys(operation, value, expected)
+            _nonblank_string(operation, value["routine_run_id"])
+            _contact_ids(operation, value["contact_ids"])
+            _required_status_reads_admitted(operation, value)
+            return
+        if state == "completed":
             _require_exact_keys(
                 operation,
                 value,
@@ -385,9 +414,17 @@ def _validate_operation(operation: str, value: object) -> None:
         raise ValueError(f"unsupported contact checkpoint state: {operation}:{state}")
 
     if operation.startswith("instantly:") and operation != "instantly:":
-        if state in {"in_flight", "pending"}:
+        if state == "in_flight":
             _require_exact_keys(operation, value, {"state", "email"})
             _nonblank_string(operation, value["email"])
+            return
+        if state == "pending":
+            expected = {"state", "email"}
+            if STATUS_READS_ADMITTED_KEY in value:
+                expected.add(STATUS_READS_ADMITTED_KEY)
+            _require_exact_keys(operation, value, expected)
+            _nonblank_string(operation, value["email"])
+            _required_status_reads_admitted(operation, value)
             return
         if state == "completed":
             _require_exact_keys(operation, value, {"state", "email", "status"})
@@ -697,6 +734,38 @@ def _finish_operation(
 ) -> None:
     """Persist one known M4 provider result through the shared lifecycle boundary."""
     lifecycle.finish(operation_id, state=state, fields=fields, replace=True)
+
+
+def _status_read_allowed(
+    lifecycle: PaidOperationLifecycle,
+    config: ContactEnrichmentConfig,
+    *,
+    operation_id: str,
+    provider: str,
+    operation: str,
+    metadata: dict[str, object],
+) -> bool:
+    """Durably reserve one bounded async status request before provider dispatch."""
+    if config.async_status_read_cap is None:
+        return True
+    state = lifecycle.operations().get(operation_id)
+    if not isinstance(state, dict) or state.get("state") != "pending":
+        raise ValueError("status read admission requires one pending persisted operation")
+    admitted = _required_status_reads_admitted(operation_id, state)
+    recorded = lifecycle.quota_used(
+        provider,
+        operation=operation,
+        unit="requests",
+        metadata=metadata,
+    )
+    if not math.isfinite(recorded) or recorded < 0 or not recorded.is_integer():
+        raise ValueError("status read usage must be a nonnegative integer")
+    used = max(admitted, int(recorded))
+    if used >= config.async_status_read_cap:
+        return False
+    state[STATUS_READS_ADMITTED_KEY] = used + 1
+    lifecycle.persist_checkpoint()
+    return True
 
 
 def _safe_csv(value: object) -> str:
@@ -1023,6 +1092,22 @@ def run_contact_enrichment(
                     "clay_authorization_changed",
                 )
             run_id = cast(str, clay_state["routine_run_id"])
+            if not _status_read_allowed(
+                lifecycle,
+                config,
+                operation_id="clay:batch",
+                provider="clay",
+                operation="work_email_routine_results",
+                metadata={"routine_run_id": run_id},
+            ):
+                return _pause(
+                    config,
+                    paths,
+                    checkpoint,
+                    contacts,
+                    "paused_pending",
+                    "clay_pending",
+                )
             try:
                 clay_result = clay.results(run_id)
             except ContactProviderError as error:
@@ -1229,6 +1314,22 @@ def run_contact_enrichment(
                 persisted_email = cast(str, persisted_state["email"])
                 if persisted_email != email:
                     raise ValueError("pending Instantly email does not match contact email")
+                if not _status_read_allowed(
+                    lifecycle,
+                    config,
+                    operation_id=key,
+                    provider="instantly",
+                    operation="email_verification_get",
+                    metadata={"email": email},
+                ):
+                    return _pause(
+                        config,
+                        paths,
+                        checkpoint,
+                        contacts,
+                        "paused_pending",
+                        key,
+                    )
                 verification = instantly.get(email)
             else:
                 _attempt(contact, "instantly", "email_verification", "in_flight")
