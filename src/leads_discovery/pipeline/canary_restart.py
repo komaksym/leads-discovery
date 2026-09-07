@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, cast
 
 from leads_discovery.contacts.models import ContactRecord
 from leads_discovery.models import CompanyRecord, RunCheckpoint, UsageEvent
@@ -85,7 +85,7 @@ class CanaryRestartState:
             value = payload[name]
             if not isinstance(value, list) or any(not isinstance(row, dict) for row in value):
                 raise ValueError(f"canary normal restart {name} is invalid")
-            return tuple(value)
+            return tuple(cast(dict[str, Any], row) for row in value)
 
         usage_events = rows("usage_events")
         companies_evaluated = rows("companies_evaluated")
@@ -128,10 +128,9 @@ def _run_dir(data_root: Path, run_id: str, *, require_existing: bool) -> Path:
     run_dir = candidate.resolve()
     if run_dir.parent != root:
         raise ValueError("canary run directory must remain directly beneath data_root")
-    if require_existing:
-        if not run_dir.is_dir():
-            raise ValueError("canary run directory must exist")
-    else:
+    if require_existing and not run_dir.is_dir():
+        raise ValueError("canary run directory must exist")
+    if not require_existing:
         run_dir.mkdir(exist_ok=True)
     return run_dir
 
