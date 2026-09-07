@@ -31,8 +31,8 @@ from leads_discovery.contacts.selection import (
 from leads_discovery.models import CompanyRecord, RunCheckpoint, UsageEvent
 from leads_discovery.pipeline.costs import CostTracker
 from leads_discovery.pipeline.paid_operations import (
-    PaidOperationLifecycle,
     STATUS_READS_ADMITTED_KEY,
+    PaidOperationLifecycle,
     checkpoint_has_unknown_paid_work,
     read_status_reads_admitted,
     replay_quota_totals,
