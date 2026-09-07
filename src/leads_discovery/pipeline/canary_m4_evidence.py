@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Mapping, Sequence
+from typing import Any
 
 from leads_discovery.contacts.models import ContactRecord
 from leads_discovery.contacts.providers import usable_work_email
