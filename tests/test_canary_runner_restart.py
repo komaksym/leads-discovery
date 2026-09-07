@@ -19,7 +19,6 @@ from leads_discovery.contacts.providers import (
 from leads_discovery.contacts.selection import select_contacts
 from leads_discovery.pipeline import state as state_module
 from leads_discovery.pipeline.canary_provider_coverage import run_provider_coverage
-from leads_discovery.pipeline.canary_restart import snapshot_canary_restart_state
 
 _JOURNAL_BRANCH = "canary-operation-journal"
 _JOURNAL_KEY = "test-canary-journal-key-32-bytes-minimum"
@@ -266,7 +265,6 @@ def test_production_canary_fresh_runner_restores_before_normal_cli_dispatch(
     first_run_dir = _normal_run_dir(first_work, run_id)
     company = coverage_helpers._company("rejected")
     contact = select_contacts(company, [coverage_helpers._person_result()], limit=1)[0]
-    snapshot_canary_restart_state(first_run_dir, run_id=run_id)
 
     first = run_provider_coverage(
         first_run_dir,
