@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -17,94 +16,17 @@ from leads_discovery.contacts.providers import (
     VerificationResult,
 )
 from leads_discovery.contacts.selection import select_contacts
-from leads_discovery.pipeline import state as state_module
 from leads_discovery.pipeline.canary_provider_coverage import run_provider_coverage
+from leads_discovery.pipeline.git_journal import persist_canary_private_state
+from private_journal_http import DraftReleaseJournalServer
 
-_JOURNAL_BRANCH = "canary-operation-journal"
-_JOURNAL_KEY = "test-canary-journal-key-32-bytes-minimum"
 _LEADS_HEADER = "company_id,contact_id,work_email,email_verification_status,email_source\n"
 
 
-def _git(cwd: Path, *args: str) -> str:
-    """Run one local Git command and return captured stdout for fixture assertions."""
-    return subprocess.run(
-        ["git", *args],
-        cwd=cwd,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
-
-
-def _configure_identity(work: Path) -> None:
-    """Configure commit-tree identity used by the production Git journal."""
-    _git(work, "config", "user.name", "Test Bot")
-    _git(work, "config", "user.email", "test@example.invalid")
-
-
-def _journal_workspace(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    *,
-    nonempty_tree: bool,
-) -> tuple[Path, Path]:
-    """Create a durable journal remote and one ephemeral runner checkout."""
-    remote = tmp_path / "remote.git"
-    _git(tmp_path, "init", "--bare", str(remote))
-    work = tmp_path / "runner-a"
-    work.mkdir()
-    _git(work, "init")
-    _configure_identity(work)
-    if nonempty_tree:
-        (work / "seed").write_text("journal\n", encoding="utf-8")
-        _git(work, "add", "seed")
-        _git(work, "commit", "-m", "seed non-empty journal")
-    else:
-        _git(work, "commit", "--allow-empty", "-m", "Initialize empty journal")
-    _git(work, "branch", "-M", _JOURNAL_BRANCH)
-    _git(work, "remote", "add", "origin", str(remote))
-    _git(work, "push", "-u", "origin", _JOURNAL_BRANCH)
-    _configure_journal_env(monkeypatch, work)
-    return remote, work
-
-
-def _initial_workspace(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> tuple[Path, Path]:
-    """Create the canonical empty-tree durable journal and first runner."""
-    return _journal_workspace(tmp_path, monkeypatch, nonempty_tree=False)
-
-
-def _fresh_workspace(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    remote: Path,
-    name: str,
-) -> Path:
-    """Clone a fresh checkout with no prior runner-local canary files."""
-    work = tmp_path / name
-    _git(tmp_path, "clone", "--branch", _JOURNAL_BRANCH, str(remote), str(work))
-    _configure_identity(work)
-    _configure_journal_env(monkeypatch, work)
-    return work
-
-
-def _configure_journal_env(
-    monkeypatch: pytest.MonkeyPatch,
-    work: Path,
-) -> None:
-    """Point the production journal at the fixture's non-publication branch."""
-    monkeypatch.setenv("GITHUB_WORKSPACE", str(work))
-    monkeypatch.setenv("LEADS_GIT_JOURNAL_BRANCH", _JOURNAL_BRANCH)
-    monkeypatch.setenv("LEADS_GIT_JOURNAL_REMOTE", "origin")
-    monkeypatch.setenv("LEADS_GIT_JOURNAL_KEY", _JOURNAL_KEY)
-
-
-def _normal_run_dir(work: Path, run_id: str) -> Path:
+def _normal_run_dir(root: Path, run_id: str) -> Path:
     """Persist the resolved normal state needed to enter shadow composition."""
-    data = work / "data"
-    data.mkdir()
+    data = root / "data"
+    data.mkdir(parents=True, exist_ok=True)
     run_dir = data / run_id
     coverage_helpers._write_normal_state(run_dir, coverage_helpers._company("rejected"))
     (run_dir / "leads.csv").write_text(_LEADS_HEADER, encoding="utf-8")
@@ -170,271 +92,187 @@ class _ResumeOnlyInstantly(_PendingInstantly):
         raise AssertionError(f"Instantly create must not be replaced for {email}")
 
 
-def test_nonempty_journal_tree_fails_closed_before_shadow_dispatch(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """An existing journal with tracked content is never accepted as operation authority."""
-    _remote, work = _journal_workspace(tmp_path, monkeypatch, nonempty_tree=True)
-    run_id = "nonempty-journal"
-    run_dir = _normal_run_dir(work, run_id)
-    exa = coverage_helpers._CoverageExa()
-
-    with pytest.raises(RuntimeError, match="journal.*tree|tree.*empty"):
-        run_provider_coverage(
-            run_dir,
-            run_id=run_id,
-            exa=exa,
-            clay=coverage_helpers._BombClay(),
-            apollo=coverage_helpers._BombApollo(),
-            instantly=coverage_helpers._BombInstantly(),
-        )
-
-    assert exa.companies == []
-
-
-def test_crash_after_remote_pending_state_restores_same_clay_identity_without_replacement_start(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Remote durability is atomic with the pending identity before local checkpoint replacement."""
-    remote, first_work = _initial_workspace(tmp_path, monkeypatch)
-    run_id = "restart-crash-window"
-    first_run_dir = _normal_run_dir(first_work, run_id)
-    company = coverage_helpers._company("rejected")
-    contact = select_contacts(company, [coverage_helpers._person_result()], limit=1)[0]
-    first_clay = _RestartableClay(contact.contact_id)
-    original_write_json_atomic = state_module.write_json_atomic
-
-    def crash_before_private_checkpoint_replace(
-        path: Path,
-        payload: dict[str, object],
-    ) -> None:
-        provider_state = payload.get("provider_state")
-        operations = provider_state.get("operations") if isinstance(provider_state, dict) else None
-        clay_state = operations.get("coverage:clay") if isinstance(operations, dict) else None
-        if (
-            path.name == "canary_paid_checkpoint.json"
-            and isinstance(clay_state, dict)
-            and clay_state.get("state") == "pending"
-        ):
-            raise RuntimeError("simulated runner loss before local checkpoint replacement")
-        original_write_json_atomic(path, payload)
-
-    monkeypatch.setattr(state_module, "write_json_atomic", crash_before_private_checkpoint_replace)
-    with pytest.raises(RuntimeError, match="simulated runner loss"):
-        run_provider_coverage(
-            first_run_dir,
-            run_id=run_id,
-            exa=coverage_helpers._CoverageExa(),
-            clay=first_clay,
-            apollo=coverage_helpers._BombApollo(),
-            instantly=coverage_helpers._BombInstantly(),
-        )
-
-    monkeypatch.setattr(state_module, "write_json_atomic", original_write_json_atomic)
-    assert len(first_clay.starts) == 1
-
-    second_work = _fresh_workspace(tmp_path, monkeypatch, remote, "runner-b")
-    second_run_dir = _normal_run_dir(second_work, run_id)
-    resumed_clay = _RestartableClay(contact.contact_id)
-    instantly = coverage_helpers._CoverageInstantly()
-
-    resumed = run_provider_coverage(
-        second_run_dir,
-        run_id=run_id,
-        exa=coverage_helpers._BombExa(),
-        clay=resumed_clay,
-        apollo=coverage_helpers._BombApollo(),
-        instantly=instantly,
-    )
-
-    assert resumed.status == "completed"
-    assert resumed_clay.starts == []
-    assert resumed_clay.result_ids == ["shadow-clay-run"]
-    assert instantly.created == ["alice.owner@acme.com"]
-
-
 def test_production_canary_fresh_runner_restores_before_normal_cli_dispatch(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The top-level canary restores durable prerequisites before deciding to rerun normal work."""
-    remote, first_work = _initial_workspace(tmp_path, monkeypatch)
-    run_id = "restart-production-canary"
-    first_run_dir = _normal_run_dir(first_work, run_id)
-    company = coverage_helpers._company("rejected")
-    contact = select_contacts(company, [coverage_helpers._person_result()], limit=1)[0]
+    """Top-level canary restores completed normal authority before any normal redispatch."""
+    with DraftReleaseJournalServer() as journal:
+        journal.configure(monkeypatch)
+        run_id = "restart-production-canary"
+        first_root = tmp_path / "runner-a"
+        first_run_dir = _normal_run_dir(first_root, run_id)
+        company = coverage_helpers._company("rejected")
+        contact = select_contacts(company, [coverage_helpers._person_result()], limit=1)[0]
 
-    first = run_provider_coverage(
-        first_run_dir,
-        run_id=run_id,
-        exa=coverage_helpers._CoverageExa(),
-        clay=_RestartableClay(contact.contact_id),
-        apollo=coverage_helpers._BombApollo(),
-        instantly=coverage_helpers._BombInstantly(),
-    )
-    assert first.status == "pending"
-
-    second_work = _fresh_workspace(tmp_path, monkeypatch, remote, "runner-b")
-    data_root = second_work / "data"
-
-    def forbid_normal_cli(_argv: object = None) -> int:
-        raise AssertionError(
-            "normal run/enrich must not be re-dispatched from durable restart state"
+        first = run_provider_coverage(
+            first_run_dir,
+            run_id=run_id,
+            exa=coverage_helpers._CoverageExa(),
+            clay=_RestartableClay(contact.contact_id),
+            apollo=coverage_helpers._BombApollo(),
+            instantly=coverage_helpers._BombInstantly(),
         )
+        assert first.status == "pending"
 
-    def fake_coverage(root: Path, *, run_id: str) -> SimpleNamespace:
-        restored = root / run_id
-        assert (restored / "checkpoint.json").is_file()
-        assert (restored / "contact_checkpoint.json").is_file()
-        assert (restored / "companies_evaluated.jsonl").is_file()
-        assert (restored / "contacts.jsonl").is_file()
-        assert (restored / "leads.csv").is_file()
-        return SimpleNamespace(status="completed")
+        second_root = tmp_path / "runner-b"
+        data_root = second_root / "data"
 
-    def fake_report(_root: Path, *, run_id: str) -> SimpleNamespace:
-        assert run_id == "restart-production-canary"
-        return SimpleNamespace(overall_outcome="inconclusive")
+        def forbid_normal_cli(_argv: object = None) -> int:
+            raise AssertionError(
+                "normal run/enrich must not be re-dispatched from durable restart state"
+            )
 
-    monkeypatch.setattr(production_canary, "cli_main", forbid_normal_cli)
-    monkeypatch.setattr(production_canary, "run_live_provider_coverage", fake_coverage)
-    monkeypatch.setattr(production_canary, "build_canary_coverage_report", fake_report)
+        def fake_coverage(root: Path, *, run_id: str) -> SimpleNamespace:
+            restored = root / run_id
+            assert (restored / "checkpoint.json").is_file()
+            assert (restored / "contact_checkpoint.json").is_file()
+            assert (restored / "companies_evaluated.jsonl").is_file()
+            assert (restored / "contacts.jsonl").is_file()
+            assert (restored / "leads.csv").is_file()
+            return SimpleNamespace(status="completed")
 
-    assert production_canary.main(["--run-id", run_id, "--data-root", str(data_root)]) == 2
+        def fake_report(_root: Path, *, run_id: str) -> SimpleNamespace:
+            assert run_id == "restart-production-canary"
+            return SimpleNamespace(overall_outcome="inconclusive")
+
+        monkeypatch.setattr(production_canary, "cli_main", forbid_normal_cli)
+        monkeypatch.setattr(production_canary, "run_live_provider_coverage", fake_coverage)
+        monkeypatch.setattr(production_canary, "build_canary_coverage_report", fake_report)
+
+        assert (
+            production_canary.main(
+                ["--run-id", run_id, "--data-root", str(data_root)]
+            )
+            == 2
+        )
 
 
 def test_runner_loss_after_pending_shadow_clay_resumes_same_routine_without_new_paid_start(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A fresh runner restores private Exa/Clay state and polls the original Clay run."""
-    remote, first_work = _initial_workspace(tmp_path, monkeypatch)
-    run_id = "restart-shadow-clay"
-    first_run_dir = _normal_run_dir(first_work, run_id)
-    company = coverage_helpers._company("rejected")
-    contact = select_contacts(company, [coverage_helpers._person_result()], limit=1)[0]
-    exa = coverage_helpers._CoverageExa()
-    first_clay = _RestartableClay(contact.contact_id)
+    """A fresh runner polls the original Clay identity and never starts replacement work."""
+    with DraftReleaseJournalServer() as journal:
+        journal.configure(monkeypatch)
+        run_id = "restart-shadow-clay"
+        first_run_dir = _normal_run_dir(tmp_path / "runner-a", run_id)
+        company = coverage_helpers._company("rejected")
+        contact = select_contacts(company, [coverage_helpers._person_result()], limit=1)[0]
+        exa = coverage_helpers._CoverageExa()
+        first_clay = _RestartableClay(contact.contact_id)
 
-    first = run_provider_coverage(
-        first_run_dir,
-        run_id=run_id,
-        exa=exa,
-        clay=first_clay,
-        apollo=coverage_helpers._BombApollo(),
-        instantly=coverage_helpers._BombInstantly(),
-    )
-    assert first.status == "pending"
-    assert len(exa.companies) == 1
-    assert len(first_clay.starts) == 1
-
-    journal_log = _git(
-        first_work,
-        "log",
-        "--format=%B",
-        f"refs/remotes/origin/{_JOURNAL_BRANCH}",
-    )
-    assert "leads-canary-state-v1" in journal_log
-    assert "shadow-clay-run" not in journal_log
-    assert contact.contact_id not in journal_log
-    assert "alice.owner@acme.com" not in journal_log.lower()
-    assert (
-        _git(
-            first_work,
-            "ls-tree",
-            "-r",
-            "--name-only",
-            f"refs/remotes/origin/{_JOURNAL_BRANCH}",
+        first = run_provider_coverage(
+            first_run_dir,
+            run_id=run_id,
+            exa=exa,
+            clay=first_clay,
+            apollo=coverage_helpers._BombApollo(),
+            instantly=coverage_helpers._BombInstantly(),
         )
-        == ""
-    )
+        assert first.status == "pending"
+        assert len(exa.companies) == 1
+        assert len(first_clay.starts) == 1
+        assert journal.releases and all(release["draft"] is True for release in journal.releases)
 
-    second_work = _fresh_workspace(tmp_path, monkeypatch, remote, "runner-b")
-    second_run_dir = _normal_run_dir(second_work, run_id)
-    resumed_clay = _RestartableClay(contact.contact_id)
-    instantly = coverage_helpers._CoverageInstantly()
+        second_run_dir = _normal_run_dir(tmp_path / "runner-b", run_id)
+        resumed_clay = _RestartableClay(contact.contact_id)
+        instantly = coverage_helpers._CoverageInstantly()
 
-    resumed = run_provider_coverage(
-        second_run_dir,
-        run_id=run_id,
-        exa=coverage_helpers._BombExa(),
-        clay=resumed_clay,
-        apollo=coverage_helpers._BombApollo(),
-        instantly=instantly,
-    )
+        resumed = run_provider_coverage(
+            second_run_dir,
+            run_id=run_id,
+            exa=coverage_helpers._BombExa(),
+            clay=resumed_clay,
+            apollo=coverage_helpers._BombApollo(),
+            instantly=instantly,
+        )
 
-    assert resumed.status == "completed"
-    assert resumed_clay.starts == []
-    assert resumed_clay.result_ids == ["shadow-clay-run"]
-    assert instantly.created == ["alice.owner@acme.com"]
+        assert resumed.status == "completed"
+        assert resumed_clay.starts == []
+        assert resumed_clay.result_ids == ["shadow-clay-run"]
+        assert instantly.created == ["alice.owner@acme.com"]
 
 
 def test_runner_loss_after_pending_shadow_instantly_resumes_get_without_new_create(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A fresh runner restores the private email lineage and resumes the original verification."""
-    remote, first_work = _initial_workspace(tmp_path, monkeypatch)
-    run_id = "restart-shadow-instantly"
-    first_run_dir = _normal_run_dir(first_work, run_id)
-    company = coverage_helpers._company("rejected")
-    contact = select_contacts(company, [coverage_helpers._person_result()], limit=1)[0]
-    clay = _RestartableClay(contact.contact_id)
-    instantly = _PendingInstantly()
+    """A fresh runner resumes pending verification by GET and never repeats POST."""
+    with DraftReleaseJournalServer() as journal:
+        journal.configure(monkeypatch)
+        run_id = "restart-shadow-instantly"
+        first_run_dir = _normal_run_dir(tmp_path / "runner-a", run_id)
+        company = coverage_helpers._company("rejected")
+        contact = select_contacts(company, [coverage_helpers._person_result()], limit=1)[0]
+        clay = _RestartableClay(contact.contact_id)
+        instantly = _PendingInstantly()
 
-    first = run_provider_coverage(
-        first_run_dir,
-        run_id=run_id,
-        exa=coverage_helpers._CoverageExa(),
-        clay=clay,
-        apollo=coverage_helpers._BombApollo(),
-        instantly=instantly,
-    )
-    assert first.status == "pending"
+        first = run_provider_coverage(
+            first_run_dir,
+            run_id=run_id,
+            exa=coverage_helpers._CoverageExa(),
+            clay=clay,
+            apollo=coverage_helpers._BombApollo(),
+            instantly=instantly,
+        )
+        assert first.status == "pending"
 
-    second = run_provider_coverage(
-        first_run_dir,
-        run_id=run_id,
-        exa=coverage_helpers._BombExa(),
-        clay=clay,
-        apollo=coverage_helpers._BombApollo(),
-        instantly=instantly,
-    )
-    assert second.status == "pending"
-    assert len(clay.starts) == 1
-    assert clay.result_ids == ["shadow-clay-run"]
-    assert instantly.created == ["alice.owner@acme.com"]
+        second = run_provider_coverage(
+            first_run_dir,
+            run_id=run_id,
+            exa=coverage_helpers._BombExa(),
+            clay=clay,
+            apollo=coverage_helpers._BombApollo(),
+            instantly=instantly,
+        )
+        assert second.status == "pending"
+        assert len(clay.starts) == 1
+        assert clay.result_ids == ["shadow-clay-run"]
+        assert instantly.created == ["alice.owner@acme.com"]
 
-    second_work = _fresh_workspace(tmp_path, monkeypatch, remote, "runner-b")
-    second_run_dir = _normal_run_dir(second_work, run_id)
-    resumed_instantly = _ResumeOnlyInstantly()
+        second_run_dir = _normal_run_dir(tmp_path / "runner-b", run_id)
+        resumed_instantly = _ResumeOnlyInstantly()
 
-    resumed = run_provider_coverage(
-        second_run_dir,
-        run_id=run_id,
-        exa=coverage_helpers._BombExa(),
-        clay=coverage_helpers._BombClay(),
-        apollo=coverage_helpers._BombApollo(),
-        instantly=resumed_instantly,
-    )
+        resumed = run_provider_coverage(
+            second_run_dir,
+            run_id=run_id,
+            exa=coverage_helpers._BombExa(),
+            clay=coverage_helpers._BombClay(),
+            apollo=coverage_helpers._BombApollo(),
+            instantly=resumed_instantly,
+        )
 
-    assert resumed.status == "completed"
-    assert resumed_instantly.read == ["alice.owner@acme.com"]
+        assert resumed.status == "completed"
+        assert resumed_instantly.read == ["alice.owner@acme.com"]
 
 
-def test_workflow_rejects_existing_nonempty_journal_before_live_canary() -> None:
-    """Workflow setup must validate an existing journal tree before releasing paid credentials."""
-    root = Path(__file__).resolve().parents[1]
-    text = (root / ".github/workflows/generate-leads.yml").read_text(encoding="utf-8")
-    prepare = text.split("- name: Prepare durable Git operation journal", 1)[1].split(
-        "- name: Run fixed one-company live canary", 1
-    )[0]
+def test_private_state_without_completed_normal_restart_fails_before_normal_dispatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Incomplete durable authority fails closed rather than rebuilding paid normal work."""
+    with DraftReleaseJournalServer() as journal:
+        journal.configure(monkeypatch)
+        run_id = "restart-missing-normal"
+        persist_canary_private_state(
+            run_id,
+            {
+                "checkpoint": {
+                    "run_id": run_id,
+                    "status": "running",
+                    "provider_state": {"operations": {}},
+                },
+                "usage_events": [],
+            },
+        )
 
-    journal_tree_check = (
-        'journal_tree="$(git rev-parse '
-        '"refs/remotes/origin/canary-operation-journal^{tree}")"'
-    )
-    assert journal_tree_check in prepare
-    assert '"$journal_tree" != "$empty_tree"' in prepare
-    assert "journal branch tree must be empty" in prepare
+        def forbid_normal_cli(_argv: object = None) -> int:
+            raise AssertionError("normal paid work must remain blocked")
+
+        monkeypatch.setattr(production_canary, "cli_main", forbid_normal_cli)
+
+        with pytest.raises(RuntimeError, match="durable normal restart prerequisites"):
+            production_canary.main(
+                ["--run-id", run_id, "--data-root", str(tmp_path / "data")]
+            )

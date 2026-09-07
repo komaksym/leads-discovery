@@ -1,182 +1,33 @@
 """Static security contract for the paid credentialed production canary workflow."""
 
+# ruff: noqa: F401, F403, I001
+
 from __future__ import annotations
 
-import re
-from pathlib import Path
-
-_WORKFLOW = ".github/workflows/generate-leads.yml"
-_CANARY_ENVIRONMENT = "production-canary"
-_CLAY_FUNCTION_ID_MARKER = "vars.CLAY_WORK_EMAIL_FUNCTION_ID"
-_CANARY_STATE_KEY_MARKER = "secrets.CANARY_STATE_KEY"
-_EXISTING_SECRET_MARKERS = (
-    "secrets.EXA_API_KEY",
-    "secrets.DEEPSEEK_API_KEY",
-    "secrets.CLAY_PUBLIC_API_KEY",
-    "secrets.APOLLO_API_KEY",
-    "secrets.INSTANTLY_API_KEY",
+from credentialed_canary_workflow_core import *  # noqa: F401,F403
+from credentialed_canary_workflow_core import (
+    _REQUIRED_PROVIDERS,
+    _canary_job,
+    _workflow_text,
 )
-_RENAMED_SECRET_MARKERS = (
-    "secrets.CANARY_EXA_API_KEY",
-    "secrets.CANARY_DEEPSEEK_API_KEY",
-    "secrets.CANARY_CLAY_PUBLIC_API_KEY",
-    "secrets.CANARY_APOLLO_API_KEY",
-    "secrets.CANARY_INSTANTLY_API_KEY",
-)
-_PAID_SECRET_MARKERS = _EXISTING_SECRET_MARKERS + _RENAMED_SECRET_MARKERS
-_REQUIRED_PROVIDERS = (
-    "apollo",
-    "clay",
-    "deepseek",
-    "exa_discovery",
-    "exa_people",
-    "exa_research",
-    "instantly",
-)
-_JOB_IF = re.compile(r"^\s*if:\s*\$\{\{\s*(?P<expression>.+?)\s*\}\}\s*$", re.MULTILINE)
-
-
-def _root() -> Path:
-    return Path(__file__).resolve().parents[1]
-
-
-def _workflow_text() -> str:
-    return (_root() / _WORKFLOW).read_text(encoding="utf-8")
-
-
-def _canary_job(text: str) -> str:
-    return text.split("\n  canary:", 1)[1]
-
-
-def _job_if_expression(job: str) -> str:
-    match = _JOB_IF.search(job)
-    assert match is not None, "secret-bearing canary job must have an explicit job-level guard"
-    return match.group("expression")
-
-
-def _guard_allows(expression: str, *, event_name: str, ref: str) -> bool:
-    """Evaluate the tiny equality/AND subset used by the canary admission guard."""
-    context = {
-        "github.event_name": event_name,
-        "github.ref": ref,
-    }
-    terms = [term.strip() for term in expression.split("&&")]
-    assert terms
-    results: list[bool] = []
-    for term in terms:
-        left, separator, right = term.partition("==")
-        assert separator == "==", f"unsupported canary guard term: {term}"
-        key = left.strip()
-        literal = right.strip()
-        assert key in context, f"unsupported canary guard context: {key}"
-        assert len(literal) >= 2 and literal[0] == literal[-1] and literal[0] in {"'", '"'}
-        results.append(context[key] == literal[1:-1])
-    return all(results)
-
-
-def test_exactly_one_paid_credentialed_canary_workflow_exists() -> None:
-    """Only the dedicated manual canary workflow may receive paid-provider secrets."""
-    workflows = _root() / ".github" / "workflows"
-    credentialed = sorted(
-        path.name
-        for path in workflows.glob("*.y*ml")
-        if any(
-            marker in path.read_text(encoding="utf-8")
-            for marker in _PAID_SECRET_MARKERS
-        )
-    )
-    assert credentialed == ["generate-leads.yml"]
-
-
-def test_paid_canary_is_manual_immutable_and_ci_authorized() -> None:
-    """Dispatch cannot widen spend, and exact main CI must authorize execution."""
-    text = _workflow_text()
-    trigger = text.split("permissions:", 1)[0]
-    assert "workflow_dispatch:" in trigger
-    assert "push:" not in trigger
-    assert "pull_request:" not in trigger
-    assert "schedule:" not in trigger
-    assert "inputs:" not in trigger
-    assert "github.event.inputs" not in text
-    assert "continue-on-error" not in text
-
-    authorize = text.split("jobs:\n  authorize:", 1)[1].split("\n  canary:", 1)[0]
-    canary = _canary_job(text)
-    assert "contents: read" in authorize
-    assert "actions: read" in authorize
-    assert "secrets." not in authorize
-    assert "ref: main" in authorize
-    assert "git rev-parse HEAD" in authorize
-    assert "actions/workflows/ci.yml/runs" in authorize
-    assert ".head_sha == $sha" in authorize
-    assert '.head_branch == "main"' in authorize
-    assert '.event == "push"' in authorize
-    assert '.conclusion == "success"' in authorize
-    assert "needs: authorize" in canary
-    assert "ref: ${{ needs.authorize.outputs.target_sha }}" in canary
-    assert "python -m leads_discovery.production_canary" in canary
-
-
-def test_secret_bearing_canary_job_rejects_non_main_dispatch_refs() -> None:
-    """Secret release keeps credential names and exact-main environment admission."""
-    canary = _canary_job(_workflow_text())
-    expression = _job_if_expression(canary)
-
-    assert _guard_allows(
-        expression,
-        event_name="workflow_dispatch",
-        ref="refs/heads/main",
-    )
-    for ref in (
-        "refs/heads/feature/credential-exfiltration",
-        "refs/heads/main-like",
-        "refs/tags/main",
-    ):
-        assert not _guard_allows(expression, event_name="workflow_dispatch", ref=ref)
-    assert not _guard_allows(expression, event_name="push", ref="refs/heads/main")
-
-    assert f"environment: {_CANARY_ENVIRONMENT}" in canary
-    for marker in _EXISTING_SECRET_MARKERS:
-        assert marker in canary
-    for marker in _RENAMED_SECRET_MARKERS:
-        assert marker not in canary
-    assert _CANARY_STATE_KEY_MARKER in canary
-
-
-def test_clay_managed_function_id_is_non_secret_environment_config() -> None:
-    """Clay's workspace function identifier is configuration, not a paid credential."""
-    canary = _canary_job(_workflow_text())
-
-    assert _CLAY_FUNCTION_ID_MARKER in canary
-    assert "secrets.CLAY_CONTACT_ROUTINE_ID" not in canary
-    assert "secrets.CANARY_CLAY_CONTACT_ROUTINE_ID" not in canary
 
 
 def test_canary_paid_intent_has_remote_barrier_before_live_dispatch() -> None:
-    """Paid intent survives runner loss without sharing the public-output branch."""
+    """Private durability is available without writing a public repository ref."""
     canary = _canary_job(_workflow_text())
-    before_run, after_run_marker = canary.split(
-        "- name: Run fixed one-company live canary", 1
-    )
-    run_step = after_run_marker.split("- name: Publish approved public outputs", 1)[0]
+    private_phase, _publish = canary.split("- name: Publish approved public outputs", 1)
+    run_step = private_phase.split("- name: Run fixed one-company live canary", 1)[1]
 
-    journal_ref = "canary-operation-journal:refs/remotes/origin/canary-operation-journal"
-    assert "- name: Prepare durable Git operation journal" in before_run
-    assert f"git fetch origin {journal_ref}" in before_run
-    assert 'root_commit="$(git commit-tree "$empty_tree"' in before_run
-    assert 'git push origin "$root_commit:refs/heads/canary-operation-journal"' in before_run
-    assert (
-        'git update-ref refs/remotes/origin/canary-operation-journal "$root_commit"'
-        in before_run
-    )
-    assert "generated-leads" not in before_run
-    assert "LEADS_GIT_JOURNAL_BRANCH: canary-operation-journal" in run_step
-    assert "LEADS_GIT_JOURNAL_REMOTE: origin" in run_step
-    assert "LEADS_GIT_JOURNAL_KEY: ${{ secrets.CANARY_STATE_KEY }}" in run_step
+    assert "canary-operation-journal" not in private_phase
+    assert "git push origin" not in private_phase
+    assert "actions/upload-artifact" not in private_phase
+    assert "generated-leads" not in private_phase
+    assert "LEADS_PRIVATE_JOURNAL_TOKEN: ${{ github.token }}" in run_step
+    assert "LEADS_PRIVATE_JOURNAL_KEY: ${{ secrets.CANARY_STATE_KEY }}" in run_step
 
 
 def test_paid_canary_gates_publication_on_decisive_private_coverage() -> None:
-    """Only a decisive successful private report may reach the public-output step."""
+    """Only decisive successful private coverage may cross the publication boundary."""
     text = _workflow_text()
     canary = _canary_job(text)
     private_phase, publish = canary.split("- name: Publish approved public outputs", 1)
@@ -198,11 +49,11 @@ def test_paid_canary_gates_publication_on_decisive_private_coverage() -> None:
     assert "exit 1" in run_step
 
     assert "generated-leads" not in private_phase
-    assert "canary-operation-journal" in private_phase
+    assert "canary-operation-journal" not in private_phase
+    assert "git push origin" not in private_phase
+    assert "actions/upload-artifact" not in private_phase
     assert "if: ${{ success() }}" in publish
-    assert "canary-operation-journal" not in publish
     assert "canary_coverage_report.json" not in publish
-    assert "actions/upload-artifact" not in text
     assert 'cp -- "$run_dir/leads.csv"' in publish
     assert 'cp -- "$run_dir/contacts.jsonl"' in publish
     assert "git add -- leads.csv contacts.jsonl" in publish

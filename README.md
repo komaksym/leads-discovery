@@ -29,7 +29,7 @@ APOLLO_API_KEY=
 INSTANTLY_API_KEY=
 ```
 
-The GitHub-hosted production canary also requires a stable `CANARY_STATE_KEY` secret in the `production-canary` Environment. It encrypts the bounded restart capsule used to resume private canary paid work after ephemeral runner loss; it is not a provider credential and must be at least 32 UTF-8 bytes.
+The GitHub-hosted production canary also requires a stable `CANARY_STATE_KEY` secret in the `production-canary` Environment. It encrypts the bounded private draft-release restart/barrier journal used to resume canary paid work after ephemeral runner loss; it is not a provider credential and must be at least 32 UTF-8 bytes.
 
 Do not put credentials on the command line or in committed files.
 
@@ -287,8 +287,8 @@ The canary is deliberately a credentialed smoke test, not the normal batch entry
 
 The canary may make one Apollo shadow coverage call even when normal M4 correctly skipped Apollo because normal Clay produced a usable work email. That call is authorized only from durable normal-M4 evidence for the same accepted contact and only when the shared Apollo canary allowance is unused. It is coverage evidence only: shadow output never changes canonical contact truth, normal fallback history, or the normal M4 checkpoint, and normal plus shadow Apollo work still shares one fixed allowance.
 
-The workflow has no safety-limit inputs: the application fixes the canary at one company, one paid contact, tiny provider quotas, and tiny spend/storage ceilings. Paid-operation barriers are written durably before dispatch. Canary-private checkpoint/usage authority is additionally mirrored as a bounded authenticated encrypted restart capsule on the separate `canary-operation-journal` branch so pending Clay/Instantly shadow work can resume the same persisted operation identity after runner loss rather than starting replacement paid work. A missing, conflicting, or undecryptable capsule fails closed.
+The workflow has no safety-limit inputs: the application fixes the canary at one company, one paid contact, tiny provider quotas, and tiny spend/storage ceilings. Before a paid canary dispatch, the operation barrier is authenticated, encrypted, and durably stored as a private asset on an unpublished draft GitHub Release. Canary-private pending checkpoint/usage authority is stored in the same durable transition so a fresh runner resumes the same Clay/Instantly identity instead of starting replacement paid work. A bounded completed-normal restart snapshot is stored privately before the first shadow barrier so runner loss cannot cause normal `run`/`enrich` redispatch after those stages completed. Missing, conflicting, malformed, over-bound, non-draft, or undecryptable durable authority fails closed.
 
-Only `leads.csv` and `contacts.jsonl` are published to the dedicated `generated-leads` Git branch. Plaintext checkpoints, usage ledgers, provider payloads, coverage evidence, credentials, temporary files, and debug state are not published as branch files or Actions artifacts. The operational `canary-operation-journal` branch keeps an empty tree and stores only opaque barrier metadata plus encrypted restart ciphertext; it is not the generated-lead publication surface.
+Only `leads.csv` and `contacts.jsonl` are published to the dedicated `generated-leads` Git branch. Plaintext checkpoints, usage ledgers, provider payloads, coverage evidence, credentials, temporary files, debug state, restart state, and shadow evidence are not published as public Git refs, published release assets, Actions artifacts, or Actions caches. The encrypted durability store remains an unpublished draft release visible only to users with push access and must never be published. The workflow does not create an operational journal branch.
 
 A real credentialed one-company workflow run is the final external acceptance gate. Automated CI and development remain offline and do not prove live provider compatibility.
