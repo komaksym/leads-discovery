@@ -221,18 +221,18 @@ def test_crash_after_remote_pending_state_restores_same_clay_identity_without_re
             raise RuntimeError("simulated runner loss before local checkpoint replacement")
         original_write_json_atomic(path, payload)
 
-    with monkeypatch.context() as crash_patch:
-        crash_patch.setattr(state_module, "write_json_atomic", crash_before_private_checkpoint_replace)
-        with pytest.raises(RuntimeError, match="simulated runner loss"):
-            run_provider_coverage(
-                first_run_dir,
-                run_id=run_id,
-                exa=coverage_helpers._CoverageExa(),
-                clay=first_clay,
-                apollo=coverage_helpers._BombApollo(),
-                instantly=coverage_helpers._BombInstantly(),
-            )
+    monkeypatch.setattr(state_module, "write_json_atomic", crash_before_private_checkpoint_replace)
+    with pytest.raises(RuntimeError, match="simulated runner loss"):
+        run_provider_coverage(
+            first_run_dir,
+            run_id=run_id,
+            exa=coverage_helpers._CoverageExa(),
+            clay=first_clay,
+            apollo=coverage_helpers._BombApollo(),
+            instantly=coverage_helpers._BombInstantly(),
+        )
 
+    monkeypatch.setattr(state_module, "write_json_atomic", original_write_json_atomic)
     assert len(first_clay.starts) == 1
 
     second_work = _fresh_workspace(tmp_path, monkeypatch, remote, "runner-b")
