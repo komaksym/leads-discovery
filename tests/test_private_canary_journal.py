@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from private_journal_http import DraftReleaseJournalServer
 
 from leads_discovery.models import RunCheckpoint
 from leads_discovery.pipeline.git_journal import (
@@ -12,7 +13,6 @@ from leads_discovery.pipeline.git_journal import (
     persist_canary_private_state,
     sync_checkpoint_barrier,
 )
-from private_journal_http import DraftReleaseJournalServer
 
 
 def _private_checkpoint(run_id: str, *, state: str = "pending") -> RunCheckpoint:

@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 import test_canary_provider_coverage as coverage_helpers
+from private_journal_http import DraftReleaseJournalServer
 
 from leads_discovery import production_canary
 from leads_discovery.contacts.models import ContactRecord
@@ -18,7 +19,6 @@ from leads_discovery.contacts.providers import (
 from leads_discovery.contacts.selection import select_contacts
 from leads_discovery.pipeline.canary_provider_coverage import run_provider_coverage
 from leads_discovery.pipeline.git_journal import persist_canary_private_state
-from private_journal_http import DraftReleaseJournalServer
 
 _LEADS_HEADER = "company_id,contact_id,work_email,email_verification_status,email_source\n"
 
@@ -173,7 +173,9 @@ def test_runner_loss_after_pending_shadow_clay_resumes_same_routine_without_new_
         assert first.status == "pending"
         assert len(exa.companies) == 1
         assert len(first_clay.starts) == 1
-        assert journal.releases and all(release["draft"] is True for release in journal.releases)
+        assert journal.releases and all(
+            release["draft"] is True for release in journal.releases
+        )
 
         second_run_dir = _normal_run_dir(tmp_path / "runner-b", run_id)
         resumed_clay = _RestartableClay(contact.contact_id)
