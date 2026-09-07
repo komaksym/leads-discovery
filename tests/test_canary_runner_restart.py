@@ -32,6 +32,17 @@ def _git(cwd: Path, *args: str) -> None:
     )
 
 
+def _git_output(cwd: Path, *args: str) -> str:
+    """Return stdout from one local Git command for journal assertions."""
+    return subprocess.run(
+        ["git", *args],
+        cwd=cwd,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+
+
 def _configure_identity(work: Path) -> None:
     """Configure commit-tree identity used by the production Git journal."""
     _git(work, "config", "user.name", "Test Bot")
@@ -186,6 +197,17 @@ def test_runner_loss_after_pending_shadow_clay_resumes_same_routine_without_new_
     assert first.status == "pending"
     assert len(exa.companies) == 1
     assert len(first_clay.starts) == 1
+
+    journal_log = _git_output(
+        first_work,
+        "log",
+        "--format=%B",
+        f"refs/remotes/origin/{_JOURNAL_BRANCH}",
+    )
+    assert "leads-canary-state-v1" in journal_log
+    assert "shadow-clay-run" not in journal_log
+    assert contact.contact_id not in journal_log
+    assert "alice.owner@acme.com" not in journal_log.lower()
 
     second_work = _fresh_workspace(tmp_path, monkeypatch, remote, "runner-b")
     second_run_dir = _normal_run_dir(second_work, run_id)
