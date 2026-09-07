@@ -71,13 +71,13 @@ def _write_contact_status(
     )
 
 
-def test_successful_coverage_only_waterfall_uses_selected_contact_without_mutating_normal_state(
+def test_coverage_only_clay_verifies_selected_contact_without_mutating_normal_state(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Coverage-only Clay resumes in one canary call and cannot change canonical M4 state."""
+    """Coverage Clay may feed verification but cannot authorize Apollo or mutate M4."""
     run_id = "canary-review-coverage-immutability"
-    clay = ClayRoutineScript([])
+    clay = ClayRoutineScript([{"work_email": _EMAIL}])
 
     def apollo(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(
@@ -146,20 +146,10 @@ def test_successful_coverage_only_waterfall_uses_selected_contact_without_mutati
         "Social Profile URL": expected.linkedin_url or expected.profile_url,
     }
 
-    apollo_requests = stub.for_provider("apollo")
-    assert len(apollo_requests) == 1
-    apollo_body = json_body(apollo_requests[0])
-    assert {
-        "name": apollo_body["name"],
-        "domain": apollo_body["domain"],
-        "organization_name": apollo_body["organization_name"],
-        "linkedin_url": apollo_body["linkedin_url"],
-    } == {
-        "name": expected.full_name,
-        "domain": expected.company_domain,
-        "organization_name": expected.company_name,
-        "linkedin_url": expected.linkedin_url,
-    }
+    assert stub.for_provider("apollo") == []
+    instantly_requests = stub.for_provider("instantly")
+    assert len(instantly_requests) == 1
+    assert json_body(instantly_requests[0])["email"] == _EMAIL
 
 
 def test_normal_m4_completes_after_same_run_pending_resume_without_second_clay_start(

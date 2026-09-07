@@ -10,6 +10,7 @@ from typing import Any, Final, Literal, cast
 
 from leads_discovery.contacts.models import ContactRecord
 from leads_discovery.contacts.providers import usable_work_email
+from leads_discovery.contacts.selection import contact_decision_order_key
 from leads_discovery.models import CompanyRecord, RunCheckpoint, UsageEvent
 from leads_discovery.pipeline.canary_paid_operations import CanaryPaidOperations
 from leads_discovery.pipeline.contact_enrichment import (
@@ -506,6 +507,61 @@ def _m1_m3(state: _State) -> tuple[IntegrationCoverage, ...]:
     return cast(tuple[IntegrationCoverage, ...], rows)
 
 
+def _normal_clay_skip_prerequisite(state: _State) -> bool:
+    """Return whether normal M4 selected a contact then skipped Apollo after Clay email."""
+    checkpoint = state.contact_checkpoint
+    accepted = [
+        company
+        for company in state.companies
+        if company.stage_status.get("decision") == "completed"
+        and company.final_decision == "accepted"
+    ]
+    if checkpoint is None or len(accepted) != 1:
+        return False
+    company = accepted[0]
+    operations = _operations(checkpoint)
+    exa_entry = operations.get(f"exa:{company.company_id}")
+    clay_entry = operations.get("clay:batch")
+    if (
+        not isinstance(exa_entry, dict)
+        or exa_entry.get("state") != "completed"
+        or not isinstance(clay_entry, dict)
+        or clay_entry.get("state") != "completed"
+    ):
+        return False
+    exa_ids = exa_entry.get("contact_ids")
+    clay_ids = clay_entry.get("contact_ids")
+    if not isinstance(exa_ids, list) or not isinstance(clay_ids, list):
+        return False
+    if _requests(_matching(state.contact_usage, "exa", {"people_search"})) <= 0:
+        return False
+    if (
+        _requests(_matching(state.contact_usage, "clay", {"work_email_routine_start"})) <= 0
+        or _requests(
+            _matching(state.contact_usage, "clay", {"work_email_routine_results"})
+        )
+        <= 0
+    ):
+        return False
+    contacts_by_id = {contact.contact_id: contact for contact in state.contacts}
+    selected = [
+        contacts_by_id[contact_id]
+        for contact_id in exa_ids
+        if isinstance(contact_id, str)
+        and contact_id in contacts_by_id
+        and contacts_by_id[contact_id].company_id == company.company_id
+    ]
+    if not selected:
+        return False
+    selected.sort(key=contact_decision_order_key)
+    contact = selected[0]
+    return (
+        contact.contact_id in clay_ids
+        and contact.email_source == "clay"
+        and usable_work_email(contact.work_email) is not None
+    )
+
+
 def _m4(state: _State) -> tuple[IntegrationCoverage, ...]:
     accepted = any(
         company.stage_status.get("decision") == "completed"
@@ -542,24 +598,32 @@ def _m4(state: _State) -> tuple[IntegrationCoverage, ...]:
             "not_exercised", 0, 0,
         )
 
-    apollo_prerequisite = (
-        has_contact
-        and clay.integration_outcome == "success"
-        and clay.business_outcome == "email_found"
-    )
+    apollo_prerequisite = _normal_clay_skip_prerequisite(state)
     apollo_deferred_by_pending_poll = (
         apollo_prerequisite
         and state.contact_checkpoint is not None
         and state.contact_checkpoint.status == "paused_pending"
         and _instantly_business(state) == "pending"
     )
-    apollo = _normal_integration(
+    normal_apollo = _normal_integration(
         state, "apollo", "apollo", {"people_enrichment"}, "apollo:",
-        apollo_prerequisite, _apollo_business(state),
-    ) or _private_integration(
+        False, _apollo_business(state),
+    )
+    private_apollo = _private_integration(
         state, "apollo", "coverage:apollo", "apollo", {"people_enrichment"}
     )
-    if apollo is None:
+    if normal_apollo is not None:
+        apollo = normal_apollo
+    elif private_apollo is not None:
+        apollo = (
+            private_apollo
+            if apollo_prerequisite
+            else _coverage(
+                "apollo", "coverage_only", "failure", "invalid_evidence",
+                private_apollo.operation_count, private_apollo.request_count,
+            )
+        )
+    else:
         apollo = _coverage(
             "apollo", "coverage_only",
             (
