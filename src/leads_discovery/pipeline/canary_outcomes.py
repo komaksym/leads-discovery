@@ -10,8 +10,8 @@ from typing import Any, Final, Literal, cast
 
 from leads_discovery.contacts.models import ContactRecord
 from leads_discovery.contacts.providers import usable_work_email
-from leads_discovery.contacts.selection import contact_decision_order_key
 from leads_discovery.models import CompanyRecord, RunCheckpoint, UsageEvent
+from leads_discovery.pipeline.canary_m4_evidence import normal_apollo_shadow_authorization
 from leads_discovery.pipeline.canary_paid_operations import CanaryPaidOperations
 from leads_discovery.pipeline.contact_enrichment import (
     ContactEnrichmentConfig,
@@ -507,61 +507,6 @@ def _m1_m3(state: _State) -> tuple[IntegrationCoverage, ...]:
     return cast(tuple[IntegrationCoverage, ...], rows)
 
 
-def _normal_clay_skip_prerequisite(state: _State) -> bool:
-    """Return whether normal M4 selected a contact then skipped Apollo after Clay email."""
-    checkpoint = state.contact_checkpoint
-    accepted = [
-        company
-        for company in state.companies
-        if company.stage_status.get("decision") == "completed"
-        and company.final_decision == "accepted"
-    ]
-    if checkpoint is None or len(accepted) != 1:
-        return False
-    company = accepted[0]
-    operations = _operations(checkpoint)
-    exa_entry = operations.get(f"exa:{company.company_id}")
-    clay_entry = operations.get("clay:batch")
-    if (
-        not isinstance(exa_entry, dict)
-        or exa_entry.get("state") != "completed"
-        or not isinstance(clay_entry, dict)
-        or clay_entry.get("state") != "completed"
-    ):
-        return False
-    exa_ids = exa_entry.get("contact_ids")
-    clay_ids = clay_entry.get("contact_ids")
-    if not isinstance(exa_ids, list) or not isinstance(clay_ids, list):
-        return False
-    if _requests(_matching(state.contact_usage, "exa", {"people_search"})) <= 0:
-        return False
-    if (
-        _requests(_matching(state.contact_usage, "clay", {"work_email_routine_start"})) <= 0
-        or _requests(
-            _matching(state.contact_usage, "clay", {"work_email_routine_results"})
-        )
-        <= 0
-    ):
-        return False
-    contacts_by_id = {contact.contact_id: contact for contact in state.contacts}
-    selected = [
-        contacts_by_id[contact_id]
-        for contact_id in exa_ids
-        if isinstance(contact_id, str)
-        and contact_id in contacts_by_id
-        and contacts_by_id[contact_id].company_id == company.company_id
-    ]
-    if not selected:
-        return False
-    selected.sort(key=contact_decision_order_key)
-    contact = selected[0]
-    return (
-        contact.contact_id in clay_ids
-        and contact.email_source == "clay"
-        and usable_work_email(contact.work_email) is not None
-    )
-
-
 def _m4(state: _State) -> tuple[IntegrationCoverage, ...]:
     accepted = any(
         company.stage_status.get("decision") == "completed"
@@ -598,7 +543,16 @@ def _m4(state: _State) -> tuple[IntegrationCoverage, ...]:
             "not_exercised", 0, 0,
         )
 
-    apollo_prerequisite = _normal_clay_skip_prerequisite(state)
+    try:
+        apollo_authorization = normal_apollo_shadow_authorization(
+            companies=state.companies,
+            contacts=state.contacts,
+            operations=_operations(state.contact_checkpoint),
+            usage_events=state.contact_usage,
+        )
+    except ValueError:
+        apollo_authorization = None
+    apollo_prerequisite = apollo_authorization is not None
     apollo_deferred_by_pending_poll = (
         apollo_prerequisite
         and state.contact_checkpoint is not None

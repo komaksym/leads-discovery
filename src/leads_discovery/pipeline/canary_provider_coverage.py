@@ -27,6 +27,7 @@ from leads_discovery.contacts.providers import (
 )
 from leads_discovery.contacts.selection import contact_decision_order_key, select_contacts
 from leads_discovery.models import CompanyRecord, RunCheckpoint, UsageEvent
+from leads_discovery.pipeline.canary_m4_evidence import normal_apollo_shadow_authorization
 from leads_discovery.pipeline.canary_paid_operations import CanaryPaidOperations
 from leads_discovery.pipeline.state import load_jsonl, load_usage_events, read_json
 
@@ -408,49 +409,6 @@ def _clay_email(
     return email, False
 
 
-def _normal_clay_skip_prerequisite(
-    company: CompanyRecord,
-    contact: ContactRecord,
-    normal_contact: ContactRecord | None,
-    normal_exa_completed: bool,
-    normal_operations: dict[str, dict[str, Any]],
-    normal_usage: list[UsageEvent],
-) -> bool:
-    """Allow private Apollo only when normal M4 skipped it after durable Clay success."""
-    if (
-        company.final_decision != "accepted"
-        or not normal_exa_completed
-        or normal_contact is None
-        or contact.contact_id != normal_contact.contact_id
-    ):
-        return False
-    normal_entry = _normal_operation_evidence(
-        normal_operations,
-        normal_usage,
-        operation_id="clay:batch",
-        provider="clay",
-        operation="work_email_routine_start",
-    )
-    if normal_entry is None:
-        return False
-    raw_ids = normal_entry.get("contact_ids")
-    if not isinstance(raw_ids, list) or contact.contact_id not in raw_ids:
-        raise ValueError("normal Clay provider operation does not name the selected contact")
-    result_requests = sum(
-        event.request_count
-        for event in normal_usage
-        if event.provider == "clay" and event.operation == "work_email_routine_results"
-    )
-    if result_requests <= 0:
-        raise ValueError(
-            "normal Clay completed provider operation lacks authoritative results usage"
-        )
-    return (
-        contact.email_source == "clay"
-        and usable_work_email(contact.work_email) is not None
-    )
-
-
 def _finite_nonnegative(value: float, label: str) -> float:
     """Reject malformed quota evidence before it enters private accounting."""
     if not math.isfinite(value) or value < 0:
@@ -719,13 +677,11 @@ def run_provider_coverage(
     )
     if clay_pending:
         return _finish_summary(paid, run_id, pending=True)
-    normal_clay_skip_prerequisite = _normal_clay_skip_prerequisite(
-        company,
-        contact,
-        normal_contact,
-        normal_exa_completed,
-        normal_operations,
-        normal_usage,
+    apollo_authorization = normal_apollo_shadow_authorization(
+        companies=(company,),
+        contacts=tuple(contacts.values()),
+        operations=normal_operations,
+        usage_events=normal_usage,
     )
     apollo_email = _apollo_email(
         paid,
@@ -733,7 +689,10 @@ def run_provider_coverage(
         normal_operations,
         normal_usage,
         apollo,
-        allow_shadow_dispatch=normal_clay_skip_prerequisite,
+        allow_shadow_dispatch=(
+            apollo_authorization is not None
+            and apollo_authorization.contact_id == contact.contact_id
+        ),
     )
     verification_email = clay_email or apollo_email
     if verification_email is None:
