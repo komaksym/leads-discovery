@@ -240,7 +240,12 @@ def _decode_state(prefix: str, run_id: str, encoded_text: str) -> dict[str, Any]
     return payload
 
 
-def _load_capsule(run_id: str, *, prefix: str, subject: str) -> dict[str, Any] | None:
+def _load_capsule(
+    run_id: str,
+    *,
+    prefix: str,
+    subject: str,
+) -> dict[str, Any] | None:
     config = _configured()
     if config is None:
         return None
@@ -353,7 +358,11 @@ def _planned_barriers(
                 )
         if latest == desired:
             continue
-        if state == "in_flight" and old_state == "in_flight" and latest_state != "in_flight":
+        if (
+            state == "in_flight"
+            and old_state == "in_flight"
+            and latest_state != "in_flight"
+        ):
             raise RuntimeError("local in-flight operation disagrees with durable Git barrier")
         barriers.append(desired)
     return barriers
@@ -376,14 +385,17 @@ def _atomic_private_state(
     checkpoint: RunCheckpoint,
     previous: RunCheckpoint | None,
 ) -> dict[str, Any] | None:
-    """Compose a checkpoint transition with the last remotely durable authoritative usage."""
+    """Compose a transition with the last remotely durable authoritative usage."""
     if not _looks_like_canary_private(checkpoint):
         return None
     remote = load_canary_private_state(checkpoint.run_id)
     usage_events: list[dict[str, Any]] = []
     if remote is not None:
         raw_usage = remote.get("usage_events")
-        if not isinstance(raw_usage, list) or any(not isinstance(row, dict) for row in raw_usage):
+        invalid_usage = not isinstance(raw_usage, list) or any(
+            not isinstance(row, dict) for row in raw_usage
+        )
+        if invalid_usage:
             raise ValueError("canary private Git journal usage state is invalid")
         usage_events = raw_usage
     elif previous is not None and _looks_like_canary_private(previous):
@@ -412,13 +424,17 @@ def sync_checkpoint_barrier(
     barriers = _planned_barriers(root, ref, checkpoint, previous)
     private_state = _atomic_private_state(checkpoint, previous)
     if private_state is not None:
-        body_lines = [*barriers, _CAPSULE_PREFIX + _encode_state(_STATE_PREFIX, checkpoint.run_id, private_state)]
+        capsule = _CAPSULE_PREFIX + _encode_state(
+            _STATE_PREFIX,
+            checkpoint.run_id,
+            private_state,
+        )
         _append_message(
             root,
             remote,
             branch,
             _state_subject(checkpoint.run_id),
-            "\n".join(body_lines),
+            "\n".join([*barriers, capsule]),
         )
         return
     for desired in barriers:

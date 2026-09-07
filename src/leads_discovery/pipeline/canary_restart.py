@@ -83,7 +83,10 @@ class CanaryRestartState:
 
         def rows(name: str) -> tuple[dict[str, Any], ...]:
             value = payload[name]
-            if not isinstance(value, list) or any(not isinstance(row, dict) for row in value):
+            invalid = not isinstance(value, list) or any(
+                not isinstance(row, dict) for row in value
+            )
+            if invalid:
                 raise ValueError(f"canary normal restart {name} is invalid")
             return tuple(cast(dict[str, Any], row) for row in value)
 
@@ -167,9 +170,15 @@ def snapshot_canary_restart_state(run_dir: Path, *, run_id: str) -> None:
         {
             "checkpoint": _required_json(run_dir / "checkpoint.json"),
             "usage_events": load_jsonl(run_dir / "usage_events.jsonl"),
-            "companies_evaluated": load_jsonl(run_dir / "companies_evaluated.jsonl"),
-            "contact_checkpoint": _required_json(run_dir / "contact_checkpoint.json"),
-            "contact_usage_events": load_jsonl(run_dir / "contact_usage_events.jsonl"),
+            "companies_evaluated": load_jsonl(
+                run_dir / "companies_evaluated.jsonl"
+            ),
+            "contact_checkpoint": _required_json(
+                run_dir / "contact_checkpoint.json"
+            ),
+            "contact_usage_events": load_jsonl(
+                run_dir / "contact_usage_events.jsonl"
+            ),
             "contacts": load_jsonl(run_dir / "contacts.jsonl"),
             "leads_csv": _leads_text(run_dir / "leads.csv"),
         },
@@ -213,13 +222,21 @@ def restore_canary_restart_state(data_root: Path, *, run_id: str) -> bool:
     state = CanaryRestartState.from_dict(payload, run_id=run_id)
     run_dir = _run_dir(data_root, run_id, require_existing=False)
     if not _matches_local(run_dir, state):
-        raise RuntimeError("runner-local normal canary state disagrees with durable restart state")
+        raise RuntimeError(
+            "runner-local normal canary state disagrees with durable restart state"
+        )
 
     write_json_atomic(run_dir / "checkpoint.json", state.checkpoint)
     write_jsonl_atomic(run_dir / "usage_events.jsonl", state.usage_events)
-    write_jsonl_atomic(run_dir / "companies_evaluated.jsonl", state.companies_evaluated)
+    write_jsonl_atomic(
+        run_dir / "companies_evaluated.jsonl",
+        state.companies_evaluated,
+    )
     write_json_atomic(run_dir / "contact_checkpoint.json", state.contact_checkpoint)
-    write_jsonl_atomic(run_dir / "contact_usage_events.jsonl", state.contact_usage_events)
+    write_jsonl_atomic(
+        run_dir / "contact_usage_events.jsonl",
+        state.contact_usage_events,
+    )
     write_jsonl_atomic(run_dir / "contacts.jsonl", state.contacts)
     write_text_atomic(run_dir / "leads.csv", state.leads_csv)
     return True
