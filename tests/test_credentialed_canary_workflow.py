@@ -160,15 +160,19 @@ def test_canary_paid_intent_has_remote_barrier_before_live_dispatch() -> None:
     )
     run_step = after_run_marker.split("- name: Publish approved public outputs", 1)[0]
 
+    journal_ref = "canary-operation-journal:refs/remotes/origin/canary-operation-journal"
     assert "- name: Prepare durable Git operation journal" in before_run
-    assert "git fetch origin canary-operation-journal:refs/remotes/origin/canary-operation-journal" in before_run
+    assert f"git fetch origin {journal_ref}" in before_run
     assert 'root_commit="$(git commit-tree "$empty_tree"' in before_run
     assert 'git push origin "$root_commit:refs/heads/canary-operation-journal"' in before_run
-    assert 'git update-ref refs/remotes/origin/canary-operation-journal "$root_commit"' in before_run
+    assert (
+        'git update-ref refs/remotes/origin/canary-operation-journal "$root_commit"'
+        in before_run
+    )
     assert "generated-leads" not in before_run
     assert "LEADS_GIT_JOURNAL_BRANCH: canary-operation-journal" in run_step
     assert "LEADS_GIT_JOURNAL_REMOTE: origin" in run_step
-    assert f"LEADS_GIT_JOURNAL_KEY: ${{{{ {_CANARY_STATE_KEY_MARKER} }}}}" in run_step
+    assert "LEADS_GIT_JOURNAL_KEY: ${{ secrets.CANARY_STATE_KEY }}" in run_step
 
 
 def test_paid_canary_gates_publication_on_decisive_private_coverage() -> None:

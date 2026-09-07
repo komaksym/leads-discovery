@@ -14,11 +14,9 @@ from leads_discovery.models import CompanyRecord, UsageEvent
 
 @dataclass(frozen=True, slots=True)
 class ApolloShadowAuthorization:
-    """Identify the normal Clay-success contact allowed one Apollo shadow call."""
+    """Identify the exact normal Clay-success contact allowed one Apollo shadow call."""
 
-    company_id: str
     contact_id: str
-    work_email: str
 
 
 def _requests(
@@ -89,8 +87,7 @@ def normal_apollo_shadow_authorization(
     contact = selected[0]
     if contact.contact_id not in clay_ids or contact.email_source != "clay":
         return None
-    email = usable_work_email(contact.work_email)
-    if email is None:
+    if usable_work_email(contact.work_email) is None:
         return None
 
     normal_apollo_used = any(key.startswith("apollo:") for key in operations) or (
@@ -98,7 +95,7 @@ def normal_apollo_shadow_authorization(
     )
     if normal_apollo_used:
         return None
-    return ApolloShadowAuthorization(company.company_id, contact.contact_id, email)
+    return ApolloShadowAuthorization(contact.contact_id)
 
 
 __all__ = ["ApolloShadowAuthorization", "normal_apollo_shadow_authorization"]

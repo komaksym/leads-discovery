@@ -164,7 +164,7 @@ def _state_key() -> bytes:
 
 def _state_aad(run_id: str) -> bytes:
     """Bind an encrypted capsule to its exact logical run identity."""
-    return f"{_STATE_PREFIX}\0{run_id}".encode("utf-8")
+    return f"{_STATE_PREFIX}\0{run_id}".encode()
 
 
 def persist_canary_private_state(run_id: str, payload: dict[str, Any]) -> None:
