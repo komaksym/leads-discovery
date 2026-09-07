@@ -29,6 +29,8 @@ APOLLO_API_KEY=
 INSTANTLY_API_KEY=
 ```
 
+The GitHub-hosted production canary also requires a stable `CANARY_STATE_KEY` secret in the `production-canary` Environment. It encrypts the bounded restart capsule used to resume private canary paid work after ephemeral runner loss; it is not a provider credential and must be at least 32 UTF-8 bytes.
+
 Do not put credentials on the command line or in committed files.
 
 ## Commands
@@ -146,7 +148,9 @@ Only the first two retained contacts whose decision rank is 1 or 2 can enter the
 Clay managed Work Email function (Public API) -> Apollo work-email fallback -> Instantly verification
 ```
 
-Clay is called directly through its Public API using Clay's managed Work Email function; the pipeline does not require a user-authored Clay workflow or custom function. Clay's API exposes managed functions through the Routines execution primitive, so the non-secret `CLAY_WORK_EMAIL_FUNCTION_ID` identifies that Clay-managed function and the returned `routine_run_id` is persisted before polling. Apollo is called only when Clay has no usable work email and always disables personal email, phones, and both waterfall flags. Instantly is used only for `/api/v2/email-verification`; a persisted `pending` result resumes with GET and never repeats POST. Missing email never removes a useful contact.
+Clay is called directly through its Public API using Clay's managed Work Email function; the pipeline does not require a user-authored Clay workflow or custom function. Clay's API exposes managed functions through the Routines execution primitive, so the non-secret `CLAY_WORK_EMAIL_FUNCTION_ID` identifies that Clay-managed function and the returned `routine_run_id` is persisted before polling. In normal M4, Apollo is called only when Clay has no usable work email and always disables personal email, phones, and both waterfall flags. Instantly is used only for `/api/v2/email-verification`; a persisted `pending` result resumes with GET and never repeats POST. Missing email never removes a useful contact.
+
+That Apollo fallback rule is the normal product contract. The production-canary-only shadow coverage exception described below does not change normal `run` + `enrich` behavior or normal M4 state.
 
 The Exa People USD ceiling, Clay submitted-contact cap, Apollo credit cap, and Instantly verification-call cap are independent. Known budget exhaustion publishes the best partial artifacts. Unknown paid in-flight outcomes fail closed instead of being blindly replayed.
 
@@ -277,12 +281,14 @@ M4 adds contact discovery and work-email verification only. The project still do
 
 ## Production canary
 
-Production execution does not depend on a local computer. The production entry point is the manual `Production lead canary` GitHub Actions workflow on a standard GitHub-hosted `ubuntu-latest` runner. Paid-provider credentials are supplied only to the `production-canary` GitHub Environment; the Clay managed-function identifier is a non-secret Environment variable.
+Production execution does not depend on a local computer. The production entry point is the manual `Production lead canary` GitHub Actions workflow on a standard GitHub-hosted `ubuntu-latest` runner. Paid-provider credentials and the `CANARY_STATE_KEY` restart-encryption secret are supplied only to the `production-canary` GitHub Environment; the Clay managed-function identifier is a non-secret Environment variable.
 
 The canary is deliberately a credentialed smoke test, not the normal batch entry point. Its command surface exposes only run identity/data location and hard-codes one candidate, one evaluation, and one paid contact. Market/search criteria and batch cardinality belong to the normal `run` + `enrich` flow above; the canary cannot be widened into that configuration.
 
-The workflow has no safety-limit inputs: the application fixes the canary at one company, one paid contact, tiny provider quotas, and tiny spend/storage ceilings. Paid-operation barriers are written durably before dispatch so a runner restart cannot silently repeat an unresolved potentially billed operation.
+The canary may make one Apollo shadow coverage call even when normal M4 correctly skipped Apollo because normal Clay produced a usable work email. That call is authorized only from durable normal-M4 evidence for the same accepted contact and only when the shared Apollo canary allowance is unused. It is coverage evidence only: shadow output never changes canonical contact truth, normal fallback history, or the normal M4 checkpoint, and normal plus shadow Apollo work still shares one fixed allowance.
 
-Only `leads.csv` and `contacts.jsonl` are published to the dedicated `generated-leads` Git branch. Checkpoints, usage ledgers, provider payloads, credentials, temporary files, and debug state are not published as branch files or Actions artifacts.
+The workflow has no safety-limit inputs: the application fixes the canary at one company, one paid contact, tiny provider quotas, and tiny spend/storage ceilings. Paid-operation barriers are written durably before dispatch. Canary-private checkpoint/usage authority is additionally mirrored as a bounded authenticated encrypted restart capsule on the separate `canary-operation-journal` branch so pending Clay/Instantly shadow work can resume the same persisted operation identity after runner loss rather than starting replacement paid work. A missing, conflicting, or undecryptable capsule fails closed.
+
+Only `leads.csv` and `contacts.jsonl` are published to the dedicated `generated-leads` Git branch. Plaintext checkpoints, usage ledgers, provider payloads, coverage evidence, credentials, temporary files, and debug state are not published as branch files or Actions artifacts. The operational `canary-operation-journal` branch keeps an empty tree and stores only opaque barrier metadata plus encrypted restart ciphertext; it is not the generated-lead publication surface.
 
 A real credentialed one-company workflow run is the final external acceptance gate. Automated CI and development remain offline and do not prove live provider compatibility.
