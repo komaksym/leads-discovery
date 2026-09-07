@@ -1,0 +1,379 @@
+name: Issue 46 review fix verification
+
+on:
+  push:
+    branches:
+      - fix/issue-46-review-findings
+
+permissions:
+  contents: write
+
+jobs:
+  tdd-fix:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/issue-46-review-findings
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install development dependencies
+        run: python -m pip install -e ".[dev]"
+
+      - name: Correct review regression tests
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path: str, old: str, new: str) -> None:
+              file = Path(path)
+              text = file.read_text(encoding="utf-8")
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{path}: expected one replacement, found {count}: {old[:80]!r}")
+              file.write_text(text.replace(old, new, 1), encoding="utf-8", newline="\n")
+
+          def edit_region(path: str, start: str, end: str, changes: list[tuple[str, str, int]]) -> None:
+              file = Path(path)
+              text = file.read_text(encoding="utf-8")
+              start_index = text.index(start)
+              end_index = text.index(end, start_index)
+              region = text[start_index:end_index]
+              for old, new, expected in changes:
+                  count = region.count(old)
+                  if count != expected:
+                      raise SystemExit(
+                          f"{path}: region {start!r} expected {expected} replacements, found {count}: {old[:80]!r}"
+                      )
+                  region = region.replace(old, new, expected)
+              file.write_text(
+                  text[:start_index] + region + text[end_index:],
+                  encoding="utf-8",
+                  newline="\n",
+              )
+
+          gating = "tests/test_canary_apollo_shadow_gating.py"
+          replace_once(
+              gating,
+              "def test_nonaccepted_shadow_clay_email_keeps_apollo_coverage_legal(\n",
+              "def test_nonaccepted_shadow_clay_email_never_unlocks_apollo(\n",
+          )
+          replace_once(
+              gating,
+              '    """Rejected/uncertain Exa + Clay coverage may still exercise Apollo on the selected contact."""\n',
+              '    """Rejected/uncertain coverage may verify Clay email but cannot cascade into Apollo."""\n',
+          )
+          replace_once(
+              gating,
+              "    assert len(apollo.contacts) == 1\n    assert apollo.contacts[0].company_id == company.company_id\n",
+              "    assert apollo.contacts == []\n",
+          )
+          replace_once(
+              gating,
+              '    assert "coverage:apollo" in operations\n',
+              '    assert "coverage:apollo" not in operations\n',
+          )
+          replace_once(
+              gating,
+              "def test_shadow_clay_usable_email_makes_missing_apollo_a_failure(tmp_path: Path) -> None:\n",
+              "def test_shadow_clay_usable_email_without_normal_skip_reports_inconclusive(\n    tmp_path: Path,\n) -> None:\n",
+          )
+          replace_once(
+              gating,
+              '    """Coverage-only Clay success makes Apollo coverage required even for a rejected company."""\n',
+              '    """Coverage-only Clay success never creates a missing-Apollo obligation."""\n',
+          )
+          replace_once(
+              gating,
+              '    assert (apollo.integration_outcome, apollo.business_outcome) == (\n        "failure",\n        "not_exercised",\n    )\n    assert report.overall_outcome == "failure"\n',
+              '    assert (apollo.integration_outcome, apollo.business_outcome) == (\n        "inconclusive",\n        "not_exercised",\n    )\n    assert report.overall_outcome == "inconclusive"\n',
+          )
+
+          replace_once(
+              "tests/test_canary_provider_coverage.py",
+              "    assert len(apollo.contacts) == 1\n    assert apollo.contacts[0].to_dict() == expected.to_dict()\n",
+              "    assert apollo.contacts == []\n",
+          )
+
+          offline = "tests/test_production_canary_offline_contract.py"
+          edit_region(
+              offline,
+              'def test_coverage_paid_failure_has_durable_intent_and_never_redispatches(\n',
+              '\n\ndef test_coverage_clay_resumes_same_operation_and_stops_at_three_reads(\n',
+              [
+                  (
+                      "    clay = ClayRoutineScript([])\n",
+                      '    clay = ClayRoutineScript([{"work_email": _EMAIL}])\n',
+                      1,
+                  ),
+                  (
+                      '    stub = WireStub({"exa": _exa_one, "clay": clay, "apollo": apollo})\n    _install_contract(monkeypatch, tmp_path, run_id, _rejected_company(), stub)\n',
+                      '    stub = WireStub(\n        {\n            "exa": _exa_one,\n            "clay": clay,\n            "apollo": apollo,\n            "instantly": _terminal_instantly("verified", expected_email=_EMAIL),\n        }\n    )\n    _install_contract(monkeypatch, tmp_path, run_id, _accepted_company(), stub)\n',
+                      1,
+                  ),
+                  (
+                      '    assert len(stub.for_provider("instantly")) == 0\n',
+                      '    assert len(stub.for_provider("instantly")) == 1\n',
+                      2,
+                  ),
+              ],
+          )
+          edit_region(
+              offline,
+              'def test_coverage_instantly_resumes_same_email_and_stops_at_three_reads(\n',
+              '\n\ndef test_company_fingerprint_mismatch_fails_closed_without_new_provider_dispatch(\n',
+              [
+                  (
+                      '    assert len(stub.for_provider("apollo")) == 1\n',
+                      '    assert len(stub.for_provider("apollo")) == 0\n',
+                      1,
+                  ),
+              ],
+          )
+
+          review = "tests/test_production_canary_offline_review_gaps.py"
+          edit_region(
+              review,
+              'def test_successful_coverage_only_waterfall_uses_selected_contact_without_mutating_normal_state(\n',
+              '\n\ndef test_normal_m4_completes_after_same_run_pending_resume_without_second_clay_start(\n',
+              [
+                  (
+                      'def test_successful_coverage_only_waterfall_uses_selected_contact_without_mutating_normal_state(\n',
+                      'def test_coverage_only_clay_verifies_selected_contact_without_mutating_normal_state(\n',
+                      1,
+                  ),
+                  (
+                      '    """Coverage-only Clay resumes in one canary call and cannot change canonical M4 state."""\n',
+                      '    """Coverage Clay may feed verification but cannot authorize Apollo or mutate M4."""\n',
+                      1,
+                  ),
+                  (
+                      "    clay = ClayRoutineScript([])\n",
+                      '    clay = ClayRoutineScript([{"work_email": _EMAIL}])\n',
+                      1,
+                  ),
+                  (
+                      '    apollo_requests = stub.for_provider("apollo")\n    assert len(apollo_requests) == 1\n    apollo_body = json_body(apollo_requests[0])\n    assert {\n        "name": apollo_body["name"],\n        "domain": apollo_body["domain"],\n        "organization_name": apollo_body["organization_name"],\n        "linkedin_url": apollo_body["linkedin_url"],\n    } == {\n        "name": expected.full_name,\n        "domain": expected.company_domain,\n        "organization_name": expected.company_name,\n        "linkedin_url": expected.linkedin_url,\n    }\n',
+                      '    assert stub.for_provider("apollo") == []\n    instantly_requests = stub.for_provider("instantly")\n    assert len(instantly_requests) == 1\n    assert json_body(instantly_requests[0])["email"] == _EMAIL\n',
+                      1,
+                  ),
+              ],
+          )
+
+          safety = "tests/test_production_canary_offline_safety_contract.py"
+          replace_once(
+              safety,
+              'from test_production_canary_offline_contract import (\n    _exa_one,\n    _install_contract,\n    _provider,\n    _rejected_company,\n    _report,\n    _run_canary,\n)\n',
+              'from test_production_canary_offline_contract import (\n    _EMAIL,\n    _accepted_company,\n    _exa_one,\n    _install_contract,\n    _provider,\n    _report,\n    _run_canary,\n    _terminal_instantly,\n)\n',
+          )
+          replace_once(
+              safety,
+              "    clay = ClayRoutineScript([])\n",
+              '    clay = ClayRoutineScript([{"work_email": _EMAIL}])\n',
+          )
+          replace_once(
+              safety,
+              '    stub = WireStub({"exa": _exa_one, "clay": clay, "apollo": apollo})\n    run_dir = _install_contract(monkeypatch, tmp_path, run_id, _rejected_company(), stub)\n',
+              '    stub = WireStub(\n        {\n            "exa": _exa_one,\n            "clay": clay,\n            "apollo": apollo,\n            "instantly": _terminal_instantly("verified", expected_email=_EMAIL),\n        }\n    )\n    run_dir = _install_contract(monkeypatch, tmp_path, run_id, _accepted_company(), stub)\n',
+          )
+          replace_once(
+              safety,
+              '    assert len(stub.for_provider("instantly")) == 0\n',
+              '    assert len(stub.for_provider("instantly")) == 1\n',
+          )
+          replace_once(
+              safety,
+              '    assert read_jsonl(run_dir / "contacts.jsonl") == []\n',
+              '    contacts = read_jsonl(run_dir / "contacts.jsonl")\n    assert len(contacts) == 1\n    assert contacts[0]["work_email"] == _EMAIL\n',
+          )
+          PY
+
+      - name: Verify RED test commit style and typing
+        run: |
+          ruff check \
+            tests/test_canary_apollo_shadow_gating.py \
+            tests/test_canary_provider_coverage.py \
+            tests/test_production_canary_offline_contract.py \
+            tests/test_production_canary_offline_review_gaps.py \
+            tests/test_production_canary_offline_safety_contract.py
+          mypy \
+            tests/test_canary_apollo_shadow_gating.py \
+            tests/test_canary_provider_coverage.py \
+            tests/test_production_canary_offline_contract.py \
+            tests/test_production_canary_offline_review_gaps.py \
+            tests/test_production_canary_offline_safety_contract.py
+
+      - name: Commit RED tests
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add \
+            tests/test_canary_apollo_shadow_gating.py \
+            tests/test_canary_provider_coverage.py \
+            tests/test_production_canary_offline_contract.py \
+            tests/test_production_canary_offline_review_gaps.py \
+            tests/test_production_canary_offline_safety_contract.py
+          git commit -m "test: forbid shadow Clay from authorizing Apollo"
+          echo "RED_COMMIT=$(git rev-parse HEAD)"
+
+      - name: Verify behavioral RED
+        shell: bash
+        run: |
+          set +e
+          pytest -q \
+            tests/test_canary_apollo_shadow_gating.py \
+            tests/test_canary_provider_coverage.py \
+            tests/test_production_canary_offline_contract.py \
+            tests/test_production_canary_offline_review_gaps.py \
+            tests/test_production_canary_offline_safety_contract.py \
+            2>&1 | tee /tmp/issue46-red.log
+          status=${PIPESTATUS[0]}
+          set -e
+          if [ "$status" -eq 0 ]; then
+            echo "Expected behavioral RED but focused tests passed"
+            exit 1
+          fi
+          grep -q "test_nonaccepted_shadow_clay_email_never_unlocks_apollo" /tmp/issue46-red.log
+          grep -q "test_shadow_clay_usable_email_without_normal_skip_reports_inconclusive" /tmp/issue46-red.log
+          grep -q "test_rejected_company_coverage_uses_production_lineage_without_mutating_contacts" /tmp/issue46-red.log
+          echo "Behavioral RED confirmed at $(git rev-parse HEAD)"
+
+      - name: Implement normal-authority Apollo gating
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path: str, old: str, new: str) -> None:
+              file = Path(path)
+              text = file.read_text(encoding="utf-8")
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{path}: expected one replacement, found {count}: {old[:100]!r}")
+              file.write_text(text.replace(old, new, 1), encoding="utf-8", newline="\n")
+
+          contact = "src/leads_discovery/pipeline/contact_enrichment.py"
+          replace_once(
+              contact,
+              'def _has_attempt(contact: ContactRecord, provider: str, state: str) -> bool:\n    """Return whether one contact has a retained provider attempt in the requested state."""\n    return any(\n        attempt.get("provider") == provider and attempt.get("state") == state\n        for attempt in contact.provider_attempts\n    )\n\n\n',
+              'def _has_attempt(contact: ContactRecord, provider: str, state: str) -> bool:\n    """Return whether one contact has a retained provider attempt in the requested state."""\n    return any(\n        attempt.get("provider") == provider and attempt.get("state") == state\n        for attempt in contact.provider_attempts\n    )\n\n\ndef normal_apollo_decision_reason(\n    contact: ContactRecord,\n    *,\n    clay_completed: bool,\n) -> str:\n    """Return the pure normal-M4 reason Apollo is skipped or selected as fallback."""\n    if contact.work_email is not None:\n        return "work_email_present"\n    if not clay_completed:\n        return "clay_incomplete"\n    return "apollo_fallback"\n\n\n',
+          )
+          replace_once(
+              contact,
+              '    for contact in paid:\n        if contact.work_email is not None or not _has_attempt(contact, "clay", "completed"):\n            continue\n        key = f"apollo:{contact.contact_id}"\n',
+              '    for contact in paid:\n        if normal_apollo_decision_reason(\n            contact,\n            clay_completed=_has_attempt(contact, "clay", "completed"),\n        ) != "apollo_fallback":\n            continue\n        key = f"apollo:{contact.contact_id}"\n',
+          )
+          replace_once(
+              contact,
+              '__all__ = [\n    "ContactEnrichmentConfig",\n    "ContactEnrichmentSummary",\n    "run_contact_enrichment",\n    "validate_contact_enrichment_state",\n]\n',
+              '__all__ = [\n    "ContactEnrichmentConfig",\n    "ContactEnrichmentSummary",\n    "normal_apollo_decision_reason",\n    "run_contact_enrichment",\n    "validate_contact_enrichment_state",\n]\n',
+          )
+
+          coverage = "src/leads_discovery/pipeline/canary_provider_coverage.py"
+          replace_once(
+              coverage,
+              'from leads_discovery.pipeline.canary_paid_operations import CanaryPaidOperations\nfrom leads_discovery.pipeline.state import load_jsonl, load_usage_events, read_json\n',
+              'from leads_discovery.pipeline.canary_paid_operations import CanaryPaidOperations\nfrom leads_discovery.pipeline.contact_enrichment import normal_apollo_decision_reason\nfrom leads_discovery.pipeline.state import load_jsonl, load_usage_events, read_json\n',
+          )
+          replace_once(
+              coverage,
+              ') -> tuple[str | None, bool]:\n    """Return production-normalized Clay email and whether composition must pause."""\n',
+              ') -> tuple[str | None, bool, bool]:\n    """Return Clay email, pause state, and whether normal Clay completed for this contact."""\n',
+          )
+          replace_once(
+              coverage,
+              '        if contact.email_source != "clay":\n            return None, False\n        email = usable_work_email(contact.work_email)\n        if email is None:\n            raise ValueError("canonical Clay email is not production-usable")\n        return email, False\n',
+              '        if contact.email_source != "clay":\n            return None, False, True\n        email = usable_work_email(contact.work_email)\n        if email is None:\n            raise ValueError("canonical Clay email is not production-usable")\n        return email, False, True\n',
+          )
+          for old, new in (
+              ('            return None, False\n        paid.begin(_CLAY_OPERATION, "clay_start", input_value=input_value)\n', '            return None, False, False\n        paid.begin(_CLAY_OPERATION, "clay_start", input_value=input_value)\n'),
+              ('        return None, True\n\n    state = entry.get("state")\n', '        return None, True, False\n\n    state = entry.get("state")\n'),
+              ('        return usable_work_email(raw_email), False\n    if state != "pending":\n', '        return usable_work_email(raw_email), False, False\n    if state != "pending":\n'),
+              ('        return None, True\n    routine_run_id = entry.get("routine_run_id")\n', '        return None, True, False\n    routine_run_id = entry.get("routine_run_id")\n'),
+              ('        return None, True\n\n    by_id = {\n', '        return None, True, False\n\n    by_id = {\n'),
+              ('    return email, False\n\n\ndef _finite_nonnegative', '    return email, False, False\n\n\ndef _finite_nonnegative'),
+          ):
+              replace_once(coverage, old, new)
+          replace_once(
+              coverage,
+              '    if contact.email_source == "apollo":\n        raise ValueError("canonical Apollo output lacks durable provider evidence")\n\n    input_value = contact.to_dict()\n    entry = paid.operation(_APOLLO_OPERATION, input_value=input_value)\n',
+              '    if contact.email_source == "apollo":\n        raise ValueError("canonical Apollo output lacks durable provider evidence")\n    if not allow_shadow_dispatch:\n        return None\n\n    input_value = contact.to_dict()\n    entry = paid.operation(_APOLLO_OPERATION, input_value=input_value)\n',
+          )
+          replace_once(
+              coverage,
+              '    if not allow_shadow_dispatch:\n        return None\n    if not paid.resource_allows("apollo_enrichment"):\n',
+              '    if not paid.resource_allows("apollo_enrichment"):\n',
+          )
+          replace_once(
+              coverage,
+              '    clay_email, clay_pending = _clay_email(\n',
+              '    clay_email, clay_pending, normal_clay_completed = _clay_email(\n',
+          )
+          replace_once(
+              coverage,
+              '    apollo_email = _apollo_email(\n        paid,\n        contact,\n        normal_operations,\n        normal_usage,\n        apollo,\n        allow_shadow_dispatch=clay_email is not None,\n    )\n',
+              '    normal_apollo_reason = normal_apollo_decision_reason(\n        contact,\n        clay_completed=normal_clay_completed,\n    )\n    allow_shadow_apollo = (\n        normal_exa_completed\n        and normal_clay_completed\n        and contact.email_source == "clay"\n        and clay_email is not None\n        and normal_apollo_reason == "work_email_present"\n    )\n    apollo_email = _apollo_email(\n        paid,\n        contact,\n        normal_operations,\n        normal_usage,\n        apollo,\n        allow_shadow_dispatch=allow_shadow_apollo,\n    )\n',
+          )
+
+          outcomes = "src/leads_discovery/pipeline/canary_outcomes.py"
+          replace_once(
+              outcomes,
+              'from leads_discovery.contacts.providers import usable_work_email\nfrom leads_discovery.models import CompanyRecord, RunCheckpoint, UsageEvent\n',
+              'from leads_discovery.contacts.providers import usable_work_email\nfrom leads_discovery.contacts.selection import contact_decision_order_key\nfrom leads_discovery.models import CompanyRecord, RunCheckpoint, UsageEvent\n',
+          )
+          replace_once(
+              outcomes,
+              'from leads_discovery.pipeline.contact_enrichment import (\n    ContactEnrichmentConfig,\n    validate_contact_enrichment_state,\n)\n',
+              'from leads_discovery.pipeline.contact_enrichment import (\n    ContactEnrichmentConfig,\n    normal_apollo_decision_reason,\n    validate_contact_enrichment_state,\n)\n',
+          )
+          marker = 'def _m4(state: _State) -> tuple[IntegrationCoverage, ...]:\n'
+          helper = '''def _normal_apollo_shadow_obligation(\n    state: _State,\n    exa: IntegrationCoverage,\n    clay: IntegrationCoverage,\n) -> bool:\n    """Return whether normal M4 legitimately skipped Apollo after usable Clay success."""\n    checkpoint = state.contact_checkpoint\n    if (\n        checkpoint is None\n        or checkpoint.status != "completed"\n        or exa.source != "normal"\n        or exa.integration_outcome != "success"\n        or exa.business_outcome != "contact_selected"\n        or clay.source != "normal"\n        or clay.integration_outcome != "success"\n        or clay.business_outcome != "email_found"\n        or len(state.companies) != 1\n    ):\n        return False\n\n    company = state.companies[0]\n    if company.final_decision != "accepted":\n        return False\n    operations = _operations(checkpoint)\n    exa_entry = operations.get(f"exa:{company.company_id}")\n    clay_entry = operations.get("clay:batch")\n    if (\n        not isinstance(exa_entry, dict)\n        or exa_entry.get("state") != "completed"\n        or not isinstance(clay_entry, dict)\n        or clay_entry.get("state") != "completed"\n    ):\n        return False\n    exa_ids = exa_entry.get("contact_ids")\n    clay_ids = clay_entry.get("contact_ids")\n    if not isinstance(exa_ids, list) or not isinstance(clay_ids, list):\n        return False\n\n    contacts_by_id = {contact.contact_id: contact for contact in state.contacts}\n    selected = [\n        contacts_by_id[contact_id]\n        for contact_id in exa_ids\n        if isinstance(contact_id, str)\n        and contact_id in contacts_by_id\n        and contacts_by_id[contact_id].company_id == company.company_id\n    ]\n    if not selected:\n        return False\n    selected.sort(key=contact_decision_order_key)\n    contact = selected[0]\n    if contact.contact_id not in clay_ids:\n        return False\n    if f"apollo:{contact.contact_id}" in operations:\n        return False\n    if _requests(_matching(state.contact_usage, "apollo", {"people_enrichment"})) > 0:\n        return False\n    if contact.email_source != "clay" or usable_work_email(contact.work_email) is None:\n        return False\n    return (\n        normal_apollo_decision_reason(contact, clay_completed=True)\n        == "work_email_present"\n    )\n\n\n'''
+          replace_once(outcomes, marker, helper + marker)
+          replace_once(
+              outcomes,
+              '    apollo_prerequisite = (\n        has_contact\n        and clay.integration_outcome == "success"\n        and clay.business_outcome == "email_found"\n    )\n    apollo_deferred_by_pending_poll = (\n        apollo_prerequisite\n        and state.contact_checkpoint is not None\n        and state.contact_checkpoint.status == "paused_pending"\n        and _instantly_business(state) == "pending"\n    )\n    apollo = _normal_integration(\n        state, "apollo", "apollo", {"people_enrichment"}, "apollo:",\n        apollo_prerequisite, _apollo_business(state),\n    ) or _private_integration(\n        state, "apollo", "coverage:apollo", "apollo", {"people_enrichment"}\n    )\n    if apollo is None:\n        apollo = _coverage(\n            "apollo", "coverage_only",\n            (\n                "failure"\n                if apollo_prerequisite and not apollo_deferred_by_pending_poll\n                else "inconclusive"\n            ),\n            "not_exercised", 0, 0,\n        )\n',
+              '    apollo_prerequisite = _normal_apollo_shadow_obligation(state, exa, clay)\n    apollo = _normal_integration(\n        state, "apollo", "apollo", {"people_enrichment"}, "apollo:",\n        apollo_prerequisite, _apollo_business(state),\n    )\n    if apollo is None and apollo_prerequisite:\n        apollo = _private_integration(\n            state, "apollo", "coverage:apollo", "apollo", {"people_enrichment"}\n        )\n    if apollo is None:\n        apollo = _coverage(\n            "apollo", "coverage_only",\n            "failure" if apollo_prerequisite else "inconclusive",\n            "not_exercised", 0, 0,\n        )\n',
+          )
+          PY
+
+      - name: Commit production fix
+        run: |
+          git add \
+            src/leads_discovery/pipeline/contact_enrichment.py \
+            src/leads_discovery/pipeline/canary_provider_coverage.py \
+            src/leads_discovery/pipeline/canary_outcomes.py
+          git commit -m "fix: derive Apollo shadow gate from normal M4 authority"
+          echo "GREEN_CANDIDATE_COMMIT=$(git rev-parse HEAD)"
+
+      - name: Verify focused GREEN
+        run: |
+          pytest -q \
+            tests/test_canary_apollo_shadow_gating.py \
+            tests/test_canary_provider_coverage.py \
+            tests/test_production_canary_offline_contract.py \
+            tests/test_production_canary_offline_review_gaps.py \
+            tests/test_production_canary_offline_safety_contract.py
+
+      - name: Verify ruff and mypy
+        run: |
+          ruff check .
+          mypy src tests
+
+      - name: Verify full suite
+        run: pytest -q
+
+      - name: Remove temporary verification workflow
+        run: |
+          git rm .github/workflows/issue-46-review-fix.yml
+          git commit -m "chore: remove temporary issue 46 verification workflow"
+          echo "FINAL_COMMIT=$(git rev-parse HEAD)"
+
+      - name: Push verified commits
+        run: git push origin HEAD:fix/issue-46-review-findings
