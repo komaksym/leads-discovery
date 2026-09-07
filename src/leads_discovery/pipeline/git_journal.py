@@ -26,6 +26,7 @@ _STATE_VERSION = 1
 _STATE_MAX_BYTES = 256 * 1024
 _STATE_NONCE_BYTES = 12
 _CAPSULE_PREFIX = "capsule "
+_STRICT_EMPTY_BRANCH = "canary-operation-journal"
 
 
 def _configured() -> tuple[Path, str, str] | None:
@@ -154,10 +155,15 @@ def _append_message(
     subject: str,
     body: str | None = None,
 ) -> None:
-    """Append one metadata-only commit on the canonical empty journal tree."""
+    """Append one journal commit while keeping the dedicated canary tree empty."""
     ref = _journal_ref(remote, branch)
-    parent = _require_empty_journal_tree(root, ref)
-    args = ["commit-tree", _empty_tree(root), "-p", parent, "-m", subject]
+    if branch == _STRICT_EMPTY_BRANCH:
+        parent = _require_empty_journal_tree(root, ref)
+        tree = _empty_tree(root)
+    else:
+        parent = _git(root, "rev-parse", "--verify", ref)
+        tree = _git(root, "rev-parse", f"{parent}^{{tree}}")
+    args = ["commit-tree", tree, "-p", parent, "-m", subject]
     if body is not None:
         args.extend(["-m", body])
     commit = _git(root, *args)
@@ -253,7 +259,10 @@ def _load_capsule(
     if not _RUN_ID.fullmatch(run_id):
         raise ValueError("canary state run_id is invalid for Git operation journal")
     ref = _journal_ref(remote, branch)
-    _require_empty_journal_tree(root, ref)
+    if branch == _STRICT_EMPTY_BRANCH:
+        _require_empty_journal_tree(root, ref)
+    else:
+        _git(root, "rev-parse", "--verify", ref)
     message = _git(
         root,
         "log",
@@ -418,8 +427,16 @@ def sync_checkpoint_barrier(
     root, remote, branch = config
     if not _RUN_ID.fullmatch(checkpoint.run_id):
         raise ValueError("checkpoint run_id is invalid for Git operation journal")
+    current_raw = checkpoint.provider_state.get("operations", {})
+    if not isinstance(current_raw, dict):
+        raise ValueError("checkpoint operations must be an object")
+    if not current_raw:
+        return
     ref = _journal_ref(remote, branch)
-    _require_empty_journal_tree(root, ref)
+    if branch == _STRICT_EMPTY_BRANCH:
+        _require_empty_journal_tree(root, ref)
+    else:
+        _git(root, "rev-parse", "--verify", ref)
     barriers = _planned_barriers(root, ref, checkpoint, previous)
     private_state = _atomic_private_state(checkpoint, previous)
     if private_state is not None:

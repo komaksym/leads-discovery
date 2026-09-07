@@ -455,12 +455,32 @@ def _persist_canary_private_state(path: Path, checkpoint: RunCheckpoint) -> None
     )
 
 
+def _snapshot_normal_canary_before_first_private_barrier(
+    path: Path,
+    checkpoint: RunCheckpoint,
+    previous: RunCheckpoint | None,
+) -> None:
+    """Persist bounded normal restart authority before the first private paid barrier."""
+    if (
+        previous is not None
+        or path.name != _CANARY_PAID_CHECKPOINT
+        or not git_journal_configured()
+    ):
+        return
+    if path.parent.name != checkpoint.run_id:
+        raise ValueError("canary private checkpoint path must match its run_id")
+    from leads_discovery.pipeline.canary_restart import snapshot_canary_restart_state
+
+    snapshot_canary_restart_state(path.parent, run_id=checkpoint.run_id)
+
+
 def write_checkpoint(path: Path, checkpoint: RunCheckpoint) -> None:
     """Durably publish paid-operation barriers before atomically replacing local checkpoint."""
     previous_payload = _read_json_file(path) if path.exists() else None
     previous = (
         None if previous_payload is None else RunCheckpoint.from_dict(previous_payload)
     )
+    _snapshot_normal_canary_before_first_private_barrier(path, checkpoint, previous)
     sync_checkpoint_barrier(checkpoint, previous)
     write_json_atomic(path, checkpoint.to_dict())
     _persist_canary_private_state(path, checkpoint)
