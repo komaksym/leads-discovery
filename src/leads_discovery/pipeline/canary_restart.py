@@ -83,10 +83,9 @@ class CanaryRestartState:
 
         def rows(name: str) -> tuple[dict[str, Any], ...]:
             value = payload[name]
-            invalid = not isinstance(value, list) or any(
-                not isinstance(row, dict) for row in value
-            )
-            if invalid:
+            if not isinstance(value, list):
+                raise ValueError(f"canary normal restart {name} is invalid")
+            if any(not isinstance(row, dict) for row in value):
                 raise ValueError(f"canary normal restart {name} is invalid")
             return tuple(cast(dict[str, Any], row) for row in value)
 

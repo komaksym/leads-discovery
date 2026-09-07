@@ -9,7 +9,7 @@ import os
 import re
 import subprocess
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -392,12 +392,11 @@ def _atomic_private_state(
     usage_events: list[dict[str, Any]] = []
     if remote is not None:
         raw_usage = remote.get("usage_events")
-        invalid_usage = not isinstance(raw_usage, list) or any(
-            not isinstance(row, dict) for row in raw_usage
-        )
-        if invalid_usage:
+        if not isinstance(raw_usage, list):
             raise ValueError("canary private Git journal usage state is invalid")
-        usage_events = raw_usage
+        if any(not isinstance(row, dict) for row in raw_usage):
+            raise ValueError("canary private Git journal usage state is invalid")
+        usage_events = [cast(dict[str, Any], row) for row in raw_usage]
     elif previous is not None and _looks_like_canary_private(previous):
         raise RuntimeError("canary private local state lacks a durable Git journal capsule")
     return {"checkpoint": checkpoint.to_dict(), "usage_events": usage_events}
