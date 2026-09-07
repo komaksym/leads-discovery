@@ -85,13 +85,13 @@ jobs:
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          if git fetch origin generated-leads:refs/remotes/origin/generated-leads; then
+          if git fetch origin canary-operation-journal:refs/remotes/origin/canary-operation-journal; then
             exit 0
           fi
           empty_tree="$(git mktree < /dev/null)"
-          root_commit="$(git commit-tree "$empty_tree" -m "Initialize generated lead output")"
-          git push origin "$root_commit:refs/heads/generated-leads"
-          git update-ref refs/remotes/origin/generated-leads "$root_commit"
+          root_commit="$(git commit-tree "$empty_tree" -m "Initialize canary operation journal")"
+          git push origin "$root_commit:refs/heads/canary-operation-journal"
+          git update-ref refs/remotes/origin/canary-operation-journal "$root_commit"
 
       - name: Run fixed one-company live canary
         env:
@@ -101,8 +101,9 @@ jobs:
           CLAY_WORK_EMAIL_FUNCTION_ID: ${{ vars.CLAY_WORK_EMAIL_FUNCTION_ID }}
           APOLLO_API_KEY: ${{ secrets.APOLLO_API_KEY }}
           INSTANTLY_API_KEY: ${{ secrets.INSTANTLY_API_KEY }}
-          LEADS_GIT_JOURNAL_BRANCH: generated-leads
+          LEADS_GIT_JOURNAL_BRANCH: canary-operation-journal
           LEADS_GIT_JOURNAL_REMOTE: origin
+          LEADS_GIT_JOURNAL_KEY: ${{ secrets.CANARY_STATE_KEY }}
           LEADS_MAX_HTTP_RESPONSE_BYTES: "1048576"
           LEADS_MAX_RECORD_BYTES: "131072"
           LEADS_MAX_FILE_BYTES: "4194304"

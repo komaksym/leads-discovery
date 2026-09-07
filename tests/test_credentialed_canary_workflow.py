@@ -8,6 +8,7 @@ from pathlib import Path
 _WORKFLOW = ".github/workflows/generate-leads.yml"
 _CANARY_ENVIRONMENT = "production-canary"
 _CLAY_FUNCTION_ID_MARKER = "vars.CLAY_WORK_EMAIL_FUNCTION_ID"
+_CANARY_STATE_KEY_MARKER = "secrets.CANARY_STATE_KEY"
 _EXISTING_SECRET_MARKERS = (
     "secrets.EXA_API_KEY",
     "secrets.DEEPSEEK_API_KEY",
@@ -139,6 +140,7 @@ def test_secret_bearing_canary_job_rejects_non_main_dispatch_refs() -> None:
         assert marker in canary
     for marker in _RENAMED_SECRET_MARKERS:
         assert marker not in canary
+    assert _CANARY_STATE_KEY_MARKER in canary
 
 
 def test_clay_managed_function_id_is_non_secret_environment_config() -> None:
@@ -151,7 +153,7 @@ def test_clay_managed_function_id_is_non_secret_environment_config() -> None:
 
 
 def test_canary_paid_intent_has_remote_barrier_before_live_dispatch() -> None:
-    """Paid intent must survive loss of the GitHub-hosted runner before any live dispatch."""
+    """Paid intent survives runner loss without sharing the public-output branch."""
     canary = _canary_job(_workflow_text())
     before_run, after_run_marker = canary.split(
         "- name: Run fixed one-company live canary", 1
@@ -159,22 +161,22 @@ def test_canary_paid_intent_has_remote_barrier_before_live_dispatch() -> None:
     run_step = after_run_marker.split("- name: Publish approved public outputs", 1)[0]
 
     assert "- name: Prepare durable Git operation journal" in before_run
-    assert "git fetch origin generated-leads:refs/remotes/origin/generated-leads" in before_run
+    assert "git fetch origin canary-operation-journal:refs/remotes/origin/canary-operation-journal" in before_run
     assert 'root_commit="$(git commit-tree "$empty_tree"' in before_run
-    assert 'git push origin "$root_commit:refs/heads/generated-leads"' in before_run
-    assert 'git update-ref refs/remotes/origin/generated-leads "$root_commit"' in before_run
-    assert "LEADS_GIT_JOURNAL_BRANCH: generated-leads" in run_step
+    assert 'git push origin "$root_commit:refs/heads/canary-operation-journal"' in before_run
+    assert 'git update-ref refs/remotes/origin/canary-operation-journal "$root_commit"' in before_run
+    assert "generated-leads" not in before_run
+    assert "LEADS_GIT_JOURNAL_BRANCH: canary-operation-journal" in run_step
     assert "LEADS_GIT_JOURNAL_REMOTE: origin" in run_step
+    assert f"LEADS_GIT_JOURNAL_KEY: ${{{{ {_CANARY_STATE_KEY_MARKER} }}}}" in run_step
 
 
 def test_paid_canary_gates_publication_on_decisive_private_coverage() -> None:
     """Only a decisive successful private report may reach the public-output step."""
     text = _workflow_text()
     canary = _canary_job(text)
-    run_step = canary.split("- name: Run fixed one-company live canary", 1)[1].split(
-        "- name: Publish approved public outputs", 1
-    )[0]
-    publish = canary.split("- name: Publish approved public outputs", 1)[1]
+    private_phase, publish = canary.split("- name: Publish approved public outputs", 1)
+    run_step = private_phase.split("- name: Run fixed one-company live canary", 1)[1]
 
     assert "canary_coverage_report.json" in run_step
     assert ".overall_outcome" in run_step
@@ -191,7 +193,10 @@ def test_paid_canary_gates_publication_on_decisive_private_coverage() -> None:
     assert "exit 2" in run_step
     assert "exit 1" in run_step
 
+    assert "generated-leads" not in private_phase
+    assert "canary-operation-journal" in private_phase
     assert "if: ${{ success() }}" in publish
+    assert "canary-operation-journal" not in publish
     assert "canary_coverage_report.json" not in publish
     assert "actions/upload-artifact" not in text
     assert 'cp -- "$run_dir/leads.csv"' in publish
