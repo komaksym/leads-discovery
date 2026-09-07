@@ -38,11 +38,10 @@ class _CoverageClayNoEmail(coverage_helpers._CoverageClay):
 
 
 def _normal_contact_with_email(
-    decision: str,
     source: Literal["clay", "apollo"],
 ) -> tuple[CompanyRecord, ContactRecord]:
-    """Build the selected canonical contact produced by normal M4."""
-    company = coverage_helpers._company(decision)
+    """Build one production-selected canonical contact with provider email evidence."""
+    company = coverage_helpers._company("accepted")
     contact = select_contacts(company, [coverage_helpers._person_result()], limit=1)[0]
     contact.work_email = f"{source}.owner@acme.com"
     contact.email_source = source
@@ -56,7 +55,6 @@ def _normal_operations_with_email(
     *,
     include_apollo: bool,
 ) -> dict[str, Any]:
-    """Persist normal Exa/Clay/Instantly evidence and optional Apollo fallback evidence."""
     operations: dict[str, Any] = {
         f"exa:{company.company_id}": {
             "state": "completed",
@@ -82,7 +80,6 @@ def _normal_operations_with_email(
 
 
 def _normal_usage(*, include_apollo: bool) -> tuple[UsageEvent, ...]:
-    """Build matching normal authoritative usage for one selected contact."""
     events = [
         coverage_helpers._event("exa", "people_search", estimated_cost_usd=0.001),
         coverage_helpers._event(
@@ -105,16 +102,17 @@ def _normal_usage(*, include_apollo: bool) -> tuple[UsageEvent, ...]:
 
 
 @pytest.mark.parametrize("decision", ["rejected", "uncertain"])
-def test_nonaccepted_coverage_keeps_exa_people_legal_but_apollo_zero_dispatch(
+def test_nonaccepted_shadow_clay_email_keeps_apollo_coverage_legal(
     tmp_path: Path,
     decision: str,
 ) -> None:
-    """Coverage-only Exa/Clay may run, but they never manufacture Apollo eligibility."""
+    """Rejected/uncertain Exa + Clay coverage may still exercise Apollo on the selected contact."""
     company = coverage_helpers._company(decision)
     run_dir = tmp_path / f"coverage-{decision}"
     coverage_helpers._write_normal_state(run_dir, company)
     exa = coverage_helpers._CoverageExa()
     clay = coverage_helpers._CoverageClay()
+    apollo = coverage_helpers._CoverageApollo()
     instantly = coverage_helpers._CoverageInstantly()
 
     first = run_provider_coverage(
@@ -122,23 +120,25 @@ def test_nonaccepted_coverage_keeps_exa_people_legal_but_apollo_zero_dispatch(
         run_id=run_dir.name,
         exa=exa,
         clay=clay,
-        apollo=coverage_helpers._BombApollo(),
+        apollo=apollo,
         instantly=instantly,
     )
     assert first.status == "pending"
-    assert [item.company_id for item in exa.companies] == [company.company_id]
-    assert len(clay.starts) == 1
 
     second = run_provider_coverage(
         run_dir,
         run_id=run_dir.name,
         exa=exa,
         clay=clay,
-        apollo=coverage_helpers._BombApollo(),
+        apollo=apollo,
         instantly=instantly,
     )
     assert second.status == "completed"
+    assert [item.company_id for item in exa.companies] == [company.company_id]
+    assert len(clay.starts) == 1
     assert clay.result_ids == ["shadow-clay-run"]
+    assert len(apollo.contacts) == 1
+    assert apollo.contacts[0].company_id == company.company_id
     assert instantly.created == ["alice.owner@acme.com"]
 
     checkpoint = read_json(run_dir / "canary_paid_checkpoint.json")
@@ -146,12 +146,12 @@ def test_nonaccepted_coverage_keeps_exa_people_legal_but_apollo_zero_dispatch(
     operations = checkpoint["provider_state"]["operations"]
     assert "coverage:exa_people" in operations
     assert "coverage:clay" in operations
-    assert "coverage:apollo" not in operations
+    assert "coverage:apollo" in operations
     assert "coverage:instantly" in operations
 
 
 def test_shadow_clay_no_email_does_not_unlock_apollo(tmp_path: Path) -> None:
-    """A coverage-only Clay no-email result cannot become an Apollo fallback trigger."""
+    """A completed Clay no-email result cannot authorize a new paid Apollo dispatch."""
     company = coverage_helpers._company("rejected")
     run_dir = tmp_path / "shadow-clay-no-email"
     coverage_helpers._write_normal_state(run_dir, company)
@@ -188,8 +188,8 @@ def test_shadow_clay_no_email_does_not_unlock_apollo(tmp_path: Path) -> None:
 def test_normal_clay_usable_email_shadows_apollo_once_then_rerun_is_zero_dispatch(
     tmp_path: Path,
 ) -> None:
-    """Normal Clay success is the one legal reason to spend the unused Apollo shadow slot."""
-    company, contact = _normal_contact_with_email("accepted", "clay")
+    """Normal Clay success authorizes exactly one unused Apollo shadow slot."""
+    company, contact = _normal_contact_with_email("clay")
     run_dir = tmp_path / "normal-clay-email"
     coverage_helpers._write_normal_state(
         run_dir,
@@ -228,11 +228,9 @@ def test_normal_clay_usable_email_shadows_apollo_once_then_rerun_is_zero_dispatc
     assert len(apollo.contacts) == 1
 
 
-def test_normal_apollo_fallback_consumes_shared_slot_and_suppresses_shadow(
-    tmp_path: Path,
-) -> None:
-    """Normal Clay no-email -> normal Apollo fallback is reused, never duplicated privately."""
-    company, contact = _normal_contact_with_email("accepted", "apollo")
+def test_normal_apollo_evidence_is_reused_without_shadow_dispatch(tmp_path: Path) -> None:
+    """Existing normal Apollo evidence consumes the shared slot even when Clay has no email."""
+    company, contact = _normal_contact_with_email("apollo")
     run_dir = tmp_path / "normal-apollo-fallback"
     coverage_helpers._write_normal_state(
         run_dir,
@@ -271,11 +269,16 @@ def test_normal_apollo_fallback_consumes_shared_slot_and_suppresses_shadow(
     assert second.status == "completed"
 
 
-def _write_coverage_only_clay_email(run_dir: Path, run_id: str, decision: str) -> None:
-    """Persist legal nonaccepted Exa/Clay/Instantly coverage with no Apollo operation."""
+def _write_private_exa_and_clay(
+    run_dir: Path,
+    run_id: str,
+    *,
+    clay_email: str | None,
+) -> None:
+    """Persist legal rejected-company coverage through one terminal Clay outcome."""
     outcome_helpers._write_normal(run_dir, run_id)
     company = outcome_helpers._company()
-    company.final_decision = decision
+    company.final_decision = "rejected"
     write_jsonl_atomic(run_dir / "companies_evaluated.jsonl", [company.to_dict()])
     write_json_atomic(
         run_dir / "contact_checkpoint.json",
@@ -358,44 +361,21 @@ def _write_coverage_only_clay_email(run_dir: Path, run_id: str, decision: str) -
         input_value=contact_input,
         fields={
             "routine_run_id": "shadow-clay",
-            "work_email": "alice.owner@acme.com",
-            "business_outcome": "email",
-        },
-    )
-
-    private.begin(
-        "coverage:instantly",
-        "instantly_create",
-        input_value="alice.owner@acme.com",
-    )
-    private.record_usage(
-        "coverage:instantly",
-        "instantly_create",
-        input_value="alice.owner@acme.com",
-        event=UsageEvent(provider="instantly", operation="email_verification_create"),
-    )
-    private.finish(
-        "coverage:instantly",
-        input_value="alice.owner@acme.com",
-        fields={
-            "email": "alice.owner@acme.com",
-            "verification_status": "verified",
-            "business_outcome": "verified",
+            "work_email": clay_email,
+            "business_outcome": "email" if clay_email is not None else "no_email",
         },
     )
     private.complete()
 
 
-@pytest.mark.parametrize("decision", ["rejected", "uncertain"])
-def test_absent_apollo_is_inconclusive_without_normal_clay_prerequisite(
+def test_shadow_clay_no_email_without_normal_apollo_reports_inconclusive(
     tmp_path: Path,
-    decision: str,
 ) -> None:
-    """Coverage-only Clay success cannot turn missing Apollo into a readiness failure."""
-    run_id = f"report-{decision}"
+    """A valid Clay no-email outcome is a missing Apollo prerequisite, not a failure."""
+    run_id = "report-clay-no-email"
     run_dir = tmp_path / run_id
     run_dir.mkdir()
-    _write_coverage_only_clay_email(run_dir, run_id, decision)
+    _write_private_exa_and_clay(run_dir, run_id, clay_email=None)
 
     report = build_canary_coverage_report(tmp_path, run_id=run_id)
 
@@ -405,20 +385,17 @@ def test_absent_apollo_is_inconclusive_without_normal_clay_prerequisite(
         "inconclusive",
         "not_exercised",
     )
-    assert instantly.integration_outcome == "success"
+    assert instantly.integration_outcome == "inconclusive"
     assert report.pipeline_outcome == "inconclusive"
     assert report.overall_outcome == "inconclusive"
 
 
-def test_absent_apollo_is_failure_when_normal_clay_supplied_usable_email(
-    tmp_path: Path,
-) -> None:
-    """A normal canonical Clay email legally requires successful Apollo shadow coverage."""
-    run_id = "normal-clay-requires-apollo"
+def test_shadow_clay_usable_email_makes_missing_apollo_a_failure(tmp_path: Path) -> None:
+    """Coverage-only Clay success makes Apollo coverage required even for a rejected company."""
+    run_id = "report-clay-email"
     run_dir = tmp_path / run_id
     run_dir.mkdir()
-    outcome_helpers._write_normal(run_dir, run_id)
-    outcome_helpers._write_contacts(run_dir, run_id, status="verified", instantly=True)
+    _write_private_exa_and_clay(run_dir, run_id, clay_email="alice.owner@acme.com")
 
     report = build_canary_coverage_report(tmp_path, run_id=run_id)
 

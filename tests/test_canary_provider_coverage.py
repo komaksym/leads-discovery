@@ -266,7 +266,8 @@ def test_rejected_company_coverage_uses_production_lineage_without_mutating_cont
     )
     assert second.status == "completed"
     assert clay.result_ids == ["shadow-clay-run"]
-    assert apollo.contacts == []
+    assert len(apollo.contacts) == 1
+    assert apollo.contacts[0].to_dict() == expected.to_dict()
     assert instantly.created == ["alice.owner@acme.com"]
     assert (run_dir / "contacts.jsonl").read_text(encoding="utf-8") == canonical_before
 
