@@ -29,6 +29,7 @@ from leads_discovery.contacts.selection import (
     select_contacts,
 )
 from leads_discovery.models import CompanyRecord, RunCheckpoint, UsageEvent
+from leads_discovery.pipeline.canary_checkpoint import write_checkpoint
 from leads_discovery.pipeline.costs import CostTracker
 from leads_discovery.pipeline.paid_operations import (
     STATUS_READS_ADMITTED_KEY,
@@ -42,7 +43,6 @@ from leads_discovery.pipeline.state import (
     load_jsonl,
     load_usage_events,
     read_json,
-    write_checkpoint,
     write_json_atomic,
     write_jsonl_atomic,
     write_text_atomic,

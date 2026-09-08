@@ -123,41 +123,73 @@ def _request(
     content: bytes | None = None,
     binary: bool = False,
 ) -> httpx.Response:
+    """Send one bounded GitHub request without buffering an untrusted response first."""
     headers = _headers(config, binary=binary)
     if content is not None:
         headers["Content-Type"] = "application/octet-stream"
     try:
-        with httpx.Client(timeout=_TIMEOUT, follow_redirects=True) as client:
-            return client.request(method, url, headers=headers, json=body, content=content)
+        with httpx.Client(timeout=_TIMEOUT, follow_redirects=True) as client, client.stream(
+            method,
+            url,
+            headers=headers,
+            json=body,
+            content=content,
+        ) as response:
+            raw_length = response.headers.get("content-length")
+            if raw_length is not None:
+                try:
+                    declared = int(raw_length)
+                except ValueError as exc:
+                    raise RuntimeError(
+                        "canary private journal API Content-Length is invalid"
+                    ) from exc
+                if declared < 0 or declared > _MAX_API_BYTES:
+                    raise RuntimeError(
+                        "canary private journal API response exceeds its fixed bound"
+                    )
+            data = bytearray()
+            for chunk in response.iter_bytes():
+                if len(data) + len(chunk) > _MAX_API_BYTES:
+                    raise RuntimeError(
+                        "canary private journal API response exceeds its fixed bound"
+                    )
+                data.extend(chunk)
+            return httpx.Response(
+                response.status_code,
+                headers=response.headers,
+                content=bytes(data),
+                request=response.request,
+            )
     except httpx.HTTPError as exc:
         raise RuntimeError("canary private journal request failed") from exc
 
 
 def _download_bytes(config: _Config, url: str) -> bytes:
     try:
-        with httpx.Client(timeout=_TIMEOUT, follow_redirects=True) as client:
-            with client.stream("GET", url, headers=_headers(config, binary=True)) as response:
-                if response.status_code != 200:
-                    raise RuntimeError("canary private journal asset download failed")
-                raw_length = response.headers.get("content-length")
-                if raw_length is not None:
-                    try:
-                        declared = int(raw_length)
-                    except ValueError as exc:
-                        raise RuntimeError(
-                            "canary private journal asset Content-Length is invalid"
-                        ) from exc
-                    if declared > _MAX_ASSET_BYTES:
-                        raise RuntimeError(
-                            "canary private journal asset size exceeds its fixed bound"
-                        )
-                data = bytearray()
-                for chunk in response.iter_bytes():
-                    if len(data) + len(chunk) > _MAX_ASSET_BYTES:
-                        raise RuntimeError(
-                            "canary private journal asset size exceeds its fixed bound"
-                        )
-                    data.extend(chunk)
+        with httpx.Client(timeout=_TIMEOUT, follow_redirects=True) as client, client.stream(
+            "GET", url, headers=_headers(config, binary=True)
+        ) as response:
+            if response.status_code != 200:
+                raise RuntimeError("canary private journal asset download failed")
+            raw_length = response.headers.get("content-length")
+            if raw_length is not None:
+                try:
+                    declared = int(raw_length)
+                except ValueError as exc:
+                    raise RuntimeError(
+                        "canary private journal asset Content-Length is invalid"
+                    ) from exc
+                if declared < 0 or declared > _MAX_ASSET_BYTES:
+                    raise RuntimeError(
+                        "canary private journal asset size exceeds its fixed bound"
+                    )
+            data = bytearray()
+            for chunk in response.iter_bytes():
+                if len(data) + len(chunk) > _MAX_ASSET_BYTES:
+                    raise RuntimeError(
+                        "canary private journal asset size exceeds its fixed bound"
+                    )
+                data.extend(chunk)
     except httpx.HTTPError as exc:
         raise RuntimeError("canary private journal request failed") from exc
     if len(data) <= _NONCE_BYTES + _TAG_BYTES:
@@ -175,7 +207,9 @@ def _json(response: httpx.Response) -> Any:
 
 
 def _tag(config: _Config, run_id: str) -> str:
-    digest = hmac.new(config.key, run_id.encode(), hashlib.sha256).hexdigest()[:32]
+    """Return a stable release identity that does not change when encryption keys rotate."""
+    del config
+    digest = hashlib.sha256(f"{_PREFIX}\0release\0{run_id}".encode()).hexdigest()[:32]
     return f"{_PREFIX}-{digest}"
 
 
@@ -732,11 +766,16 @@ def _private_snapshot(
     checkpoint: RunCheckpoint,
     previous: RunCheckpoint | None,
     remote: dict[str, Any] | None,
+    private_usage: list[dict[str, Any]] | None,
 ) -> dict[str, Any] | None:
     if not _is_private(checkpoint):
         return None
     usage: list[dict[str, Any]] = []
-    if remote is not None:
+    if private_usage is not None:
+        if any(not isinstance(row, dict) for row in private_usage):
+            raise ValueError("canary private journal usage state is invalid")
+        usage = [dict(row) for row in private_usage]
+    elif remote is not None:
         raw = remote.get("usage_events")
         if not isinstance(raw, list) or any(not isinstance(row, dict) for row in raw):
             raise ValueError("canary private journal usage state is invalid")
@@ -747,9 +786,12 @@ def _private_snapshot(
 
 
 def sync_checkpoint_barrier(
-    checkpoint: RunCheckpoint, previous: RunCheckpoint | None
+    checkpoint: RunCheckpoint,
+    previous: RunCheckpoint | None,
+    *,
+    private_usage: list[dict[str, Any]] | None = None,
 ) -> None:
-    """Persist encrypted remote intent before local paid checkpoint replacement."""
+    """Persist encrypted remote intent and its usage snapshot before local replacement."""
     if not git_journal_configured():
         return
     if _RUN_ID.fullmatch(checkpoint.run_id) is None:
@@ -792,7 +834,12 @@ def sync_checkpoint_barrier(
             barriers[op_hash] = state
             changed = True
     remote_private = cast(dict[str, Any] | None, transition["private_state"])
-    private = _private_snapshot(checkpoint, previous, remote_private)
+    private = _private_snapshot(
+        checkpoint,
+        previous,
+        remote_private,
+        private_usage,
+    )
     if private is not None:
         transition["private_state"] = private
         changed = True

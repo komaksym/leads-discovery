@@ -170,6 +170,15 @@ def _normal_m4_resume_allowed(data_root: Path, run_id: str) -> bool:
     return reads is not None and reads < _NORMAL_ASYNC_READ_LIMIT
 
 
+def _normal_m4_requires_resume(data_root: Path, run_id: str) -> bool:
+    """Return whether a restored normal restart capsule contains unfinished M4 work."""
+    try:
+        payload = read_json(data_root / run_id / "contact_checkpoint.json")
+    except (OSError, UnicodeError, ValueError):
+        return True
+    return not isinstance(payload, dict) or payload.get("status") != "completed"
+
+
 def _run_normal(args: argparse.Namespace) -> tuple[int, bool]:
     """Run normal M1-M4 only when no validated completed-normal restart snapshot exists."""
     if restore_canary_restart_state(args.data_root, run_id=args.run_id):
@@ -258,7 +267,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     coverage_pending = False
     normal_pending = False
     if run_code == 0:
-        if restored_normal:
+        if restored_normal and not _normal_m4_requires_resume(
+            args.data_root,
+            args.run_id,
+        ):
             enrich_code = 0
         else:
             enrich_code, normal_pending = _run_normal_enrichment(args)

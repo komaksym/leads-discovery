@@ -35,6 +35,7 @@ from leads_discovery.models import (
     RunCheckpoint,
     UsageEvent,
 )
+from leads_discovery.pipeline.canary_checkpoint import write_checkpoint
 from leads_discovery.pipeline.costs import CostTracker
 from leads_discovery.pipeline.paid_operations import (
     PaidOperationLifecycle,
@@ -48,7 +49,6 @@ from leads_discovery.pipeline.state import (
     load_jsonl,
     load_latest_company_records,
     read_json,
-    write_checkpoint,
     write_json_atomic,
 )
 from leads_discovery.research import (

@@ -3,16 +3,16 @@
 from __future__ import annotations
 
 import csv
-import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Final, Literal, cast
+from typing import Any, Literal, cast
 
 from leads_discovery.contacts.models import ContactRecord
 from leads_discovery.contacts.providers import usable_work_email
 from leads_discovery.models import CompanyRecord, RunCheckpoint, UsageEvent
 from leads_discovery.pipeline.canary_m4_evidence import normal_apollo_shadow_authorization
 from leads_discovery.pipeline.canary_paid_operations import CanaryPaidOperations
+from leads_discovery.pipeline.canary_paths import canary_run_dir
 from leads_discovery.pipeline.contact_enrichment import (
     ContactEnrichmentConfig,
     validate_contact_enrichment_state,
@@ -27,7 +27,6 @@ from leads_discovery.pipeline.state import (
 Outcome = Literal["success", "inconclusive", "failure"]
 CoverageSource = Literal["normal", "coverage_only"]
 
-_RUN_ID: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 _REPORT_NAME = "canary_coverage_report.json"
 _REQUIRED = (
     "exa_discovery",
@@ -94,24 +93,6 @@ class _State:
     contacts: list[ContactRecord]
     leads: list[dict[str, str]]
     safety_flags: list[str]
-
-
-def _run_dir(data_root: Path, run_id: str) -> Path:
-    if not isinstance(run_id, str) or _RUN_ID.fullmatch(run_id) is None:
-        raise ValueError("run_id must match [A-Za-z0-9][A-Za-z0-9._-]{0,63}")
-    root = data_root.expanduser()
-    if root.is_symlink():
-        raise ValueError("data_root must not be a symlink")
-    root = root.resolve()
-    root.mkdir(parents=True, exist_ok=True)
-    candidate = root / run_id
-    if candidate.is_symlink():
-        raise ValueError("run directory must not be a symlink")
-    run_dir = candidate.resolve()
-    if run_dir.parent != root:
-        raise ValueError("run directory must remain directly beneath data_root")
-    run_dir.mkdir(exist_ok=True)
-    return run_dir
 
 
 def _checkpoint(path: Path, run_id: str) -> RunCheckpoint | None:
@@ -671,7 +652,7 @@ def _pipeline_success(state: _State) -> bool:
 
 def build_canary_coverage_report(data_root: Path | str, *, run_id: str) -> CanaryCoverageReport:
     """Rebuild the private report from authoritative state without provider calls."""
-    run_dir = _run_dir(Path(data_root), run_id)
+    run_dir = canary_run_dir(Path(data_root), run_id)
     state = _load_state(run_dir, run_id)
     providers = (*_m1_m3(state), *_m4(state))
     if tuple(item.provider for item in providers) != _REQUIRED:

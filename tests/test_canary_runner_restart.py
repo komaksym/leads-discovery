@@ -17,8 +17,14 @@ from leads_discovery.contacts.providers import (
     VerificationResult,
 )
 from leads_discovery.contacts.selection import select_contacts
+from leads_discovery.models import RunCheckpoint
 from leads_discovery.pipeline.canary_provider_coverage import run_provider_coverage
+from leads_discovery.pipeline.canary_restart import (
+    restore_canary_restart_state,
+    snapshot_canary_restart_state,
+)
 from leads_discovery.pipeline.git_journal import persist_canary_private_state
+from leads_discovery.pipeline.state import read_json, write_json_atomic
 
 _LEADS_HEADER = "company_id,contact_id,work_email,email_verification_status,email_source\n"
 
@@ -146,6 +152,127 @@ def test_production_canary_fresh_runner_restores_before_normal_cli_dispatch(
             )
             == 2
         )
+
+
+def test_production_canary_resumes_pending_normal_m4_after_runner_loss(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A durable pending normal M4 checkpoint resumes without rebuilding normal M1-M3 work."""
+    with DraftReleaseJournalServer() as journal:
+        journal.configure(monkeypatch)
+        run_id = "restart-normal-m4"
+        first_run_dir = _normal_run_dir(tmp_path / "runner-a", run_id)
+        write_json_atomic(
+            first_run_dir / "contact_checkpoint.json",
+            RunCheckpoint(
+                run_id=run_id,
+                status="paused_pending",
+                pause_reason="clay_pending",
+                provider_state={
+                    "operations": {
+                        "clay:batch": {
+                            "state": "pending",
+                            "routine_run_id": "normal-clay-run",
+                            "status_reads_admitted": 0,
+                        }
+                    }
+                },
+            ).to_dict(),
+        )
+        snapshot_canary_restart_state(
+            first_run_dir,
+            run_id=run_id,
+        )
+
+        calls: list[list[str]] = []
+
+        def resume_normal_m4(argv: object = None) -> int:
+            assert isinstance(argv, list)
+            calls.append(argv)
+            assert argv[0] == "enrich"
+            return 0
+
+        def fake_coverage(root: Path, *, run_id: str) -> SimpleNamespace:
+            assert (root / run_id / "contact_checkpoint.json").is_file()
+            return SimpleNamespace(status="completed")
+
+        def fake_report(_root: Path, *, run_id: str) -> SimpleNamespace:
+            assert run_id == "restart-normal-m4"
+            return SimpleNamespace(overall_outcome="inconclusive")
+
+        monkeypatch.setattr(production_canary, "cli_main", resume_normal_m4)
+        monkeypatch.setattr(production_canary, "sleep", lambda _seconds: None)
+        monkeypatch.setattr(production_canary, "run_live_provider_coverage", fake_coverage)
+        monkeypatch.setattr(production_canary, "build_canary_coverage_report", fake_report)
+
+        assert (
+            production_canary.main(
+                [
+                    "--run-id",
+                    run_id,
+                    "--data-root",
+                    str(tmp_path / "runner-b" / "data"),
+                ]
+            )
+            == 2
+        )
+        assert len(calls) == 1
+
+
+def test_normal_restart_capsule_advances_pending_identity_without_overwriting_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Restart authority advances only along the same persisted normal paid identity."""
+    with DraftReleaseJournalServer() as journal:
+        journal.configure(monkeypatch)
+        run_id = "restart-normal-progress"
+        run_dir = _normal_run_dir(tmp_path / "runner-a", run_id)
+        in_flight = RunCheckpoint(
+            run_id=run_id,
+            status="running",
+            provider_state={
+                "operations": {
+                    "clay:batch": {
+                        "state": "in_flight",
+                        "dispatch_id": "dispatch-one",
+                        "input_fingerprint": "fingerprint-one",
+                    }
+                }
+            },
+        )
+        write_json_atomic(run_dir / "contact_checkpoint.json", in_flight.to_dict())
+        snapshot_canary_restart_state(run_dir, run_id=run_id)
+
+        pending = RunCheckpoint.from_dict(in_flight.to_dict())
+        pending.status = "paused_pending"
+        pending.pause_reason = "clay_pending"
+        pending.provider_state["operations"]["clay:batch"].update(
+            {"state": "pending", "routine_run_id": "routine-one"}
+        )
+        write_json_atomic(run_dir / "contact_checkpoint.json", pending.to_dict())
+        snapshot_canary_restart_state(run_dir, run_id=run_id)
+
+        restored_root = tmp_path / "runner-b" / "data"
+        assert restore_canary_restart_state(
+            restored_root,
+            run_id=run_id,
+        )
+        restored = read_json(restored_root / run_id / "contact_checkpoint.json")
+        assert restored is not None
+        assert restored["status"] == "paused_pending"
+        assert (
+            restored["provider_state"]["operations"]["clay:batch"]["routine_run_id"]
+            == "routine-one"
+        )
+
+        pending.provider_state["operations"]["clay:batch"]["routine_run_id"] = (
+            "different-routine"
+        )
+        write_json_atomic(run_dir / "contact_checkpoint.json", pending.to_dict())
+        with pytest.raises(RuntimeError, match="disagrees with durable restart state"):
+            snapshot_canary_restart_state(run_dir, run_id=run_id)
 
 
 def test_runner_loss_after_pending_shadow_clay_resumes_same_routine_without_new_paid_start(

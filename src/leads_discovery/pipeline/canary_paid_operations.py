@@ -12,9 +12,13 @@ from pathlib import Path
 from typing import Any, Final, Literal
 
 from leads_discovery.models import RunCheckpoint, UsageEvent
+from leads_discovery.pipeline.canary_checkpoint import (
+    read_canary_checkpoint,
+    write_checkpoint,
+)
 from leads_discovery.pipeline.costs import CostTracker
 from leads_discovery.pipeline.paid_operations import PaidOperationLifecycle, transition_checkpoint
-from leads_discovery.pipeline.state import load_usage_events, read_json, write_checkpoint
+from leads_discovery.pipeline.state import load_usage_events, read_json
 
 ResourceName = Literal[
     "exa_people_search",
@@ -346,7 +350,7 @@ class CanaryPaidOperations:
         """Open and validate the private canary operation domain without copying normal usage."""
         checkpoint_path = run_dir / "canary_paid_checkpoint.json"
         usage_path = run_dir / "canary_paid_usage_events.jsonl"
-        payload = read_json(checkpoint_path)
+        payload = read_canary_checkpoint(checkpoint_path)
         checkpoint = (
             RunCheckpoint(run_id=run_id, provider_state={"operations": {}})
             if payload is None

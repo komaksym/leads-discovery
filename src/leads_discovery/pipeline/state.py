@@ -11,21 +11,11 @@ from pathlib import Path
 from typing import Any, cast
 
 from leads_discovery.models import CompanyRecord, RunCheckpoint, UsageEvent
-from leads_discovery.pipeline.git_journal import (
-    git_journal_configured,
-    load_canary_private_state,
-    persist_canary_private_state,
-    sync_checkpoint_barrier,
-)
 
 _DEFAULT_MAX_RECORD_BYTES = 256 * 1024
 _DEFAULT_MAX_FILE_BYTES = 16 * 1024 * 1024
 _DEFAULT_MAX_RUN_BYTES = 64 * 1024 * 1024
 _DEFAULT_MAX_RECORDS = 10_000
-_CANARY_PAID_CHECKPOINT = "canary_paid_checkpoint.json"
-_CANARY_PAID_USAGE = "canary_paid_usage_events.jsonl"
-
-
 def _positive_limit(name: str, default: int) -> int:
     """Read one optional positive integer resource limit from the environment."""
     raw = os.getenv(name)
@@ -380,110 +370,16 @@ def _read_json_file(path: Path) -> dict[str, Any]:
     return cast(dict[str, Any], payload)
 
 
-def _validated_remote_canary_state(
-    checkpoint_path: Path,
-) -> tuple[dict[str, Any], list[dict[str, Any]]] | None:
-    """Load and validate the encrypted private restart capsule before local use."""
-    run_id = checkpoint_path.parent.name
-    remote = load_canary_private_state(run_id)
-    if remote is None:
-        return None
-    if set(remote) != {"checkpoint", "usage_events"}:
-        raise ValueError("canary private Git journal state shape is invalid")
-    checkpoint_payload = remote.get("checkpoint")
-    usage_payloads = remote.get("usage_events")
-    if not isinstance(checkpoint_payload, dict) or not isinstance(usage_payloads, list):
-        raise ValueError("canary private Git journal state is invalid")
-    checkpoint = RunCheckpoint.from_dict(checkpoint_payload)
-    if checkpoint.run_id != run_id:
-        raise ValueError("canary private Git journal run_id mismatch")
-    validated_usage: list[dict[str, Any]] = []
-    for payload in usage_payloads:
-        if not isinstance(payload, dict):
-            raise ValueError("canary private Git journal usage row is invalid")
-        event = UsageEvent.from_dict(payload)
-        _validate_usage_event(event)
-        validated_usage.append(event.to_dict())
-    return checkpoint.to_dict(), validated_usage
-
-
-def _restore_or_validate_canary_private_state(checkpoint_path: Path) -> None:
-    """Restore a lost runner-local private state or reject disagreement with durable state."""
-    if checkpoint_path.name != _CANARY_PAID_CHECKPOINT:
-        return
-    configured = git_journal_configured()
-    remote = _validated_remote_canary_state(checkpoint_path)
-    usage_path = checkpoint_path.parent / _CANARY_PAID_USAGE
-    if remote is None:
-        if configured and (checkpoint_path.exists() or usage_path.exists()):
-            raise RuntimeError("canary private local state lacks a durable Git journal capsule")
-        return
-    remote_checkpoint, remote_usage = remote
-    if checkpoint_path.exists():
-        local_checkpoint = _read_json_file(checkpoint_path)
-        local_usage = load_jsonl(usage_path)
-        if local_checkpoint != remote_checkpoint or local_usage != remote_usage:
-            raise RuntimeError("canary private local state disagrees with durable Git journal")
-        return
-    if usage_path.exists():
-        raise RuntimeError("canary private local usage exists without its durable checkpoint")
-    write_json_atomic(checkpoint_path, remote_checkpoint)
-    write_jsonl_atomic(usage_path, remote_usage)
-
-
 def read_json(path: Path) -> dict[str, Any] | None:
-    """Read one bounded JSON object, restoring configured canary-private restart state."""
-    _restore_or_validate_canary_private_state(path)
+    """Read one bounded JSON object without applying domain-specific restoration rules."""
     if not path.exists():
         return None
     return _read_json_file(path)
 
 
-def _persist_canary_private_state(path: Path, checkpoint: RunCheckpoint) -> None:
-    """Mirror exact private checkpoint+usage authority after each local checkpoint transition."""
-    if path.name != _CANARY_PAID_CHECKPOINT:
-        return
-    if path.parent.name != checkpoint.run_id:
-        raise ValueError("canary private checkpoint path must match its run_id")
-    usage_payloads = load_jsonl(path.parent / _CANARY_PAID_USAGE)
-    persist_canary_private_state(
-        checkpoint.run_id,
-        {
-            "checkpoint": checkpoint.to_dict(),
-            "usage_events": usage_payloads,
-        },
-    )
-
-
-def _snapshot_normal_canary_before_first_private_barrier(
-    path: Path,
-    checkpoint: RunCheckpoint,
-    previous: RunCheckpoint | None,
-) -> None:
-    """Persist bounded normal restart authority before the first private paid barrier."""
-    if (
-        previous is not None
-        or path.name != _CANARY_PAID_CHECKPOINT
-        or not git_journal_configured()
-    ):
-        return
-    if path.parent.name != checkpoint.run_id:
-        raise ValueError("canary private checkpoint path must match its run_id")
-    from leads_discovery.pipeline.canary_restart import snapshot_canary_restart_state
-
-    snapshot_canary_restart_state(path.parent, run_id=checkpoint.run_id)
-
-
 def write_checkpoint(path: Path, checkpoint: RunCheckpoint) -> None:
-    """Durably publish paid-operation barriers before atomically replacing local checkpoint."""
-    previous_payload = _read_json_file(path) if path.exists() else None
-    previous = (
-        None if previous_payload is None else RunCheckpoint.from_dict(previous_payload)
-    )
-    _snapshot_normal_canary_before_first_private_barrier(path, checkpoint, previous)
-    sync_checkpoint_barrier(checkpoint, previous)
+    """Atomically replace one generic checkpoint without domain-specific side effects."""
     write_json_atomic(path, checkpoint.to_dict())
-    _persist_canary_private_state(path, checkpoint)
 
 
 def load_checkpoint(path: Path) -> RunCheckpoint | None:

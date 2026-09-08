@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 from private_journal_http import DraftReleaseJournalServer
 
@@ -56,6 +57,79 @@ def test_remote_barrier_and_pending_identity_become_durable_in_one_transition(
         ciphertext = b"".join(data for _name, data in journal.assets.values())
         assert b"routine-one" not in ciphertext
         assert b"dispatch-one" not in ciphertext
+
+
+def test_remote_barrier_can_publish_the_current_usage_snapshot_in_one_transition(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The encrypted transition carries the checkpoint and its current usage together."""
+    with DraftReleaseJournalServer() as journal:
+        journal.configure(monkeypatch)
+        checkpoint = _private_checkpoint("atomic-usage")
+        usage = [{"provider": "clay", "operation": "work_email_routine_start"}]
+
+        sync_checkpoint_barrier(checkpoint, None, private_usage=usage)
+
+        durable = load_canary_private_state("atomic-usage")
+        assert durable is not None
+        assert durable["checkpoint"] == checkpoint.to_dict()
+        assert durable["usage_events"] == usage
+
+
+def test_api_response_bound_is_enforced_while_streaming(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A hostile API response cannot be buffered beyond the fixed response ceiling."""
+    real_client = httpx.Client
+
+    def client_factory(*args: Any, **kwargs: Any) -> httpx.Client:
+        kwargs["transport"] = httpx.MockTransport(
+            lambda request: httpx.Response(
+                200,
+                content=b"x" * (git_journal_module._MAX_API_BYTES + 1),
+                headers={"content-length": str(git_journal_module._MAX_API_BYTES + 1)},
+                request=request,
+            )
+        )
+        return real_client(*args, **kwargs)
+
+    monkeypatch.setattr(httpx, "Client", client_factory)
+    config = git_journal_module._Config(
+        token="token",
+        repository="acme/leads",
+        api_url="https://api.github.test",
+        key=b"k" * 32,
+    )
+
+    with pytest.raises(RuntimeError, match="API response exceeds"):
+        git_journal_module._request(
+            config,
+            "GET",
+            "https://api.github.test/oversized",
+        )
+
+
+def test_key_rotation_fails_closed_against_the_existing_journal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Changing the encryption key cannot create a second journal for the same run identity."""
+    with DraftReleaseJournalServer() as journal:
+        journal.configure(monkeypatch)
+        run_id = "stable-journal-identity"
+        persist_canary_private_state(
+            run_id,
+            {"checkpoint": {"marker": "durable"}, "usage_events": []},
+        )
+        release_count = len(journal.releases)
+        monkeypatch.setenv(
+            "LEADS_PRIVATE_JOURNAL_KEY",
+            "rotated-key-that-is-also-at-least-32-bytes",
+        )
+
+        with pytest.raises(RuntimeError, match="head authentication"):
+            load_canary_private_state(run_id)
+
+        assert len(journal.releases) == release_count
 
 
 def test_latest_authority_does_not_depend_on_release_asset_id_order(
@@ -203,8 +277,9 @@ def test_same_revision_race_cannot_let_both_writers_commit(
         errors = [future.exception() for future in futures]
 
         assert sum(error is None for error in errors) <= 1
-        with pytest.raises(RuntimeError, match="duplicate revisions"):
-            load_canary_private_state(run_id)
+        durable = load_canary_private_state(run_id)
+        assert durable is not None
+        assert durable["checkpoint"]["marker"] in {"seed", "left", "right"}
 
 
 def test_repeated_new_inflight_operation_is_blocked_by_remote_barrier(

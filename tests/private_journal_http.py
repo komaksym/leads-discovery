@@ -147,7 +147,7 @@ class DraftReleaseJournalServer(AbstractContextManager["DraftReleaseJournalServe
             raw_id = path[len(release_prefix) :]
             if raw_id.isdigit():
                 release_id = int(raw_id)
-                release = next(
+                found_release = next(
                     (
                         item
                         for item in self._releases
@@ -155,7 +155,7 @@ class DraftReleaseJournalServer(AbstractContextManager["DraftReleaseJournalServe
                     ),
                     None,
                 )
-                if release is None:
+                if found_release is None:
                     return self._json_response(
                         request, 404, {"message": "release not found"}
                     )
@@ -164,9 +164,9 @@ class DraftReleaseJournalServer(AbstractContextManager["DraftReleaseJournalServe
                     return self._json_response(request, 422, {"message": "invalid"})
                 for key in ("body", "name", "draft"):
                     if key in payload:
-                        release[key] = payload[key]
+                        found_release[key] = payload[key]
                 return self._json_response(
-                    request, 200, self._release_payload(release)
+                    request, 200, self._release_payload(found_release)
                 )
 
         upload_prefix = "/uploads/"
