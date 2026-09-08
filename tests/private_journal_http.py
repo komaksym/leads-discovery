@@ -7,7 +7,7 @@ import threading
 from collections.abc import Iterator
 from contextlib import AbstractContextManager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any
+from typing import Any, cast
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -30,7 +30,7 @@ class _JournalHTTPServer(ThreadingHTTPServer):
 
     @property
     def origin(self) -> str:
-        host, port = self.server_address
+        host, port = cast(tuple[str, int], self.server_address)
         return f"http://{host}:{port}"
 
     def release_payload(self, release: dict[str, Any]) -> dict[str, Any]:

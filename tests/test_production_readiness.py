@@ -12,7 +12,7 @@ from private_journal_http import DraftReleaseJournalServer
 from production_readiness_core import *  # noqa: F401,F403
 
 
-def test_ambiguous_paid_operation_cannot_redispatch_after_remote_restart_barrier(
+def test_ambiguous_paid_operation_cannot_redispatch_after_remote_restart_barrier(  # type: ignore[no-redef]
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A durable private in-flight barrier blocks the same paid operation after local loss."""

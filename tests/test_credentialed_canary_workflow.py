@@ -1,14 +1,17 @@
 """Static security contract for the paid credentialed production canary workflow."""
 
-# ruff: noqa: F401, F403, I001
+# ruff: noqa: F401
 
 from __future__ import annotations
 
-from credentialed_canary_workflow_core import *  # noqa: F401,F403
 from credentialed_canary_workflow_core import (
     _REQUIRED_PROVIDERS,
     _canary_job,
     _workflow_text,
+    test_clay_managed_function_id_is_non_secret_environment_config,
+    test_exactly_one_paid_credentialed_canary_workflow_exists,
+    test_paid_canary_is_manual_immutable_and_ci_authorized,
+    test_secret_bearing_canary_job_rejects_non_main_dispatch_refs,
 )
 
 
