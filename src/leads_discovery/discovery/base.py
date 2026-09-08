@@ -328,8 +328,16 @@ def safe_transport_call(
     operation: str | None = None,
     request_count: int | None = None,
     metadata: dict[str, Any] | None = None,
+    known_unbilled_rejection: bool = False,
 ) -> httpx.Response:
-    """Run one streamed dispatch and enforce the stable provider request boundary."""
+    """Run one streamed dispatch and enforce the stable provider request boundary.
+
+    Billing certainty belongs to the provider boundary, not generic transport:
+    pass known_unbilled_rejection=True only when the caller can prove an HTTP
+    rejection or connect failure implies no charge (e.g. single-shot Exa search
+    rejected before execution). Post-start Apify polling/dataset failures must
+    keep the default False so ambiguous spend stays unknown and fail-closed.
+    """
     if context is None:
         if provider is None or request_id is None or operation is None or request_count is None:
             raise TypeError("provider request context is required")
@@ -344,7 +352,7 @@ def safe_transport_call(
             kind="transient",
             retryable=True,
             metadata={**(metadata or {"request_id": context.request_id}), "safe_to_retry": True},
-            estimated_cost_usd=0.0,
+            estimated_cost_usd=0.0 if known_unbilled_rejection else None,
         ) from None
     except httpx.HTTPError:
         raise context.error(
@@ -370,7 +378,7 @@ def safe_transport_call(
             retryable=retryable,
             status_code=status_code,
             metadata=metadata,
-            estimated_cost_usd=0.0,
+            estimated_cost_usd=0.0 if known_unbilled_rejection else None,
         ) from None
     return response
 
@@ -381,11 +389,13 @@ def request_json_at_boundary(
     *,
     context: ProviderRequestContext,
     metadata: dict[str, Any] | None = None,
+    known_unbilled_rejection: bool = False,
 ) -> tuple[Any, int]:
     """Dispatch one streamed request and return bounded JSON plus its successful status."""
     response = safe_transport_call(
         lambda: client.send(request, stream=True),
         context=context,
         metadata=metadata,
+        known_unbilled_rejection=known_unbilled_rejection,
     )
     return _decode_bounded_json(response, context, metadata=metadata), response.status_code

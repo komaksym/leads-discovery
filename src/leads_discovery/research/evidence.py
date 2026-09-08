@@ -249,6 +249,9 @@ class ExaEvidenceResearcher:
                 http_request,
                 context=context,
                 metadata=error_metadata,
+                # Single-shot Exa search rejected before execution proves no charge;
+                # a 2xx with missing/malformed costDollars below stays unknown.
+                known_unbilled_rejection=True,
             )
             if not isinstance(payload_raw, dict):
                 raise context.error(
