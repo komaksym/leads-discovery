@@ -295,7 +295,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 coverage_failed = True
 
     try:
-        report = build_canary_coverage_report(args.data_root, run_id=args.run_id)
+        if coverage_failed:
+            report = build_canary_coverage_report(
+                args.data_root,
+                run_id=args.run_id,
+                coverage_failed=True,
+            )
+        else:
+            report = build_canary_coverage_report(args.data_root, run_id=args.run_id)
     except (OSError, UnicodeError, ValueError):
         return 1
     if coverage_failed:

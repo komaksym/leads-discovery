@@ -650,10 +650,19 @@ def _pipeline_success(state: _State) -> bool:
     return False
 
 
-def build_canary_coverage_report(data_root: Path | str, *, run_id: str) -> CanaryCoverageReport:
+def build_canary_coverage_report(
+    data_root: Path | str,
+    *,
+    run_id: str,
+    coverage_failed: bool = False,
+) -> CanaryCoverageReport:
     """Rebuild the private report from authoritative state without provider calls."""
     run_dir = canary_run_dir(Path(data_root), run_id)
     state = _load_state(run_dir, run_id)
+    if coverage_failed:
+        state.safety_flags = sorted(
+            {*state.safety_flags, "coverage_execution_failed"}
+        )
     providers = (*_m1_m3(state), *_m4(state))
     if tuple(item.provider for item in providers) != _REQUIRED:
         raise AssertionError("canary integration order changed unexpectedly")

@@ -687,12 +687,21 @@ def _persist(
 def _transition_with_head(run_id: str) -> tuple[dict[str, Any], _JournalHead]:
     state, head = _load_with_head("transition", run_id)
     if state is None:
-        return {"barriers": {}, "private_state": None}, head
-    if set(state) != {"barriers", "private_state"}:
+        return {"barriers": {}, "private_state": None, "restart_state": None}, head
+    if set(state) not in (
+        {"barriers", "private_state"},
+        {"barriers", "private_state", "restart_state"},
+    ):
         raise ValueError("canary private journal transition shape is invalid")
-    barriers, private_state = state["barriers"], state["private_state"]
+    barriers, private_state, restart_state = (
+        state["barriers"],
+        state["private_state"],
+        state.get("restart_state"),
+    )
     if not isinstance(barriers, dict) or (
         private_state is not None and not isinstance(private_state, dict)
+    ) or (
+        restart_state is not None and not isinstance(restart_state, dict)
     ):
         raise ValueError("canary private journal transition is invalid")
     for key, value in barriers.items():
@@ -705,6 +714,9 @@ def _transition_with_head(run_id: str) -> tuple[dict[str, Any], _JournalHead]:
         "barriers": cast(dict[str, str], dict(barriers)),
         "private_state": (
             None if private_state is None else cast(dict[str, Any], dict(private_state))
+        ),
+        "restart_state": (
+            None if restart_state is None else cast(dict[str, Any], dict(restart_state))
         ),
     }, head
 
@@ -738,6 +750,18 @@ def persist_canary_restart_state(run_id: str, payload: dict[str, Any]) -> None:
 
 def load_canary_restart_state(run_id: str) -> dict[str, Any] | None:
     """Load completed normal prerequisites from private durable storage."""
+    transition, head = _transition_with_head(run_id)
+    restart_revision = head.restart_revision
+    transition_revision = head.transition_revision
+    embedded = transition["restart_state"]
+    if embedded is not None and (
+        restart_revision is None
+        or (
+            transition_revision is not None
+            and transition_revision >= restart_revision
+        )
+    ):
+        return cast(dict[str, Any], dict(embedded))
     return _load_with_head("restart", run_id)[0]
 
 
@@ -792,8 +816,9 @@ def sync_checkpoint_barrier(
     previous: RunCheckpoint | None,
     *,
     private_usage: list[dict[str, Any]] | None = None,
+    restart_state: dict[str, Any] | None = None,
 ) -> None:
-    """Persist encrypted remote intent and its usage snapshot before local replacement."""
+    """Persist encrypted remote intent and restart state before local replacement."""
     if not git_journal_configured():
         return
     if _RUN_ID.fullmatch(checkpoint.run_id) is None:
@@ -845,6 +870,12 @@ def sync_checkpoint_barrier(
     if private is not None:
         transition["private_state"] = private
         changed = True
+    if restart_state is not None:
+        if not isinstance(restart_state, dict):
+            raise ValueError("canary private journal restart state is invalid")
+        if transition["restart_state"] != restart_state:
+            transition["restart_state"] = dict(restart_state)
+            changed = True
     if changed:
         _persist("transition", checkpoint.run_id, transition, expected_head=head)
 

@@ -95,19 +95,26 @@ def _snapshot_normal_canary_before_private_barrier(
     snapshot_canary_restart_state(path.parent, run_id=checkpoint.run_id)
 
 
-def _snapshot_pending_normal_m4(path: Path, checkpoint: RunCheckpoint) -> None:
-    """Refresh restart authority after normal M4 durably records resumable async work."""
+def _pending_normal_m4_restart_state(
+    path: Path,
+    checkpoint: RunCheckpoint,
+) -> dict[str, Any] | None:
+    """Build restart authority with the pending M4 checkpoint before its local write."""
     if (
         path.name != _CONTACT_CHECKPOINT
         or checkpoint.status != "paused_pending"
         or not git_journal_configured()
     ):
-        return
+        return None
     if path.parent.name != checkpoint.run_id:
         raise ValueError("canary contact checkpoint path must match its run_id")
-    from leads_discovery.pipeline.canary_restart import snapshot_canary_restart_state
+    from leads_discovery.pipeline.canary_restart import build_canary_restart_state
 
-    snapshot_canary_restart_state(path.parent, run_id=checkpoint.run_id)
+    return build_canary_restart_state(
+        path.parent,
+        run_id=checkpoint.run_id,
+        contact_checkpoint=checkpoint.to_dict(),
+    )
 
 
 def write_checkpoint(path: Path, checkpoint: RunCheckpoint) -> None:
@@ -122,13 +129,14 @@ def write_checkpoint(path: Path, checkpoint: RunCheckpoint) -> None:
         if path.name == _CANARY_PAID_CHECKPOINT
         else None
     )
+    restart_state = _pending_normal_m4_restart_state(path, checkpoint)
     sync_checkpoint_barrier(
         checkpoint,
         previous,
         private_usage=private_usage,
+        restart_state=restart_state,
     )
     write_json_atomic(path, checkpoint.to_dict())
-    _snapshot_pending_normal_m4(path, checkpoint)
 
 
 __all__ = ["read_canary_checkpoint", "write_checkpoint"]

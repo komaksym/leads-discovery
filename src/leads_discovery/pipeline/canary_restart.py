@@ -271,10 +271,13 @@ def _restart_update_is_safe(
     )
 
 
-def snapshot_canary_restart_state(run_dir: Path, *, run_id: str) -> None:
-    """Mirror exactly the completed normal inputs needed after ephemeral runner loss."""
-    if not git_journal_configured():
-        return
+def build_canary_restart_state(
+    run_dir: Path,
+    *,
+    run_id: str,
+    contact_checkpoint: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build validated normal restart authority with an optional target M4 checkpoint."""
     if run_dir.name != run_id or run_dir.is_symlink() or not run_dir.is_dir():
         raise ValueError("canary restart snapshot requires the exact run directory")
     state = CanaryRestartState.from_dict(
@@ -284,8 +287,10 @@ def snapshot_canary_restart_state(run_dir: Path, *, run_id: str) -> None:
             "companies_evaluated": load_jsonl(
                 run_dir / "companies_evaluated.jsonl"
             ),
-            "contact_checkpoint": _required_json(
-                run_dir / "contact_checkpoint.json"
+            "contact_checkpoint": (
+                _required_json(run_dir / "contact_checkpoint.json")
+                if contact_checkpoint is None
+                else contact_checkpoint
             ),
             "contact_usage_events": load_jsonl(
                 run_dir / "contact_usage_events.jsonl"
@@ -293,6 +298,17 @@ def snapshot_canary_restart_state(run_dir: Path, *, run_id: str) -> None:
             "contacts": load_jsonl(run_dir / "contacts.jsonl"),
             "leads_csv": _leads_text(run_dir / "leads.csv"),
         },
+        run_id=run_id,
+    )
+    return state.to_dict()
+
+
+def snapshot_canary_restart_state(run_dir: Path, *, run_id: str) -> None:
+    """Mirror exactly the completed normal inputs needed after ephemeral runner loss."""
+    if not git_journal_configured():
+        return
+    state = CanaryRestartState.from_dict(
+        build_canary_restart_state(run_dir, run_id=run_id),
         run_id=run_id,
     )
     durable_payload = load_canary_restart_state(run_id)
@@ -368,6 +384,7 @@ def restore_canary_restart_state(data_root: Path, *, run_id: str) -> bool:
 
 __all__ = [
     "CanaryRestartState",
+    "build_canary_restart_state",
     "restore_canary_restart_state",
     "snapshot_canary_restart_state",
 ]

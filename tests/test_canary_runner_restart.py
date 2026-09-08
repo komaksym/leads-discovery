@@ -18,12 +18,16 @@ from leads_discovery.contacts.providers import (
 )
 from leads_discovery.contacts.selection import select_contacts
 from leads_discovery.models import RunCheckpoint
+from leads_discovery.pipeline import canary_checkpoint
 from leads_discovery.pipeline.canary_provider_coverage import run_provider_coverage
 from leads_discovery.pipeline.canary_restart import (
     restore_canary_restart_state,
     snapshot_canary_restart_state,
 )
-from leads_discovery.pipeline.git_journal import persist_canary_private_state
+from leads_discovery.pipeline.git_journal import (
+    load_canary_restart_state,
+    persist_canary_private_state,
+)
 from leads_discovery.pipeline.state import read_json, write_json_atomic
 
 _LEADS_HEADER = "company_id,contact_id,work_email,email_verification_status,email_source\n"
@@ -273,6 +277,59 @@ def test_normal_restart_capsule_advances_pending_identity_without_overwriting_it
         write_json_atomic(run_dir / "contact_checkpoint.json", pending.to_dict())
         with pytest.raises(RuntimeError, match="disagrees with durable restart state"):
             snapshot_canary_restart_state(run_dir, run_id=run_id)
+
+
+def test_normal_pending_checkpoint_and_restart_capsule_commit_together(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Runner loss after the barrier still restores the exact pending M4 read admission."""
+    with DraftReleaseJournalServer() as journal:
+        journal.configure(monkeypatch)
+        run_id = "atomic-normal-m4-pending"
+        run_dir = _normal_run_dir(tmp_path / "runner-a", run_id)
+        pending = RunCheckpoint(
+            run_id=run_id,
+            status="paused_pending",
+            pause_reason="clay_pending",
+            provider_state={
+                "operations": {
+                    "clay:batch": {
+                        "state": "pending",
+                        "routine_run_id": "normal-clay-run",
+                        "contact_ids": [],
+                        "status_reads_admitted": 2,
+                    }
+                }
+            },
+        )
+
+        def crash_before_local_checkpoint(*_args: object, **_kwargs: object) -> None:
+            raise RuntimeError("simulated runner loss")
+
+        monkeypatch.setattr(
+            canary_checkpoint,
+            "write_json_atomic",
+            crash_before_local_checkpoint,
+        )
+        with pytest.raises(RuntimeError, match="simulated runner loss"):
+            canary_checkpoint.write_checkpoint(
+                run_dir / "contact_checkpoint.json",
+                pending,
+            )
+
+        durable = load_canary_restart_state(run_id)
+        assert durable is not None
+        assert durable["contact_checkpoint"] == pending.to_dict()
+        restored_root = tmp_path / "runner-b" / "data"
+        assert restore_canary_restart_state(restored_root, run_id=run_id)
+        restored = read_json(restored_root / run_id / "contact_checkpoint.json")
+        assert restored is not None
+        assert (
+            restored["provider_state"]["operations"]["clay:batch"]
+            ["status_reads_admitted"]
+            == 2
+        )
 
 
 def test_runner_loss_after_pending_shadow_clay_resumes_same_routine_without_new_paid_start(
