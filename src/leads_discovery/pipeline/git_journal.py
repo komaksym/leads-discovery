@@ -177,7 +177,12 @@ def _assets(config: _Config, release: dict[str, Any]) -> list[dict[str, Any]]:
     for raw in payload:
         if not isinstance(raw, dict):
             raise RuntimeError("canary private journal asset entry is invalid")
-        asset_id, name, size = raw.get("id"), raw.get("name"), raw.get("size")
+        asset_id, name, size, state = (
+            raw.get("id"),
+            raw.get("name"),
+            raw.get("size"),
+            raw.get("state"),
+        )
         if (
             isinstance(asset_id, bool)
             or not isinstance(asset_id, int)
@@ -186,6 +191,7 @@ def _assets(config: _Config, release: dict[str, Any]) -> list[dict[str, Any]]:
             or isinstance(size, bool)
             or not isinstance(size, int)
             or size < 0
+            or state != "uploaded"
         ):
             raise RuntimeError("canary private journal asset entry is invalid")
         assets.append(cast(dict[str, Any], raw))
@@ -211,9 +217,46 @@ def _aad(kind: str, run_id: str) -> bytes:
     return f"{_PREFIX}\0{kind}\0{run_id}".encode()
 
 
-def _name(config: _Config, kind: str, run_id: str, state: dict[str, Any]) -> str:
-    digest = hmac.new(config.key, _plain(kind, run_id, state), hashlib.sha256).hexdigest()
-    return f"{_PREFIX}-{kind}-{digest[:32]}.bin"
+def _name(
+    config: _Config,
+    kind: str,
+    run_id: str,
+    state: dict[str, Any],
+    revision: int,
+) -> str:
+    if revision < 1 or revision > _MAX_ASSETS:
+        raise ValueError("canary private journal revision is outside its fixed bound")
+    material = revision.to_bytes(2, "big") + _plain(kind, run_id, state)
+    digest = hmac.new(config.key, material, hashlib.sha256).hexdigest()[:32]
+    return f"{_PREFIX}-{kind}-{revision:03d}-{digest}.bin"
+
+
+def _kind_assets(
+    assets: list[dict[str, Any]], kind: str
+) -> dict[int, dict[str, Any]]:
+    prefix = f"{_PREFIX}-{kind}-"
+    pattern = re.compile(
+        rf"^{re.escape(prefix)}(?P<revision>[0-9]{{3}})-(?P<digest>[0-9a-f]{{32}})\.bin$"
+    )
+    selected: dict[int, dict[str, Any]] = {}
+    for asset in assets:
+        name = cast(str, asset["name"])
+        if not name.startswith(prefix):
+            continue
+        match = pattern.fullmatch(name)
+        if match is None:
+            raise RuntimeError("canary private journal asset name is invalid")
+        revision = int(match.group("revision"))
+        if revision < 1 or revision > _MAX_ASSETS:
+            raise RuntimeError("canary private journal asset revision is invalid")
+        if revision in selected:
+            raise RuntimeError("canary private journal contains duplicate revisions")
+        selected[revision] = asset
+    if selected:
+        revisions = sorted(selected)
+        if revisions != list(range(1, revisions[-1] + 1)):
+            raise RuntimeError("canary private journal revision sequence is invalid")
+    return selected
 
 
 def _encrypt(config: _Config, kind: str, run_id: str, state: dict[str, Any]) -> bytes:
@@ -255,6 +298,20 @@ def _download(
     return cast(dict[str, Any], envelope["state"])
 
 
+def _verified_state(
+    config: _Config,
+    asset: dict[str, Any],
+    *,
+    kind: str,
+    run_id: str,
+    revision: int,
+) -> dict[str, Any]:
+    state = _download(config, cast(int, asset["id"]), kind=kind, run_id=run_id)
+    if asset["name"] != _name(config, kind, run_id, state, revision):
+        raise RuntimeError("canary private journal asset name disagrees with durable state")
+    return state
+
+
 def _persist(kind: str, run_id: str, state: dict[str, Any]) -> None:
     config = _config()
     if config is None:
@@ -264,19 +321,26 @@ def _persist(kind: str, run_id: str, state: dict[str, Any]) -> None:
     release = _release(config, run_id, create=True)
     assert release is not None
     assets = _assets(config, release)
-    name = _name(config, kind, run_id, state)
-    matches = [asset for asset in assets if asset["name"] == name]
-    if len(matches) > 1:
-        raise RuntimeError("canary private journal contains duplicate state assets")
-    if matches:
-        durable = _download(
-            config, cast(int, matches[0]["id"]), kind=kind, run_id=run_id
+    ordered = _kind_assets(assets, kind)
+    if ordered:
+        latest_revision = max(ordered)
+        durable = _verified_state(
+            config,
+            ordered[latest_revision],
+            kind=kind,
+            run_id=run_id,
+            revision=latest_revision,
         )
-        if durable != state:
-            raise RuntimeError("canary private journal durable state disagrees")
-        return
-    if len(assets) >= _MAX_ASSETS:
+        if durable == state:
+            return
+        revision = latest_revision + 1
+    else:
+        revision = 1
+    if revision > _MAX_ASSETS or len(assets) >= _MAX_ASSETS:
         raise RuntimeError("canary private journal asset bound reached")
+    name = _name(config, kind, run_id, state, revision)
+    if any(asset["name"] == name for asset in assets):
+        raise RuntimeError("canary private journal contains duplicate state assets")
     encrypted = _encrypt(config, kind, run_id, state)
     upload_url = cast(str, release["upload_url"]).split("{", 1)[0]
     upload, api = urlparse(upload_url), urlparse(config.api_url)
@@ -311,7 +375,17 @@ def _persist(kind: str, run_id: str, state: dict[str, Any]) -> None:
         or size != len(encrypted)
     ):
         raise RuntimeError("canary private journal upload response is invalid")
-    if _download(config, asset_id, kind=kind, run_id=run_id) != state:
+    uploaded_asset = {"id": asset_id, "name": name}
+    if (
+        _verified_state(
+            config,
+            uploaded_asset,
+            kind=kind,
+            run_id=run_id,
+            revision=revision,
+        )
+        != state
+    ):
         raise RuntimeError("canary private journal uploaded state disagrees")
 
 
@@ -324,17 +398,16 @@ def _load(kind: str, run_id: str) -> dict[str, Any] | None:
     release = _release(config, run_id, create=False)
     if release is None:
         return None
-    prefix = f"{_PREFIX}-{kind}-"
-    candidates = [
-        asset
-        for asset in _assets(config, release)
-        if cast(str, asset["name"]).startswith(prefix)
-    ]
-    if not candidates:
+    ordered = _kind_assets(_assets(config, release), kind)
+    if not ordered:
         return None
-    latest = max(candidates, key=lambda item: cast(int, item["id"]))
-    return _download(
-        config, cast(int, latest["id"]), kind=kind, run_id=run_id
+    revision = max(ordered)
+    return _verified_state(
+        config,
+        ordered[revision],
+        kind=kind,
+        run_id=run_id,
+        revision=revision,
     )
 
 
