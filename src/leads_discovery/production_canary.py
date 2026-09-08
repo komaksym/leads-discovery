@@ -11,6 +11,10 @@ from time import sleep
 from leads_discovery.cli import main as cli_main
 from leads_discovery.pipeline.canary_outcomes import build_canary_coverage_report
 from leads_discovery.pipeline.canary_provider_coverage import run_live_provider_coverage
+from leads_discovery.pipeline.canary_restart import (
+    restore_canary_restart_state,
+    snapshot_canary_restart_state,
+)
 from leads_discovery.pipeline.paid_operations import read_status_reads_admitted
 from leads_discovery.pipeline.state import load_usage_events, read_json
 
@@ -166,8 +170,19 @@ def _normal_m4_resume_allowed(data_root: Path, run_id: str) -> bool:
     return reads is not None and reads < _NORMAL_ASYNC_READ_LIMIT
 
 
-def main(argv: Sequence[str] | None = None) -> int:
-    args = _parser().parse_args(argv)
+def _normal_m4_requires_resume(data_root: Path, run_id: str) -> bool:
+    """Return whether a restored normal restart capsule contains unfinished M4 work."""
+    try:
+        payload = read_json(data_root / run_id / "contact_checkpoint.json")
+    except (OSError, UnicodeError, ValueError):
+        return True
+    return not isinstance(payload, dict) or payload.get("status") != "completed"
+
+
+def _run_normal(args: argparse.Namespace) -> tuple[int, bool]:
+    """Run normal M1-M4 only when no validated completed-normal restart snapshot exists."""
+    if restore_canary_restart_state(args.data_root, run_id=args.run_id):
+        return 0, True
     data_root = str(args.data_root)
     run_code = cli_main(
         [
@@ -187,64 +202,85 @@ def main(argv: Sequence[str] | None = None) -> int:
             "--execute-live",
         ]
     )
+    return run_code, False
+
+
+def _run_normal_enrichment(args: argparse.Namespace) -> tuple[int, bool]:
+    """Run or boundedly resume normal M4 while preserving its existing authorization gates."""
+    data_root = str(args.data_root)
+    enrich_args = [
+        "enrich",
+        "--run-id",
+        args.run_id,
+        "--data-root",
+        data_root,
+        "--max-contacts-per-company",
+        _MAX_CONTACTS,
+        "--max-paid-contacts-per-company",
+        _MAX_PAID_CONTACTS,
+        "--exa-people-budget-usd",
+        _EXA_PEOPLE_BUDGET_USD,
+        "--clay-max-contacts",
+        _CLAY_MAX_CONTACTS,
+        "--apollo-credit-cap",
+        _APOLLO_CREDIT_CAP,
+        "--instantly-verification-call-cap",
+        _INSTANTLY_CALL_CAP,
+        "--async-status-read-cap",
+        str(_NORMAL_ASYNC_READ_LIMIT),
+        "--execute-live",
+    ]
+    normal_pending = False
+    persisted_pending = _normal_m4_pending_identity(args.data_root, args.run_id)
+    if _normal_m4_resume_allowed(args.data_root, args.run_id):
+        if persisted_pending is not None:
+            sleep(_ASYNC_POLL_DELAY_SECONDS)
+        if _normal_m4_resume_allowed(args.data_root, args.run_id):
+            enrich_code = cli_main(enrich_args)
+        else:
+            enrich_code = 2
+            normal_pending = True
+    else:
+        enrich_code = 2
+        normal_pending = True
+
+    while enrich_code == 2:
+        pending_operation = _normal_m4_pending_identity(args.data_root, args.run_id)
+        if pending_operation is None:
+            break
+        if not _normal_m4_resume_allowed(args.data_root, args.run_id):
+            normal_pending = True
+            break
+        sleep(_ASYNC_POLL_DELAY_SECONDS)
+        if not _normal_m4_resume_allowed(args.data_root, args.run_id):
+            normal_pending = True
+            break
+        enrich_code = cli_main(enrich_args)
+    return enrich_code, normal_pending
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = _parser().parse_args(argv)
+    run_code, restored_normal = _run_normal(args)
 
     coverage_failed = False
     coverage_pending = False
     normal_pending = False
     if run_code == 0:
-        enrich_args = [
-            "enrich",
-            "--run-id",
+        if restored_normal and not _normal_m4_requires_resume(
+            args.data_root,
             args.run_id,
-            "--data-root",
-            data_root,
-            "--max-contacts-per-company",
-            _MAX_CONTACTS,
-            "--max-paid-contacts-per-company",
-            _MAX_PAID_CONTACTS,
-            "--exa-people-budget-usd",
-            _EXA_PEOPLE_BUDGET_USD,
-            "--clay-max-contacts",
-            _CLAY_MAX_CONTACTS,
-            "--apollo-credit-cap",
-            _APOLLO_CREDIT_CAP,
-            "--instantly-verification-call-cap",
-            _INSTANTLY_CALL_CAP,
-            "--async-status-read-cap",
-            str(_NORMAL_ASYNC_READ_LIMIT),
-            "--execute-live",
-        ]
-        persisted_pending = _normal_m4_pending_identity(args.data_root, args.run_id)
-        if _normal_m4_resume_allowed(args.data_root, args.run_id):
-            if persisted_pending is not None:
-                sleep(_ASYNC_POLL_DELAY_SECONDS)
-            if _normal_m4_resume_allowed(args.data_root, args.run_id):
-                enrich_code = cli_main(enrich_args)
-            else:
-                enrich_code = 2
-                normal_pending = True
+        ):
+            enrich_code = 0
         else:
-            enrich_code = 2
-            normal_pending = True
-
-        while enrich_code == 2:
-            pending_operation = _normal_m4_pending_identity(
-                args.data_root,
-                args.run_id,
-            )
-            if pending_operation is None:
-                break
-            if not _normal_m4_resume_allowed(args.data_root, args.run_id):
-                normal_pending = True
-                break
-            sleep(_ASYNC_POLL_DELAY_SECONDS)
-            if not _normal_m4_resume_allowed(args.data_root, args.run_id):
-                normal_pending = True
-                break
-            enrich_code = cli_main(enrich_args)
+            enrich_code, normal_pending = _run_normal_enrichment(args)
 
         if enrich_code == 0:
             try:
+                snapshot_canary_restart_state(
+                    args.data_root / args.run_id,
+                    run_id=args.run_id,
+                )
                 coverage = run_live_provider_coverage(args.data_root, run_id=args.run_id)
                 passes = 1
                 while coverage.status == "pending" and passes < _COVERAGE_MAX_PASSES:
@@ -259,7 +295,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 coverage_failed = True
 
     try:
-        report = build_canary_coverage_report(args.data_root, run_id=args.run_id)
+        if coverage_failed:
+            report = build_canary_coverage_report(
+                args.data_root,
+                run_id=args.run_id,
+                coverage_failed=True,
+            )
+        else:
+            report = build_canary_coverage_report(args.data_root, run_id=args.run_id)
     except (OSError, UnicodeError, ValueError):
         return 1
     if coverage_failed:

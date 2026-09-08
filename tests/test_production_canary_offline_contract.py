@@ -505,7 +505,7 @@ def test_coverage_paid_failure_has_durable_intent_and_never_redispatches(
     """Attempted coverage failure is durable, fails the canary, and freezes replay."""
     run_id = f"canary-coverage-{failure_mode}"
     run_dir = tmp_path / run_id
-    clay = ClayRoutineScript([])
+    clay = ClayRoutineScript([{"work_email": _EMAIL}])
     observed_intent: list[dict[str, Any]] = []
 
     def apollo(request: httpx.Request) -> httpx.Response:
@@ -522,8 +522,15 @@ def test_coverage_paid_failure_has_durable_intent_and_never_redispatches(
             return httpx.Response(200, json={"credits_used": "one", "person": None})
         raise httpx.ReadTimeout("unknown paid outcome", request=request)
 
-    stub = WireStub({"exa": _exa_one, "clay": clay, "apollo": apollo})
-    _install_contract(monkeypatch, tmp_path, run_id, _rejected_company(), stub)
+    stub = WireStub(
+        {
+            "exa": _exa_one,
+            "clay": clay,
+            "apollo": apollo,
+            "instantly": _terminal_instantly("verified", expected_email=_EMAIL),
+        }
+    )
+    _install_contract(monkeypatch, tmp_path, run_id, _accepted_company(), stub)
 
     def release_on_sleep(_delay: float) -> None:
         clay.release_started()
@@ -535,7 +542,7 @@ def test_coverage_paid_failure_has_durable_intent_and_never_redispatches(
     assert len(clay.gets) == 1
     assert len(observed_intent) == 1
     assert len(stub.for_provider("apollo")) == 1
-    assert len(stub.for_provider("instantly")) == 0
+    assert len(stub.for_provider("instantly")) == 1
 
     private_operations = _operations(run_dir / "canary_paid_checkpoint.json")
     apollo_state = private_operations["coverage:apollo"]
@@ -550,7 +557,7 @@ def test_coverage_paid_failure_has_durable_intent_and_never_redispatches(
     request_count = len(stub.requests)
     assert _run_canary(tmp_path, run_id) == 1
     assert len(stub.requests) == request_count
-    assert len(stub.for_provider("instantly")) == 0
+    assert len(stub.for_provider("instantly")) == 1
 
 
 def test_coverage_clay_resumes_same_operation_and_stops_at_three_reads(
@@ -640,7 +647,7 @@ def test_coverage_instantly_resumes_same_email_and_stops_at_three_reads(
     assert {request.url.path for request in gets} == {
         f"/api/v2/email-verification/{_EMAIL}"
     }
-    assert len(stub.for_provider("apollo")) == 1
+    assert len(stub.for_provider("apollo")) == 0
 
     private_operations = _operations(run_dir / "canary_paid_checkpoint.json")
     instantly_state = private_operations["coverage:instantly"]

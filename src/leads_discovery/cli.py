@@ -15,12 +15,13 @@ from typing import Any, Final, Never, cast
 from leads_discovery.calibration import CalibrationSummary, calibrate_run
 from leads_discovery.discovery import normalize_discovery_configuration
 from leads_discovery.models import RunCheckpoint
+from leads_discovery.pipeline.canary_checkpoint import write_checkpoint
 from leads_discovery.pipeline.evaluation import (
     EvaluationConfig,
     EvaluationSummary,
     evaluate_run,
 )
-from leads_discovery.pipeline.state import load_checkpoint, write_checkpoint
+from leads_discovery.pipeline.state import load_checkpoint
 
 _RUN_ID: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 

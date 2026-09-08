@@ -1,0 +1,3 @@
+include tests/credentialed_canary_workflow_core.py
+include tests/private_journal_http.py
+include tests/production_readiness_core.py

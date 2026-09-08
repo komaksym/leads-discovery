@@ -27,6 +27,7 @@ from leads_discovery.contacts.providers import (
 )
 from leads_discovery.contacts.selection import contact_decision_order_key, select_contacts
 from leads_discovery.models import CompanyRecord, RunCheckpoint, UsageEvent
+from leads_discovery.pipeline.canary_m4_evidence import normal_apollo_shadow_authorization
 from leads_discovery.pipeline.canary_paid_operations import CanaryPaidOperations
 from leads_discovery.pipeline.state import load_jsonl, load_usage_events, read_json
 
@@ -421,8 +422,10 @@ def _apollo_email(
     normal_operations: dict[str, dict[str, Any]],
     normal_usage: list[UsageEvent],
     apollo: _ApolloContactProvider,
+    *,
+    allow_shadow_dispatch: bool,
 ) -> str | None:
-    """Run exactly one private Apollo fallback when normal Apollo did not consume the slot."""
+    """Reuse Apollo evidence, but dispatch new shadow work only when explicitly allowed."""
     normal_entry = _normal_operation_evidence(
         normal_operations,
         normal_usage,
@@ -442,6 +445,12 @@ def _apollo_email(
 
     input_value = contact.to_dict()
     entry = paid.operation(_APOLLO_OPERATION, input_value=input_value)
+    if not allow_shadow_dispatch:
+        if entry is not None:
+            raise ValueError(
+                "private Apollo coverage lacks normal Clay skip prerequisite"
+            )
+        return None
     if entry is not None:
         _completed_sync_entry(entry, "Apollo")
         raw_email = entry.get("work_email")
@@ -668,12 +677,22 @@ def run_provider_coverage(
     )
     if clay_pending:
         return _finish_summary(paid, run_id, pending=True)
+    apollo_authorization = normal_apollo_shadow_authorization(
+        companies=(company,),
+        contacts=tuple(contacts.values()),
+        operations=normal_operations,
+        usage_events=normal_usage,
+    )
     apollo_email = _apollo_email(
         paid,
         contact,
         normal_operations,
         normal_usage,
         apollo,
+        allow_shadow_dispatch=(
+            apollo_authorization is not None
+            and apollo_authorization.contact_id == contact.contact_id
+        ),
     )
     verification_email = clay_email or apollo_email
     if verification_email is None:

@@ -30,4 +30,17 @@ Every integration candidate must pass:
 6. offline dry-run safety;
 7. relevant workflow/static safety checks.
 
+## Completed review-fix milestone
+
+- Harden the private canary journal's bounded transport, key identity, and durable state transition.
+- Centralize validated canary run-directory handling and remove stale workflow verification.
+- Add regression coverage, run the full validation gate, and re-review the resulting change.
+- The implementation is complete: bounded API streaming, key-rotation fail-closed behavior,
+  atomic checkpoint/usage snapshots, resumable normal M4 pending state, and guarded restart
+  capsule progression are covered by regression tests.
+
+## Active review milestone
+
+- Commit the implementation and rerun the isolated Standards + Spec review against the pinned result.
+
 Historical milestone design rationale remains under `docs/superpowers/specs/`. Completed implementation plans were removed after their load-bearing architecture and safety decisions were consolidated into `docs/architecture.md`.

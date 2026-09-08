@@ -47,6 +47,8 @@ Only the current accepted-company set authorizes contact work. Persisted stale c
 
 Contact ranking/deduplication is deterministic. M4 retains at most three contacts per company. Paid enrichment is limited to the first two eligible rank-1/rank-2 contacts; rank-3 contacts never trigger paid enrichment. Provider-specific contact transport remains behind the existing M4 orchestration boundary.
 
+Normal M4 keeps Apollo strictly as a work-email fallback: it is called only when normal Clay produced no usable work email. The production canary has one narrower coverage-only exception: it may issue an Apollo shadow call only when durable normal M4 evidence proves Clay produced a production-usable email, normal Apollo was therefore legitimately skipped, and the shared Apollo allowance is still unused. That shadow result is canary evidence only; it must not mutate canonical contacts, normal fallback history, or the normal M4 checkpoint.
+
 M4 is work-email discovery and verification only. It must not add phones, personal emails, outreach, CRM integration, a database, a frontend, or autonomous SDR behavior.
 
 ## Transport and persistence safety
@@ -57,7 +59,13 @@ Persisted run state must stay inside the configured run root, reject unsafe path
 
 ## Publication and canary boundaries
 
-Local/dry commands and ordinary offline CI do not authorize live provider work or publish prospect/contact artifacts. The credentialed production canary is manual-only, fixed to intentionally tiny ceilings, and is run only after the offline safety gate is green. That explicit canary publication boundary may publish only the approved `leads.csv` and `contacts.jsonl` outputs to the dedicated `generated-leads` branch; checkpoints, usage ledgers, provider payloads, credentials, temporary files, and debug state remain private to the runner.
+Local/dry commands and ordinary offline CI do not authorize live provider work or publish prospect/contact artifacts. The credentialed production canary is manual-only, fixed to intentionally tiny ceilings, and is run only after the offline safety gate is green. That explicit canary publication boundary may publish only the approved `leads.csv` and `contacts.jsonl` outputs to the dedicated `generated-leads` branch.
+
+Plaintext checkpoints, usage ledgers, provider payloads, credentials, temporary files, debug state, and canary coverage evidence remain private and never enter public Git refs, `generated-leads`, Actions artifacts, or Actions caches. Credentialed-canary durability uses authenticated encrypted assets attached to an unpublished draft GitHub Release. GitHub exposes draft releases only to users with push access; the workflow must never publish the state release, and encountering the state release as non-draft fails closed.
+
+Before each paid canary dispatch, the durable private journal records the encrypted operation barrier before the provider call. For canary-private shadow transitions, the same durable encrypted transition also carries the exact pending checkpoint/usage authority needed to resume the same Clay/Instantly identity without replacement dispatch. Before the first canary-private paid barrier, the canary privately snapshots only the completed normal restart prerequisites required by the fixed canary: `checkpoint.json`, `usage_events.jsonl`, `companies_evaluated.jsonl`, `contact_checkpoint.json`, `contact_usage_events.jsonl`, `contacts.jsonl`, and `leads.csv`. A fresh runner restores that snapshot before deciding whether normal `run`/`enrich` can execute. Missing, conflicting, malformed, undecryptable, over-bound, or non-private durable authority fails closed.
+
+The private journal is append-only within a fixed per-run asset bound and is not a publication surface. Asset names contain no plaintext run/provider/contact identity; payloads are authenticated and encrypted with the separately supplied `CANARY_STATE_KEY` production-canary Environment secret. The canary uses the workflow-scoped GitHub token only to access this private draft-release storage; it does not create or update an operational Git branch.
 
 ## Permanent verification contract
 
@@ -69,9 +77,9 @@ The integrated tree must keep behavioral coverage for:
 - proposition-aware negative-evidence handling;
 - streamed response byte bounds, explicit timeouts, bounded retry behavior, and secret-safe errors;
 - authoritative usage replay/summary repair, path containment, symlink rejection, and storage/replay bounds;
-- manual-only workflow security, canary ceilings, and offline no-network behavior.
+- manual-only workflow security, canary ceilings, encrypted restart durability, public/private publication separation, and offline no-network behavior.
 
-Tests should assert observable behavior at public orchestration/provider seams. Source-inspection assertions about helper placement are not product requirements.
+Tests should assert observable behavior at public orchestration/provider seams. Source-inspection assertions about helper placement are not product requirements. Lower-level direct tests are reserved for cross-domain invariants—such as atomic durable barrier plus resume identity—that cannot be precisely induced at the canary composition seam.
 
 ## Historical rationale
 
