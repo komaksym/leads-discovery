@@ -114,6 +114,34 @@ def _headers(config: _Config, *, binary: bool = False) -> dict[str, str]:
     }
 
 
+def _read_bounded_response(
+    response: httpx.Response,
+    *,
+    max_bytes: int,
+    invalid_length_message: str,
+    oversized_message: str,
+    expected_status: int | None = None,
+    status_error: str = "canary private journal response status is invalid",
+) -> bytes:
+    """Read one streamed response within its declared and observed byte bound."""
+    if expected_status is not None and response.status_code != expected_status:
+        raise RuntimeError(status_error)
+    raw_length = response.headers.get("content-length")
+    if raw_length is not None:
+        try:
+            declared = int(raw_length)
+        except ValueError as exc:
+            raise RuntimeError(invalid_length_message) from exc
+        if declared < 0 or declared > max_bytes:
+            raise RuntimeError(oversized_message)
+    data = bytearray()
+    for chunk in response.iter_bytes():
+        if len(data) + len(chunk) > max_bytes:
+            raise RuntimeError(oversized_message)
+        data.extend(chunk)
+    return bytes(data)
+
+
 def _request(
     config: _Config,
     method: str,
@@ -135,29 +163,16 @@ def _request(
             json=body,
             content=content,
         ) as response:
-            raw_length = response.headers.get("content-length")
-            if raw_length is not None:
-                try:
-                    declared = int(raw_length)
-                except ValueError as exc:
-                    raise RuntimeError(
-                        "canary private journal API Content-Length is invalid"
-                    ) from exc
-                if declared < 0 or declared > _MAX_API_BYTES:
-                    raise RuntimeError(
-                        "canary private journal API response exceeds its fixed bound"
-                    )
-            data = bytearray()
-            for chunk in response.iter_bytes():
-                if len(data) + len(chunk) > _MAX_API_BYTES:
-                    raise RuntimeError(
-                        "canary private journal API response exceeds its fixed bound"
-                    )
-                data.extend(chunk)
+            data = _read_bounded_response(
+                response,
+                max_bytes=_MAX_API_BYTES,
+                invalid_length_message="canary private journal API Content-Length is invalid",
+                oversized_message="canary private journal API response exceeds its fixed bound",
+            )
             return httpx.Response(
                 response.status_code,
                 headers=response.headers,
-                content=bytes(data),
+                content=data,
                 request=response.request,
             )
     except httpx.HTTPError as exc:
@@ -169,27 +184,14 @@ def _download_bytes(config: _Config, url: str) -> bytes:
         with httpx.Client(timeout=_TIMEOUT, follow_redirects=True) as client, client.stream(
             "GET", url, headers=_headers(config, binary=True)
         ) as response:
-            if response.status_code != 200:
-                raise RuntimeError("canary private journal asset download failed")
-            raw_length = response.headers.get("content-length")
-            if raw_length is not None:
-                try:
-                    declared = int(raw_length)
-                except ValueError as exc:
-                    raise RuntimeError(
-                        "canary private journal asset Content-Length is invalid"
-                    ) from exc
-                if declared < 0 or declared > _MAX_ASSET_BYTES:
-                    raise RuntimeError(
-                        "canary private journal asset size exceeds its fixed bound"
-                    )
-            data = bytearray()
-            for chunk in response.iter_bytes():
-                if len(data) + len(chunk) > _MAX_ASSET_BYTES:
-                    raise RuntimeError(
-                        "canary private journal asset size exceeds its fixed bound"
-                    )
-                data.extend(chunk)
+            data = _read_bounded_response(
+                response,
+                max_bytes=_MAX_ASSET_BYTES,
+                invalid_length_message="canary private journal asset Content-Length is invalid",
+                oversized_message="canary private journal asset size exceeds its fixed bound",
+                expected_status=200,
+                status_error="canary private journal asset download failed",
+            )
     except httpx.HTTPError as exc:
         raise RuntimeError("canary private journal request failed") from exc
     if len(data) <= _NONCE_BYTES + _TAG_BYTES:
