@@ -20,15 +20,13 @@ Dev install (lint, typecheck, test, build):
 python -m pip install -e ".[dev]"
 ```
 
-No `.env` loader: export credentials in the shell. `.env.example` is the
-template only — never commit real values. Do not put credentials on the
-command line.
+Live commands automatically load `.env` from the current working directory.
+Existing shell variables take precedence, and dry/local commands do not read
+`.env`. `.env.example` is the template — never commit real values or put
+credentials on the command line.
 
 ```bash
-cp .env.example .env  # optional local reference; app reads the environment, not the file
-export EXA_API_KEY=...
-export DEEPSEEK_API_KEY=...
-# optional: export APIFY_TOKEN=...
+cp .env.example .env  # fill in local credentials; .env is git-ignored
 ```
 
 For live M2-backed runs:

@@ -5,7 +5,9 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import re
+import shlex
 from collections.abc import Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -24,6 +26,9 @@ from leads_discovery.pipeline.evaluation import (
 from leads_discovery.pipeline.state import load_checkpoint
 
 _RUN_ID: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+_DOTENV_ASSIGNMENT: Final[re.Pattern[str]] = re.compile(
+    r"^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$"
+)
 
 
 class _ArgumentParser(argparse.ArgumentParser):
@@ -95,6 +100,43 @@ def _parser() -> argparse.ArgumentParser:
 def _print(payload: dict[str, Any]) -> None:
     """Print exactly one deterministic sanitized JSON summary."""
     print(json.dumps(payload, sort_keys=True, ensure_ascii=False, allow_nan=False))
+
+
+def _load_dotenv(path: Path = Path(".env")) -> tuple[str, ...]:
+    """Load simple dotenv assignments without overriding the process environment."""
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        return ()
+
+    values: dict[str, str] = {}
+    for line_number, raw_line in enumerate(lines, start=1):
+        line = raw_line.lstrip("\ufeff").strip()
+        if not line or line.startswith("#"):
+            continue
+        match = _DOTENV_ASSIGNMENT.fullmatch(line)
+        if match is None:
+            raise ValueError(f"invalid .env syntax on line {line_number}")
+        key, raw_value = match.groups()
+        raw_value = raw_value.strip()
+        if raw_value.startswith(("'", '"')):
+            try:
+                parsed = shlex.split(raw_value, comments=True, posix=True)
+            except ValueError as exc:
+                raise ValueError(f"invalid .env syntax on line {line_number}") from exc
+            if len(parsed) != 1:
+                raise ValueError(f"invalid .env syntax on line {line_number}")
+            value = parsed[0]
+        else:
+            value = raw_value.split(" #", 1)[0].rstrip()
+        values.setdefault(key, value)
+
+    loaded: list[str] = []
+    for key, value in values.items():
+        if key not in os.environ:
+            os.environ[key] = value
+            loaded.append(key)
+    return tuple(loaded)
 
 
 def _validate_number(name: str, value: object, *, maximum: float | None = None) -> float:
@@ -261,8 +303,6 @@ def _run_live(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
     if args.deepseek_budget_usd <= 0:
         raise ValueError("live extraction requires a positive explicit DeepSeek budget")
 
-    import os
-
     import httpx
 
     from leads_discovery.discovery import (
@@ -401,8 +441,6 @@ def _enrich_live(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
     )
     validate_contact_enrichment_state(config)
 
-    import os
-
     import httpx
 
     from leads_discovery.contacts.providers import (
@@ -482,8 +520,11 @@ def _calibrate(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
 
 def main(argv: Sequence[str] | None = None) -> int:
     """Execute one CLI command and print exactly one sanitized JSON result."""
+    loaded_dotenv_keys: tuple[str, ...] = ()
     try:
         args = _parser().parse_args(argv)
+        if getattr(args, "execute_live", False):
+            loaded_dotenv_keys = _load_dotenv()
         if args.command == "run":
             payload, code = _run_live(args) if args.execute_live else _run_dry(args)
         elif args.command == "enrich":
@@ -500,5 +541,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         payload, code = {"status": "failed", "error": "filesystem_or_state_error"}, 1
     except Exception:
         payload, code = {"status": "failed", "error": "operation_failed"}, 1
+    finally:
+        for key in loaded_dotenv_keys:
+            os.environ.pop(key, None)
     _print(payload)
     return code

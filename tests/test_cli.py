@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 from collections.abc import Callable, Sequence
@@ -342,6 +343,7 @@ def test_missing_required_live_credentials_returns_one_without_providers(
 ) -> None:
     """Live execution requires Exa and DeepSeek credentials before client construction."""
     _patch_providers(monkeypatch, _BombProvider)
+    monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("EXA_API_KEY", raising=False)
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
     code = _call(
@@ -350,8 +352,118 @@ def test_missing_required_live_credentials_returns_one_without_providers(
             "--deepseek-budget-usd", "1", "--execute-live",
         ]
     )
-    _summary(capsys)
+    payload, _ = _summary(capsys)
     assert code == 1
+    assert payload["reason"] == "required_provider_credentials_missing"
+
+
+def test_live_run_loads_credentials_from_local_dotenv(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Live run loads missing provider credentials from the current directory's .env."""
+    captured: dict[str, Any] = {}
+
+    def fake(config: M2BatchConfig, **_kwargs: Any) -> RunCheckpoint:
+        """Capture the live config and persist one completed extraction without network I/O."""
+        captured["config"] = config
+        return _checkpoint(config, status="completed")
+
+    _patch_m2(monkeypatch, fake)
+    _patch_providers(monkeypatch, _DummyProvider)
+    _patch_http(monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text(
+        "export EXA_API_KEY=file-exa\nDEEPSEEK_API_KEY=\"file-deepseek\" # local\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("EXA_API_KEY", raising=False)
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+
+    code = _call(
+        [
+            "run",
+            "--run-id",
+            "dotenv-live",
+            "--data-root",
+            str(tmp_path / "data"),
+            "--deepseek-budget-usd",
+            "1",
+            "--execute-live",
+        ]
+    )
+    payload, _ = _summary(capsys)
+
+    assert code == 0
+    assert payload["status"] == "completed"
+    assert "config" in captured
+
+
+def test_live_dotenv_preserves_existing_environment_values(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Existing shell credentials win over values from the local .env file."""
+    observed: dict[str, str | None] = {}
+
+    def fake(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
+        """Observe credentials at the live dispatch boundary without constructing providers."""
+        observed["exa"] = os.environ.get("EXA_API_KEY")
+        observed["deepseek"] = os.environ.get("DEEPSEEK_API_KEY")
+        return {"command": "run", "status": "completed"}, 0
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text(
+        "EXA_API_KEY=file-exa\nDEEPSEEK_API_KEY=file-deepseek\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("EXA_API_KEY", "shell-exa")
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.setattr(cli, "_run_live", fake)
+
+    code = _call(
+        [
+            "run",
+            "--run-id",
+            "dotenv-precedence",
+            "--deepseek-budget-usd",
+            "1",
+            "--execute-live",
+        ]
+    )
+    _summary(capsys)
+
+    assert code == 0
+    assert observed == {"exa": "shell-exa", "deepseek": "file-deepseek"}
+
+
+def test_dry_run_does_not_read_local_dotenv(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Dry run remains side-effect free even when a local .env contains invalid syntax."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text("this is not an assignment\n", encoding="utf-8")
+    _block_credential_reads(monkeypatch)
+
+    code = _call(
+        [
+            "run",
+            "--run-id",
+            "dotenv-dry",
+            "--data-root",
+            str(tmp_path / "data"),
+            "--deepseek-budget-usd",
+            "1",
+        ]
+    )
+    payload, _ = _summary(capsys)
+
+    assert code == 0
+    assert payload["status"] == "dry_run"
 
 
 def test_missing_optional_apify_credential_disables_apify_only(
@@ -370,6 +482,7 @@ def test_missing_optional_apify_credential_disables_apify_only(
     _patch_m2(monkeypatch, fake)
     _patch_providers(monkeypatch, _DummyProvider)
     _patch_http(monkeypatch)
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("EXA_API_KEY", "test")
     monkeypatch.setenv("DEEPSEEK_API_KEY", "test")
     monkeypatch.delenv("APIFY_TOKEN", raising=False)
