@@ -80,6 +80,7 @@ class ProviderRequestContext:
         retryable: bool,
         status_code: int | None = None,
         metadata: dict[str, Any] | None = None,
+        estimated_cost_usd: float | None = None,
     ) -> DiscoveryProviderError:
         """Build a sanitized error without repeating the request identity fields."""
         return provider_error(
@@ -91,6 +92,7 @@ class ProviderRequestContext:
             retryable=retryable,
             status_code=status_code,
             metadata=metadata,
+            estimated_cost_usd=estimated_cost_usd,
         )
 
 
@@ -225,6 +227,7 @@ def validation_error(
             provider=provider,
             operation=operation,
             request_count=0,
+            estimated_cost_usd=0.0,
             metadata={"request_id": request_id},
         ),
     )
@@ -240,6 +243,7 @@ def provider_error(
     retryable: bool,
     status_code: int | None = None,
     metadata: dict[str, Any] | None = None,
+    estimated_cost_usd: float | None = None,
 ) -> DiscoveryProviderError:
     """Build a sanitized attempted-call provider error with safe usage metadata."""
     return DiscoveryProviderError(
@@ -253,6 +257,7 @@ def provider_error(
             provider=provider,
             operation=operation,
             request_count=request_count,
+            estimated_cost_usd=estimated_cost_usd,
             metadata=metadata or {"request_id": request_id},
         ),
     )
@@ -339,6 +344,7 @@ def safe_transport_call(
             kind="transient",
             retryable=True,
             metadata={**(metadata or {"request_id": context.request_id}), "safe_to_retry": True},
+            estimated_cost_usd=0.0,
         ) from None
     except httpx.HTTPError:
         raise context.error(
@@ -364,6 +370,7 @@ def safe_transport_call(
             retryable=retryable,
             status_code=status_code,
             metadata=metadata,
+            estimated_cost_usd=0.0,
         ) from None
     return response
 

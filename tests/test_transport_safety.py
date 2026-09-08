@@ -10,9 +10,12 @@ import pytest
 
 from leads_discovery.discovery.base import (
     DiscoveryProviderError,
+    ProviderRequestContext,
     ResponseTooLargeError,
     read_bounded_response,
     request_json,
+    safe_transport_call,
+    validation_error,
 )
 from leads_discovery.discovery.exa import ExaDiscoveryProvider
 from leads_discovery.models import (
@@ -20,7 +23,9 @@ from leads_discovery.models import (
     DiscoveryRequest,
     EvidenceBundle,
     EvidenceItem,
+    UsageEvent,
 )
+from leads_discovery.pipeline.costs import CostTracker
 from leads_discovery.research.evidence import ExaEvidenceResearcher
 from leads_discovery.research.extract import DeepSeekExtractor, DeepSeekPriceSchedule
 
@@ -249,3 +254,87 @@ def test_deepseek_declared_oversize_is_secret_safe_and_unread(
     assert captured.value.kind == "invalid_response"
     assert "deepseek-secret" not in str(captured.value)
     assert stream.chunks_consumed == 0
+
+
+def _transport_context() -> ProviderRequestContext:
+    """Build one stable request identity for direct transport-boundary tests."""
+    return ProviderRequestContext(
+        provider="exa",
+        request_id="exa:transport-cost:v1",
+        operation="company_research",
+        request_count=1,
+    )
+
+
+def test_rate_limited_rejection_records_zero_cost_and_keeps_budget_known() -> None:
+    """A 429 rejection is knowably unbilled and must not poison the budget ledger."""
+
+    def failing_call() -> httpx.Response:
+        return httpx.Response(429, json={"error": "rate limited"})
+
+    with pytest.raises(DiscoveryProviderError) as captured:
+        safe_transport_call(failing_call, context=_transport_context())
+
+    assert captured.value.kind == "rate_limited"
+    assert captured.value.retryable is True
+    assert captured.value.usage_event.estimated_cost_usd == 0.0
+
+    tracker = CostTracker(
+        [
+            UsageEvent(
+                provider="exa",
+                operation="company_research",
+                estimated_cost_usd=0.098,
+            ),
+            captured.value.usage_event,
+        ]
+    )
+
+    assert tracker.provider_estimated_spend("exa") == 0.098
+
+
+def test_connect_failure_records_zero_cost_as_never_billed() -> None:
+    """A connect failure never reached the provider and must cost zero."""
+
+    def failing_call() -> httpx.Response:
+        raise httpx.ConnectError(
+            "connection refused",
+            request=httpx.Request("POST", "https://api.exa.ai/search"),
+        )
+
+    with pytest.raises(DiscoveryProviderError) as captured:
+        safe_transport_call(failing_call, context=_transport_context())
+
+    assert captured.value.kind == "transient"
+    assert captured.value.retryable is True
+    assert captured.value.usage_event.estimated_cost_usd == 0.0
+
+
+def test_ambiguous_transport_failure_keeps_cost_unknown() -> None:
+    """An ambiguous mid-dispatch failure may have billed and must stay unknown."""
+
+    def failing_call() -> httpx.Response:
+        raise httpx.ReadError(
+            "connection dropped",
+            request=httpx.Request("POST", "https://api.exa.ai/search"),
+        )
+
+    with pytest.raises(DiscoveryProviderError) as captured:
+        safe_transport_call(failing_call, context=_transport_context())
+
+    assert captured.value.kind == "transient"
+    assert captured.value.retryable is False
+    assert captured.value.usage_event.estimated_cost_usd is None
+
+
+def test_local_validation_error_records_zero_cost() -> None:
+    """Local validation never dispatched and must not poison the budget ledger."""
+    error = validation_error(
+        provider="exa",
+        request_id="exa:transport:v1",
+        message="bad request",
+        operation="company_search",
+    )
+
+    assert error.usage_event.request_count == 0
+    assert error.usage_event.estimated_cost_usd == 0.0
