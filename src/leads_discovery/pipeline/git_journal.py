@@ -8,7 +8,7 @@ import json
 import os
 import re
 from dataclasses import dataclass
-from typing import Any, Final, cast
+from typing import Any, Final, Literal, cast
 from urllib.parse import urlparse
 
 import httpx
@@ -17,15 +17,22 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from leads_discovery.models import RunCheckpoint
 
+JournalKind = Literal["transition", "restart"]
+
 _RUN_ID: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 _REPO: Final = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
-_PREFIX: Final = "leads-canary-private-v1"
+_PREFIX: Final = "leads-canary-private-v2"
 _MAX_STATE: Final = 256 * 1024
 _MAX_ASSETS: Final = 96
 _MAX_RELEASE_PAGES: Final = 10
 _MAX_API_BYTES: Final = 1024 * 1024
 _NONCE_BYTES: Final = 12
+_TAG_BYTES: Final = 16
+_MAX_ASSET_BYTES: Final = _MAX_STATE + _NONCE_BYTES + _TAG_BYTES
 _TIMEOUT: Final = 15.0
+_ASSET_NAME: Final = re.compile(
+    rf"^{re.escape(_PREFIX)}-(?P<revision>[0-9]{{3}})-(?P<digest>[0-9a-f]{{32}})\.bin$"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,6 +41,35 @@ class _Config:
     repository: str
     api_url: str
     key: bytes
+
+
+@dataclass(frozen=True, slots=True)
+class _JournalHead:
+    revision: int
+    transition_revision: int | None
+    restart_revision: int | None
+
+    def latest(self, kind: JournalKind) -> int | None:
+        return (
+            self.transition_revision
+            if kind == "transition"
+            else self.restart_revision
+        )
+
+    def advance(self, kind: JournalKind) -> _JournalHead:
+        revision = self.revision + 1
+        if revision > _MAX_ASSETS:
+            raise RuntimeError("canary private journal asset bound reached")
+        return _JournalHead(
+            revision=revision,
+            transition_revision=(
+                revision if kind == "transition" else self.transition_revision
+            ),
+            restart_revision=revision if kind == "restart" else self.restart_revision,
+        )
+
+
+_EMPTY_HEAD: Final = _JournalHead(0, None, None)
 
 
 def _config() -> _Config | None:
@@ -70,6 +106,14 @@ def git_journal_configured() -> bool:
     return _config() is not None
 
 
+def _headers(config: _Config, *, binary: bool = False) -> dict[str, str]:
+    return {
+        "Accept": "application/octet-stream" if binary else "application/vnd.github+json",
+        "Authorization": f"Bearer {config.token}",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+
+
 def _request(
     config: _Config,
     method: str,
@@ -79,11 +123,7 @@ def _request(
     content: bytes | None = None,
     binary: bool = False,
 ) -> httpx.Response:
-    headers = {
-        "Accept": "application/octet-stream" if binary else "application/vnd.github+json",
-        "Authorization": f"Bearer {config.token}",
-        "X-GitHub-Api-Version": "2022-11-28",
-    }
+    headers = _headers(config, binary=binary)
     if content is not None:
         headers["Content-Type"] = "application/octet-stream"
     try:
@@ -91,6 +131,38 @@ def _request(
             return client.request(method, url, headers=headers, json=body, content=content)
     except httpx.HTTPError as exc:
         raise RuntimeError("canary private journal request failed") from exc
+
+
+def _download_bytes(config: _Config, url: str) -> bytes:
+    try:
+        with httpx.Client(timeout=_TIMEOUT, follow_redirects=True) as client:
+            with client.stream("GET", url, headers=_headers(config, binary=True)) as response:
+                if response.status_code != 200:
+                    raise RuntimeError("canary private journal asset download failed")
+                raw_length = response.headers.get("content-length")
+                if raw_length is not None:
+                    try:
+                        declared = int(raw_length)
+                    except ValueError as exc:
+                        raise RuntimeError(
+                            "canary private journal asset Content-Length is invalid"
+                        ) from exc
+                    if declared > _MAX_ASSET_BYTES:
+                        raise RuntimeError(
+                            "canary private journal asset size exceeds its fixed bound"
+                        )
+                data = bytearray()
+                for chunk in response.iter_bytes():
+                    if len(data) + len(chunk) > _MAX_ASSET_BYTES:
+                        raise RuntimeError(
+                            "canary private journal asset size exceeds its fixed bound"
+                        )
+                    data.extend(chunk)
+    except httpx.HTTPError as exc:
+        raise RuntimeError("canary private journal request failed") from exc
+    if len(data) <= _NONCE_BYTES + _TAG_BYTES:
+        raise ValueError("canary private journal asset size is invalid")
+    return bytes(data)
 
 
 def _json(response: httpx.Response) -> Any:
@@ -107,7 +179,99 @@ def _tag(config: _Config, run_id: str) -> str:
     return f"{_PREFIX}-{digest}"
 
 
-def _validate_release(raw: Any, tag: str) -> dict[str, Any]:
+def _head_payload(head: _JournalHead) -> dict[str, Any]:
+    return {
+        "version": 2,
+        "revision": head.revision,
+        "transition_revision": head.transition_revision,
+        "restart_revision": head.restart_revision,
+    }
+
+
+def _head_mac(config: _Config, run_id: str, head: _JournalHead) -> str:
+    encoded = json.dumps(
+        _head_payload(head),
+        sort_keys=True,
+        ensure_ascii=False,
+        allow_nan=False,
+        separators=(",", ":"),
+    ).encode()
+    return hmac.new(
+        config.key,
+        f"{_PREFIX}\0head\0{run_id}\0".encode() + encoded,
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def _head_body(config: _Config, run_id: str, head: _JournalHead) -> str:
+    payload = _head_payload(head)
+    payload["mac"] = _head_mac(config, run_id, head)
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+
+def _parse_head(config: _Config, run_id: str, body: object) -> _JournalHead:
+    if not isinstance(body, str):
+        raise RuntimeError("canary private journal head is invalid")
+    try:
+        payload = json.loads(body)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("canary private journal head is invalid") from exc
+    if not isinstance(payload, dict) or set(payload) != {
+        "version",
+        "revision",
+        "transition_revision",
+        "restart_revision",
+        "mac",
+    }:
+        raise RuntimeError("canary private journal head is invalid")
+    revision = payload.get("revision")
+    transition_revision = payload.get("transition_revision")
+    restart_revision = payload.get("restart_revision")
+    mac = payload.get("mac")
+    if (
+        payload.get("version") != 2
+        or isinstance(revision, bool)
+        or not isinstance(revision, int)
+        or revision < 0
+        or revision > _MAX_ASSETS
+        or (
+            transition_revision is not None
+            and (
+                isinstance(transition_revision, bool)
+                or not isinstance(transition_revision, int)
+                or transition_revision < 1
+                or transition_revision > revision
+            )
+        )
+        or (
+            restart_revision is not None
+            and (
+                isinstance(restart_revision, bool)
+                or not isinstance(restart_revision, int)
+                or restart_revision < 1
+                or restart_revision > revision
+            )
+        )
+        or not isinstance(mac, str)
+    ):
+        raise RuntimeError("canary private journal head is invalid")
+    if revision == 0 and (transition_revision is not None or restart_revision is not None):
+        raise RuntimeError("canary private journal head is invalid")
+    if revision > 0 and transition_revision is None and restart_revision is None:
+        raise RuntimeError("canary private journal head is invalid")
+    head = _JournalHead(revision, transition_revision, restart_revision)
+    if not hmac.compare_digest(mac, _head_mac(config, run_id, head)):
+        raise RuntimeError("canary private journal head authentication failed")
+    return head
+
+
+def _validate_release(
+    raw: Any,
+    tag: str,
+    *,
+    config: _Config,
+    run_id: str,
+) -> tuple[dict[str, Any], _JournalHead]:
     if not isinstance(raw, dict) or raw.get("tag_name") != tag:
         raise RuntimeError("canary private journal release is invalid")
     if raw.get("draft") is not True:
@@ -122,12 +286,16 @@ def _validate_release(raw: Any, tag: str) -> dict[str, Any]:
         or not upload_url
     ):
         raise RuntimeError("canary private journal release is invalid")
-    return cast(dict[str, Any], raw)
+    head = _parse_head(config, run_id, raw.get("body"))
+    return cast(dict[str, Any], raw), head
 
 
-def _release(config: _Config, run_id: str, *, create: bool) -> dict[str, Any] | None:
+def _release(
+    config: _Config, run_id: str, *, create: bool
+) -> tuple[dict[str, Any], _JournalHead] | None:
     tag = _tag(config, run_id)
     base = f"{config.api_url}/repos/{config.repository}/releases"
+    matches: list[dict[str, Any]] = []
     for page in range(1, _MAX_RELEASE_PAGES + 1):
         response = _request(config, "GET", f"{base}?per_page=100&page={page}")
         if response.status_code != 200:
@@ -137,13 +305,18 @@ def _release(config: _Config, run_id: str, *, create: bool) -> dict[str, Any] | 
             raise RuntimeError("canary private journal release listing is invalid")
         for raw in payload:
             if isinstance(raw, dict) and raw.get("tag_name") == tag:
-                return _validate_release(raw, tag)
+                matches.append(cast(dict[str, Any], raw))
         if len(payload) < 100:
             break
     else:
         raise RuntimeError("canary private journal release replay bound exceeded")
+    if len(matches) > 1:
+        raise RuntimeError("canary private journal contains conflicting releases")
+    if matches:
+        return _validate_release(matches[0], tag, config=config, run_id=run_id)
     if not create:
         return None
+
     response = _request(
         config,
         "POST",
@@ -151,17 +324,40 @@ def _release(config: _Config, run_id: str, *, create: bool) -> dict[str, Any] | 
         body={
             "tag_name": tag,
             "name": "Private production canary restart journal",
-            "body": "Encrypted private canary state. This draft must never be published.",
+            "body": _head_body(config, run_id, _EMPTY_HEAD),
             "draft": True,
             "prerelease": False,
         },
     )
     if response.status_code != 201:
+        if response.status_code == 422:
+            raced = _release(config, run_id, create=False)
+            if raced is not None:
+                return raced
         raise RuntimeError("canary private journal draft release creation failed")
-    return _validate_release(_json(response), tag)
+    created, head = _validate_release(
+        _json(response), tag, config=config, run_id=run_id
+    )
+    confirmed = _release(config, run_id, create=False)
+    if confirmed is None or confirmed[0]["id"] != created["id"] or confirmed[1] != head:
+        raise RuntimeError("canary private journal release creation was not stable")
+    return confirmed
 
 
-def _assets(config: _Config, release: dict[str, Any]) -> list[dict[str, Any]]:
+def _asset_name(config: _Config, run_id: str, revision: int) -> str:
+    if revision < 1 or revision > _MAX_ASSETS:
+        raise ValueError("canary private journal revision is outside its fixed bound")
+    material = f"{_PREFIX}\0asset\0{run_id}\0{revision}".encode()
+    digest = hmac.new(config.key, material, hashlib.sha256).hexdigest()[:32]
+    return f"{_PREFIX}-{revision:03d}-{digest}.bin"
+
+
+def _assets(
+    config: _Config,
+    release: dict[str, Any],
+    head: _JournalHead,
+    run_id: str,
+) -> dict[int, dict[str, Any]]:
     release_id = cast(int, release["id"])
     url = (
         f"{config.api_url}/repos/{config.repository}/releases/"
@@ -173,7 +369,10 @@ def _assets(config: _Config, release: dict[str, Any]) -> list[dict[str, Any]]:
     payload = _json(response)
     if not isinstance(payload, list):
         raise RuntimeError("canary private journal asset listing is invalid")
-    assets: list[dict[str, Any]] = []
+    if len(payload) > _MAX_ASSETS:
+        raise RuntimeError("canary private journal asset bound exceeded")
+
+    selected: dict[int, dict[str, Any]] = {}
     for raw in payload:
         if not isinstance(raw, dict):
             raise RuntimeError("canary private journal asset entry is invalid")
@@ -194,15 +393,43 @@ def _assets(config: _Config, release: dict[str, Any]) -> list[dict[str, Any]]:
             or state != "uploaded"
         ):
             raise RuntimeError("canary private journal asset entry is invalid")
-        assets.append(cast(dict[str, Any], raw))
-    if len(assets) > _MAX_ASSETS:
-        raise RuntimeError("canary private journal asset bound exceeded")
-    return assets
+        match = _ASSET_NAME.fullmatch(name)
+        if match is None:
+            raise RuntimeError("canary private journal asset name is invalid")
+        revision = int(match.group("revision"))
+        if revision < 1 or revision > _MAX_ASSETS:
+            raise RuntimeError("canary private journal asset revision is invalid")
+        if name != _asset_name(config, run_id, revision):
+            raise RuntimeError("canary private journal asset name is invalid")
+        if size > _MAX_ASSET_BYTES:
+            raise RuntimeError("canary private journal asset size exceeds its fixed bound")
+        if size <= _NONCE_BYTES + _TAG_BYTES:
+            raise RuntimeError("canary private journal asset size is invalid")
+        if revision in selected:
+            raise RuntimeError("canary private journal contains duplicate revisions")
+        selected[revision] = cast(dict[str, Any], raw)
+
+    revisions = sorted(selected)
+    expected = list(range(1, head.revision + 1))
+    if revisions != expected:
+        raise RuntimeError("canary private journal head disagrees with durable assets")
+    return selected
 
 
-def _plain(kind: str, run_id: str, state: dict[str, Any]) -> bytes:
+def _plain(
+    kind: JournalKind,
+    run_id: str,
+    state: dict[str, Any],
+    revision: int,
+) -> bytes:
     data = json.dumps(
-        {"version": 1, "kind": kind, "run_id": run_id, "state": state},
+        {
+            "version": 2,
+            "revision": revision,
+            "kind": kind,
+            "run_id": run_id,
+            "state": state,
+        },
         sort_keys=True,
         ensure_ascii=False,
         allow_nan=False,
@@ -213,135 +440,154 @@ def _plain(kind: str, run_id: str, state: dict[str, Any]) -> bytes:
     return data
 
 
-def _aad(kind: str, run_id: str) -> bytes:
-    return f"{_PREFIX}\0{kind}\0{run_id}".encode()
+def _aad(run_id: str, revision: int) -> bytes:
+    return f"{_PREFIX}\0{run_id}\0{revision}".encode()
 
 
-def _name(
+def _encrypt(
     config: _Config,
-    kind: str,
+    kind: JournalKind,
     run_id: str,
     state: dict[str, Any],
     revision: int,
-) -> str:
-    if revision < 1 or revision > _MAX_ASSETS:
-        raise ValueError("canary private journal revision is outside its fixed bound")
-    material = revision.to_bytes(2, "big") + _plain(kind, run_id, state)
-    digest = hmac.new(config.key, material, hashlib.sha256).hexdigest()[:32]
-    return f"{_PREFIX}-{kind}-{revision:03d}-{digest}.bin"
-
-
-def _kind_assets(
-    assets: list[dict[str, Any]], kind: str
-) -> dict[int, dict[str, Any]]:
-    prefix = f"{_PREFIX}-{kind}-"
-    pattern = re.compile(
-        rf"^{re.escape(prefix)}(?P<revision>[0-9]{{3}})-(?P<digest>[0-9a-f]{{32}})\.bin$"
-    )
-    selected: dict[int, dict[str, Any]] = {}
-    for asset in assets:
-        name = cast(str, asset["name"])
-        if not name.startswith(prefix):
-            continue
-        match = pattern.fullmatch(name)
-        if match is None:
-            raise RuntimeError("canary private journal asset name is invalid")
-        revision = int(match.group("revision"))
-        if revision < 1 or revision > _MAX_ASSETS:
-            raise RuntimeError("canary private journal asset revision is invalid")
-        if revision in selected:
-            raise RuntimeError("canary private journal contains duplicate revisions")
-        selected[revision] = asset
-    if selected:
-        revisions = sorted(selected)
-        if revisions != list(range(1, revisions[-1] + 1)):
-            raise RuntimeError("canary private journal revision sequence is invalid")
-    return selected
-
-
-def _encrypt(config: _Config, kind: str, run_id: str, state: dict[str, Any]) -> bytes:
+) -> bytes:
     nonce = os.urandom(_NONCE_BYTES)
     return nonce + AESGCM(config.key).encrypt(
-        nonce, _plain(kind, run_id, state), _aad(kind, run_id)
+        nonce,
+        _plain(kind, run_id, state, revision),
+        _aad(run_id, revision),
     )
 
 
 def _download(
-    config: _Config, asset_id: int, *, kind: str, run_id: str
-) -> dict[str, Any]:
-    response = _request(
+    config: _Config,
+    asset: dict[str, Any],
+    *,
+    run_id: str,
+    revision: int,
+) -> tuple[JournalKind, dict[str, Any]]:
+    asset_id = cast(int, asset["id"])
+    data = _download_bytes(
         config,
-        "GET",
         f"{config.api_url}/repos/{config.repository}/releases/assets/{asset_id}",
-        binary=True,
     )
-    if response.status_code != 200:
-        raise RuntimeError("canary private journal asset download failed")
-    data = response.content
-    if len(data) > _MAX_STATE + 1024 or len(data) <= _NONCE_BYTES + 16:
-        raise ValueError("canary private journal asset size is invalid")
+    if len(data) != asset["size"]:
+        raise RuntimeError("canary private journal asset size disagrees with metadata")
     try:
         plain = AESGCM(config.key).decrypt(
-            data[:_NONCE_BYTES], data[_NONCE_BYTES:], _aad(kind, run_id)
+            data[:_NONCE_BYTES],
+            data[_NONCE_BYTES:],
+            _aad(run_id, revision),
         )
         envelope = json.loads(plain.decode())
     except (InvalidTag, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ValueError("canary private journal state is invalid") from exc
+    kind = envelope.get("kind") if isinstance(envelope, dict) else None
     if (
         not isinstance(envelope, dict)
-        or envelope.get("version") != 1
-        or envelope.get("kind") != kind
+        or envelope.get("version") != 2
+        or envelope.get("revision") != revision
+        or kind not in {"transition", "restart"}
         or envelope.get("run_id") != run_id
         or not isinstance(envelope.get("state"), dict)
     ):
         raise ValueError("canary private journal state envelope is invalid")
-    return cast(dict[str, Any], envelope["state"])
+    return cast(JournalKind, kind), cast(dict[str, Any], envelope["state"])
 
 
-def _verified_state(
-    config: _Config,
-    asset: dict[str, Any],
-    *,
-    kind: str,
+def _load_with_head(
+    kind: JournalKind,
     run_id: str,
-    revision: int,
-) -> dict[str, Any]:
-    state = _download(config, cast(int, asset["id"]), kind=kind, run_id=run_id)
-    if asset["name"] != _name(config, kind, run_id, state, revision):
-        raise RuntimeError("canary private journal asset name disagrees with durable state")
-    return state
+) -> tuple[dict[str, Any] | None, _JournalHead]:
+    config = _config()
+    if config is None:
+        return None, _EMPTY_HEAD
+    if _RUN_ID.fullmatch(run_id) is None:
+        raise ValueError("canary private journal state identity is invalid")
+    found = _release(config, run_id, create=False)
+    if found is None:
+        return None, _EMPTY_HEAD
+    release, head = found
+    assets = _assets(config, release, head, run_id)
+    revision = head.latest(kind)
+    if revision is None:
+        return None, head
+    stored_kind, state = _download(
+        config,
+        assets[revision],
+        run_id=run_id,
+        revision=revision,
+    )
+    if stored_kind != kind:
+        raise RuntimeError("canary private journal head points to the wrong state kind")
+    return state, head
 
 
-def _persist(kind: str, run_id: str, state: dict[str, Any]) -> None:
+def _commit_head(
+    config: _Config,
+    release: dict[str, Any],
+    run_id: str,
+    head: _JournalHead,
+) -> None:
+    release_id = cast(int, release["id"])
+    response = _request(
+        config,
+        "PATCH",
+        f"{config.api_url}/repos/{config.repository}/releases/{release_id}",
+        body={"body": _head_body(config, run_id, head)},
+    )
+    if response.status_code != 200:
+        raise RuntimeError("canary private journal head update failed")
+    updated, updated_head = _validate_release(
+        _json(response),
+        _tag(config, run_id),
+        config=config,
+        run_id=run_id,
+    )
+    if updated["id"] != release_id or updated_head != head:
+        raise RuntimeError("canary private journal head update is invalid")
+    confirmed = _release(config, run_id, create=False)
+    if confirmed is None or confirmed[0]["id"] != release_id or confirmed[1] != head:
+        raise RuntimeError("canary private journal head update was not durable")
+
+
+def _persist(
+    kind: JournalKind,
+    run_id: str,
+    state: dict[str, Any],
+    *,
+    expected_head: _JournalHead,
+) -> None:
     config = _config()
     if config is None:
         return
-    if kind not in {"transition", "restart"} or _RUN_ID.fullmatch(run_id) is None:
+    if _RUN_ID.fullmatch(run_id) is None:
         raise ValueError("canary private journal state identity is invalid")
-    release = _release(config, run_id, create=True)
-    assert release is not None
-    assets = _assets(config, release)
-    ordered = _kind_assets(assets, kind)
-    if ordered:
-        latest_revision = max(ordered)
-        durable = _verified_state(
+    found = _release(config, run_id, create=True)
+    assert found is not None
+    release, head = found
+    assets = _assets(config, release, head, run_id)
+    if head != expected_head:
+        raise RuntimeError("canary private journal changed concurrently")
+    latest_revision = head.latest(kind)
+    if latest_revision is not None:
+        stored_kind, durable = _download(
             config,
-            ordered[latest_revision],
-            kind=kind,
+            assets[latest_revision],
             run_id=run_id,
             revision=latest_revision,
         )
+        if stored_kind != kind:
+            raise RuntimeError("canary private journal head points to the wrong state kind")
         if durable == state:
             return
-        revision = latest_revision + 1
-    else:
-        revision = 1
-    if revision > _MAX_ASSETS or len(assets) >= _MAX_ASSETS:
+
+    next_head = head.advance(kind)
+    revision = next_head.revision
+    if len(assets) >= _MAX_ASSETS:
         raise RuntimeError("canary private journal asset bound reached")
-    name = _name(config, kind, run_id, state, revision)
-    if any(asset["name"] == name for asset in assets):
-        raise RuntimeError("canary private journal contains duplicate state assets")
-    encrypted = _encrypt(config, kind, run_id, state)
+    name = _asset_name(config, run_id, revision)
+    encrypted = _encrypt(config, kind, run_id, state, revision)
     upload_url = cast(str, release["upload_url"]).split("{", 1)[0]
     upload, api = urlparse(upload_url), urlparse(config.api_url)
     valid_host = upload.scheme == api.scheme and upload.netloc == api.netloc
@@ -353,17 +599,23 @@ def _persist(kind: str, run_id: str, state: dict[str, Any]) -> None:
     if not (valid_host or valid_github_host):
         raise RuntimeError("canary private journal upload URL host is invalid")
     response = _request(
-        config, "POST", f"{upload_url}?name={name}", content=encrypted
+        config,
+        "POST",
+        f"{upload_url}?name={name}",
+        content=encrypted,
     )
+    if response.status_code == 422:
+        raise RuntimeError("canary private journal concurrent revision conflict")
     if response.status_code != 201:
         raise RuntimeError("canary private journal asset upload failed")
     uploaded = _json(response)
     if not isinstance(uploaded, dict):
         raise RuntimeError("canary private journal upload response is invalid")
-    asset_id, uploaded_name, size = (
+    asset_id, uploaded_name, size, upload_state = (
         uploaded.get("id"),
         uploaded.get("name"),
         uploaded.get("size"),
+        uploaded.get("state"),
     )
     if (
         isinstance(asset_id, bool)
@@ -373,48 +625,33 @@ def _persist(kind: str, run_id: str, state: dict[str, Any]) -> None:
         or isinstance(size, bool)
         or not isinstance(size, int)
         or size != len(encrypted)
+        or upload_state != "uploaded"
     ):
         raise RuntimeError("canary private journal upload response is invalid")
-    uploaded_asset = {"id": asset_id, "name": name}
-    if (
-        _verified_state(
-            config,
-            uploaded_asset,
-            kind=kind,
-            run_id=run_id,
-            revision=revision,
-        )
-        != state
-    ):
-        raise RuntimeError("canary private journal uploaded state disagrees")
-
-
-def _load(kind: str, run_id: str) -> dict[str, Any] | None:
-    config = _config()
-    if config is None:
-        return None
-    if kind not in {"transition", "restart"} or _RUN_ID.fullmatch(run_id) is None:
-        raise ValueError("canary private journal state identity is invalid")
-    release = _release(config, run_id, create=False)
-    if release is None:
-        return None
-    ordered = _kind_assets(_assets(config, release), kind)
-    if not ordered:
-        return None
-    revision = max(ordered)
-    return _verified_state(
+    uploaded_asset = {
+        "id": asset_id,
+        "name": name,
+        "size": size,
+        "state": "uploaded",
+    }
+    uploaded_kind, uploaded_state = _download(
         config,
-        ordered[revision],
-        kind=kind,
+        uploaded_asset,
         run_id=run_id,
         revision=revision,
     )
+    if uploaded_kind != kind or uploaded_state != state:
+        raise RuntimeError("canary private journal uploaded state disagrees")
+    _commit_head(config, release, run_id, next_head)
+    committed = _assets(config, release, next_head, run_id)
+    if revision not in committed:
+        raise RuntimeError("canary private journal committed asset is missing")
 
 
-def _transition(run_id: str) -> dict[str, Any]:
-    state = _load("transition", run_id)
+def _transition_with_head(run_id: str) -> tuple[dict[str, Any], _JournalHead]:
+    state, head = _load_with_head("transition", run_id)
     if state is None:
-        return {"barriers": {}, "private_state": None}
+        return {"barriers": {}, "private_state": None}, head
     if set(state) != {"barriers", "private_state"}:
         raise ValueError("canary private journal transition shape is invalid")
     barriers, private_state = state["barriers"], state["private_state"]
@@ -433,7 +670,11 @@ def _transition(run_id: str) -> dict[str, Any]:
         "private_state": (
             None if private_state is None else cast(dict[str, Any], dict(private_state))
         ),
-    }
+    }, head
+
+
+def _transition(run_id: str) -> dict[str, Any]:
+    return _transition_with_head(run_id)[0]
 
 
 def load_canary_private_state(run_id: str) -> dict[str, Any] | None:
@@ -446,19 +687,22 @@ def persist_canary_private_state(run_id: str, payload: dict[str, Any]) -> None:
     """Persist private canary checkpoint/usage authority without changing barriers."""
     if not git_journal_configured():
         return
-    transition = _transition(run_id)
+    transition, head = _transition_with_head(run_id)
     transition["private_state"] = payload
-    _persist("transition", run_id, transition)
+    _persist("transition", run_id, transition, expected_head=head)
 
 
 def persist_canary_restart_state(run_id: str, payload: dict[str, Any]) -> None:
     """Persist completed normal prerequisites in private durable storage."""
-    _persist("restart", run_id, payload)
+    if not git_journal_configured():
+        return
+    _state, head = _load_with_head("restart", run_id)
+    _persist("restart", run_id, payload, expected_head=head)
 
 
 def load_canary_restart_state(run_id: str) -> dict[str, Any] | None:
     """Load completed normal prerequisites from private durable storage."""
-    return _load("restart", run_id)
+    return _load_with_head("restart", run_id)[0]
 
 
 def _operations(checkpoint: RunCheckpoint | None) -> dict[str, dict[str, Any]]:
@@ -485,11 +729,12 @@ def _is_private(checkpoint: RunCheckpoint) -> bool:
 
 
 def _private_snapshot(
-    checkpoint: RunCheckpoint, previous: RunCheckpoint | None
+    checkpoint: RunCheckpoint,
+    previous: RunCheckpoint | None,
+    remote: dict[str, Any] | None,
 ) -> dict[str, Any] | None:
     if not _is_private(checkpoint):
         return None
-    remote = load_canary_private_state(checkpoint.run_id)
     usage: list[dict[str, Any]] = []
     if remote is not None:
         raw = remote.get("usage_events")
@@ -512,7 +757,7 @@ def sync_checkpoint_barrier(
     current = _operations(checkpoint)
     if not current:
         return
-    transition = _transition(checkpoint.run_id)
+    transition, head = _transition_with_head(checkpoint.run_id)
     barriers = cast(dict[str, str], transition["barriers"])
     prior = _operations(previous)
     changed = False
@@ -546,12 +791,13 @@ def sync_checkpoint_barrier(
         if remote_state != state:
             barriers[op_hash] = state
             changed = True
-    private = _private_snapshot(checkpoint, previous)
+    remote_private = cast(dict[str, Any] | None, transition["private_state"])
+    private = _private_snapshot(checkpoint, previous, remote_private)
     if private is not None:
         transition["private_state"] = private
         changed = True
     if changed:
-        _persist("transition", checkpoint.run_id, transition)
+        _persist("transition", checkpoint.run_id, transition, expected_head=head)
 
 
 __all__ = [
