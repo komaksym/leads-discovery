@@ -5,9 +5,6 @@
 from __future__ import annotations
 
 import pytest
-
-from leads_discovery.models import RunCheckpoint
-from leads_discovery.pipeline.git_journal import sync_checkpoint_barrier
 from private_journal_http import DraftReleaseJournalServer
 from production_readiness_core import (
     test_atomic_write_rejects_symlink_target,
@@ -25,6 +22,9 @@ from production_readiness_core import (
     test_total_run_disk_limit_stops_before_second_write,
     test_unsupported_hard_negative_becomes_unknown,
 )
+
+from leads_discovery.models import RunCheckpoint
+from leads_discovery.pipeline.git_journal import sync_checkpoint_barrier
 
 
 def test_ambiguous_paid_operation_cannot_redispatch_after_remote_restart_barrier(
