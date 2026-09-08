@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from credentialed_canary_workflow_core import (
+    _CANARY_STATE_KEY_MARKER,
     _REQUIRED_PROVIDERS,
     _canary_job,
     _workflow_text,
@@ -15,18 +16,15 @@ from credentialed_canary_workflow_core import (
 )
 
 
-def test_canary_paid_intent_has_remote_barrier_before_live_dispatch() -> None:
-    """Private durability is available without writing a public repository ref."""
+def test_canary_private_durability_is_wired_without_public_ref() -> None:
+    """The live canary receives private journal authority without an operational Git branch."""
     canary = _canary_job(_workflow_text())
-    private_phase, _publish = canary.split("- name: Publish approved public outputs", 1)
-    run_step = private_phase.split("- name: Run fixed one-company live canary", 1)[1]
 
-    assert "canary-operation-journal" not in private_phase
-    assert "git push origin" not in private_phase
-    assert "actions/upload-artifact" not in private_phase
-    assert "generated-leads" not in private_phase
-    assert "LEADS_PRIVATE_JOURNAL_TOKEN: ${{ github.token }}" in run_step
-    assert "LEADS_PRIVATE_JOURNAL_KEY: ${{ secrets.CANARY_STATE_KEY }}" in run_step
+    assert "canary-operation-journal" not in canary
+    assert "LEADS_GIT_JOURNAL_" not in canary
+    assert "actions/upload-artifact" not in canary
+    assert _CANARY_STATE_KEY_MARKER in canary
+    assert "${{ github.token }}" in canary
 
 
 def test_paid_canary_gates_publication_on_decisive_private_coverage() -> None:
