@@ -129,15 +129,45 @@ class DraftReleaseJournalServer(AbstractContextManager["DraftReleaseJournalServe
             payload = json.loads(request.content.decode("utf-8"))
             if not isinstance(payload, dict):
                 return self._json_response(request, 422, {"message": "invalid"})
+            tag_name = payload.get("tag_name")
+            if any(release.get("tag_name") == tag_name for release in self._releases):
+                return self._json_response(request, 422, {"message": "duplicate tag"})
             release = {
                 "id": self._next_release_id,
-                "tag_name": payload.get("tag_name"),
+                "tag_name": tag_name,
                 "draft": payload.get("draft"),
                 "name": payload.get("name"),
+                "body": payload.get("body"),
             }
             self._next_release_id += 1
             self._releases.append(release)
             return self._json_response(request, 201, self._release_payload(release))
+
+        if request.method == "PATCH" and path.startswith(release_prefix):
+            raw_id = path[len(release_prefix) :]
+            if raw_id.isdigit():
+                release_id = int(raw_id)
+                release = next(
+                    (
+                        item
+                        for item in self._releases
+                        if int(item["id"]) == release_id
+                    ),
+                    None,
+                )
+                if release is None:
+                    return self._json_response(
+                        request, 404, {"message": "release not found"}
+                    )
+                payload = json.loads(request.content.decode("utf-8"))
+                if not isinstance(payload, dict):
+                    return self._json_response(request, 422, {"message": "invalid"})
+                for key in ("body", "name", "draft"):
+                    if key in payload:
+                        release[key] = payload[key]
+                return self._json_response(
+                    request, 200, self._release_payload(release)
+                )
 
         upload_prefix = "/uploads/"
         upload_suffix = "/assets"
@@ -153,6 +183,13 @@ class DraftReleaseJournalServer(AbstractContextManager["DraftReleaseJournalServe
             release_id = int(middle)
             if not any(int(release["id"]) == release_id for release in self._releases):
                 return self._json_response(request, 404, {"message": "release not found"})
+            if any(
+                owner_release_id == release_id and stored_name == name
+                for owner_release_id, stored_name, _data in self._assets.values()
+            ):
+                return self._json_response(
+                    request, 422, {"message": "duplicate asset name"}
+                )
             asset_id = self._next_asset_id
             self._next_asset_id += 1
             data = request.content
