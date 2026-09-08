@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import Any
 
 import pytest
 from private_journal_http import DraftReleaseJournalServer
 
 from leads_discovery.models import RunCheckpoint
+from leads_discovery.pipeline import git_journal as git_journal_module
 from leads_discovery.pipeline.git_journal import (
     load_canary_private_state,
     persist_canary_private_state,
@@ -77,6 +81,104 @@ def test_latest_authority_does_not_depend_on_release_asset_id_order(
         }
 
         assert load_canary_private_state(run_id) == second
+
+
+def test_renamed_private_authority_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A renamed journal asset must not make durable paid authority disappear."""
+    with DraftReleaseJournalServer() as journal:
+        journal.configure(monkeypatch)
+        run_id = "renamed-authority"
+        persist_canary_private_state(
+            run_id,
+            {"checkpoint": {"marker": "durable"}, "usage_events": []},
+        )
+        asset_id = next(iter(journal._assets))
+        release_id, _name, data = journal._assets[asset_id]
+        journal._assets[asset_id] = (release_id, "renamed.bin", data)
+
+        with pytest.raises(RuntimeError, match="asset name is invalid"):
+            load_canary_private_state(run_id)
+
+
+def test_oversized_private_asset_is_rejected_before_download(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The fixed storage bound must be enforced from asset metadata before buffering bytes."""
+    with DraftReleaseJournalServer() as journal:
+        journal.configure(monkeypatch)
+        run_id = "oversized-authority"
+        persist_canary_private_state(
+            run_id,
+            {"checkpoint": {"marker": "durable"}, "usage_events": []},
+        )
+        asset_id = next(iter(journal._assets))
+        release_id, name, _data = journal._assets[asset_id]
+        journal._assets[asset_id] = (
+            release_id,
+            name,
+            b"x" * (git_journal_module._MAX_STATE + 1025),
+        )
+        real_request = git_journal_module._request
+        downloaded: list[str] = []
+
+        def request_spy(
+            config: Any,
+            method: str,
+            url: str,
+            **kwargs: Any,
+        ) -> Any:
+            if kwargs.get("binary") is True:
+                downloaded.append(url)
+            return real_request(config, method, url, **kwargs)
+
+        monkeypatch.setattr(git_journal_module, "_request", request_spy)
+
+        with pytest.raises(RuntimeError, match="asset size exceeds"):
+            load_canary_private_state(run_id)
+        assert downloaded == []
+
+
+def test_same_revision_race_cannot_let_both_writers_commit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Concurrent writers must not both return from a conflicting next-revision upload."""
+    with DraftReleaseJournalServer() as journal:
+        journal.configure(monkeypatch)
+        run_id = "concurrent-revision"
+        persist_canary_private_state(
+            run_id,
+            {"checkpoint": {"marker": "seed"}, "usage_events": []},
+        )
+        real_request = git_journal_module._request
+        upload_barrier = threading.Barrier(2)
+
+        def synchronized_request(
+            config: Any,
+            method: str,
+            url: str,
+            **kwargs: Any,
+        ) -> Any:
+            if method == "POST" and "/uploads/" in url:
+                upload_barrier.wait(timeout=5)
+            return real_request(config, method, url, **kwargs)
+
+        monkeypatch.setattr(git_journal_module, "_request", synchronized_request)
+
+        def write(marker: str) -> None:
+            persist_canary_private_state(
+                run_id,
+                {"checkpoint": {"marker": marker}, "usage_events": []},
+            )
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [executor.submit(write, marker) for marker in ("left", "right")]
+        errors = [future.exception() for future in futures]
+
+        assert sum(error is None for error in errors) <= 1
+        with pytest.raises(RuntimeError, match="duplicate revisions"):
+            load_canary_private_state(run_id)
 
 
 def test_repeated_new_inflight_operation_is_blocked_by_remote_barrier(
