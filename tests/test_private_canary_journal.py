@@ -102,6 +102,32 @@ def test_renamed_private_authority_fails_closed(
             load_canary_private_state(run_id)
 
 
+def test_deleted_latest_private_authority_cannot_roll_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Deleting the latest asset must not make an older paid authority current again."""
+    with DraftReleaseJournalServer() as journal:
+        journal.configure(monkeypatch)
+        run_id = "deleted-latest"
+        persist_canary_private_state(
+            run_id,
+            {"checkpoint": {"marker": "first"}, "usage_events": []},
+        )
+        persist_canary_private_state(
+            run_id,
+            {"checkpoint": {"marker": "second"}, "usage_events": []},
+        )
+        latest_id = next(
+            asset_id
+            for asset_id, (_release_id, name, _data) in journal._assets.items()
+            if "-002-" in name
+        )
+        del journal._assets[latest_id]
+
+        with pytest.raises(RuntimeError, match="journal head"):
+            load_canary_private_state(run_id)
+
+
 def test_oversized_private_asset_is_rejected_before_download(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
