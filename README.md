@@ -6,18 +6,37 @@ M2 performs the paid discovery, research, and structured extraction work. M3 is 
 
 ## Setup
 
-Python 3.12+ is required.
+Python 3.12+ is required (CI pins 3.12; `requires-python = ">=3.12"`).
+
+Runtime install:
 
 ```bash
 python -m pip install -e .
 ```
 
-For live M2-backed runs, provide credentials through the environment:
+Dev install (lint, typecheck, test, build):
+
+```bash
+python -m pip install -e ".[dev]"
+```
+
+No `.env` loader: export credentials in the shell. `.env.example` is the
+template only — never commit real values. Do not put credentials on the
+command line.
+
+```bash
+cp .env.example .env  # optional local reference; app reads the environment, not the file
+export EXA_API_KEY=...
+export DEEPSEEK_API_KEY=...
+# optional: export APIFY_TOKEN=...
+```
+
+For live M2-backed runs:
 
 ```text
 EXA_API_KEY=
 DEEPSEEK_API_KEY=
-APIFY_TOKEN=        # optional; missing token disables optional Apify discovery
+APIFY_TOKEN=        # optional; omit or use without --include-apify to disable Apify discovery
 ```
 
 For explicit live M4 enrichment, additionally configure the provider credentials plus Clay's non-secret managed Work Email function identifier:
@@ -31,7 +50,95 @@ INSTANTLY_API_KEY=
 
 The GitHub-hosted production canary also requires a stable `CANARY_STATE_KEY` secret in the `production-canary` Environment. It encrypts the bounded private draft-release restart/barrier journal used to resume canary paid work after ephemeral runner loss; it is not a provider credential and must be at least 32 UTF-8 bytes.
 
-Do not put credentials on the command line or in committed files.
+No other setup is needed. All commands default to `--data-root data` and
+write runner-local artifacts under `data/<run_id>/`. Run IDs must match
+`[A-Za-z0-9][A-Za-z0-9._-]{0,63}`; the `canary-` prefix is reserved for the
+production canary and normal `run`/`enrich` commands reject it.
+
+Validate a change with the same gate CI runs:
+
+```bash
+ruff check .
+mypy src tests
+pytest
+python -m build
+```
+
+## Quick Start (offline, $0)
+
+Every command is dry by default. Without `--execute-live` there are no
+provider clients, no credential reads (M4 dry reads no env at all), no
+filesystem writes outside argument validation, and no network calls.
+`--deepseek-budget-usd` is still a required argument even for dry runs so
+the same command can be re-run live later.
+
+1. Smallest dry run (defaults: `--market PVF`, geographies `US,CA`,
+   `--max-candidates 100`, `--max-evaluated 20`):
+
+```bash
+python -m leads_discovery run \
+  --run-id demo \
+  --deepseek-budget-usd 1.00
+# {"command":"run","status":"dry_run","reason":"live_execution_not_authorized",...}
+```
+
+2. Offline batch-shaped dry run (mirrors the CI smoke test):
+
+```bash
+python -m leads_discovery run \
+  --run-id ci-dry \
+  --market "PVF" \
+  --search-term "regional distributors" \
+  --max-candidates 7 \
+  --max-evaluated 3 \
+  --deepseek-budget-usd 0.01
+```
+
+Repeat `--search-term` (aliases: `--search-query`, `--search-terms`) and
+`--target-geography` (aliases: `--target-country`, `--target-geographies`,
+`--target-countries`) for batch scope. Nothing here names a single company.
+
+3. Local-only follow-ups for an existing `data/<run_id>/` (zero provider
+   spend, zero network):
+
+```bash
+python -m leads_discovery score --run-id RUN --max-evaluated 20
+python -m leads_discovery enrich --run-id RUN
+python -m leads_discovery calibrate --run-id RUN --labels labels.csv
+```
+
+4. Go live explicitly (separate authorization from size caps):
+
+```bash
+export EXA_API_KEY=... DEEPSEEK_API_KEY=...
+python -m leads_discovery run \
+  --run-id demo-live \
+  --market "industrial pumps" \
+  --search-term "regional distributors" \
+  --target-geography US \
+  --max-candidates 50 \
+  --max-evaluated 20 \
+  --exa-budget-usd 1.00 \
+  --deepseek-budget-usd 1.00 \
+  --execute-live
+
+export CLAY_PUBLIC_API_KEY=... CLAY_WORK_EMAIL_FUNCTION_ID=... APOLLO_API_KEY=... INSTANTLY_API_KEY=...
+python -m leads_discovery enrich \
+  --run-id demo-live \
+  --exa-people-budget-usd 1.00 \
+  --execute-live
+```
+
+`--execute-live` authorizes spend; `--max-candidates`,
+`--max-evaluated`, `--max-contacts-per-company` (1..3, default 3),
+`--max-paid-contacts-per-company` (0..2, default 2), `--clay-max-contacts`
+(default 10), `--apollo-credit-cap` (default 5.0), and
+`--instantly-verification-call-cap` (default 5) only bound how much work
+may be attempted. Live `run` needs a positive `--deepseek-budget-usd`;
+live `enrich` needs an explicit `--exa-people-budget-usd`. Re-run the same
+run ID to resume from the durable checkpoint and usage ledger; a changed
+market, geography, limit, budget, or provider flag on a bound checkpoint
+fails closed — use a new run ID for a new scope.
 
 ## Commands
 
