@@ -54,6 +54,31 @@ def test_remote_barrier_and_pending_identity_become_durable_in_one_transition(
         assert b"dispatch-one" not in ciphertext
 
 
+def test_latest_authority_does_not_depend_on_release_asset_id_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Replay authority must use journal ordering, not undocumented GitHub asset-ID ordering."""
+    with DraftReleaseJournalServer() as journal:
+        journal.configure(monkeypatch)
+        run_id = "explicit-order"
+        first = {"checkpoint": {"marker": "first"}, "usage_events": []}
+        second = {"checkpoint": {"marker": "second"}, "usage_events": []}
+
+        persist_canary_private_state(run_id, first)
+        persist_canary_private_state(run_id, second)
+
+        asset_ids = sorted(journal._assets)
+        assert len(asset_ids) == 2
+        older = journal._assets[asset_ids[0]]
+        newer = journal._assets[asset_ids[1]]
+        journal._assets = {
+            asset_ids[0]: newer,
+            asset_ids[1]: older,
+        }
+
+        assert load_canary_private_state(run_id) == second
+
+
 def test_repeated_new_inflight_operation_is_blocked_by_remote_barrier(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
