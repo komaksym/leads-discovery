@@ -15,11 +15,13 @@ import httpx
 
 from leads_discovery.dedup import _registrable_http_domain
 from leads_discovery.discovery.base import (
+    DiscoveryProviderError,
     ProviderRequestContext,
     provider_error,
     request_json_at_boundary,
     utc_timestamp,
 )
+from leads_discovery.discovery.exa import exa_failure_cost_usd
 from leads_discovery.models import (
     CompanyRecord,
     EvidenceBundle,
@@ -244,12 +246,30 @@ class ExaEvidenceResearcher:
                 "company_id": company.company_id,
                 "attempted_requests": attempted_position,
             }
-            payload_raw, status_code = request_json_at_boundary(
-                self._client,
-                http_request,
-                context=context,
-                metadata=error_metadata,
-            )
+            try:
+                payload_raw, status_code = request_json_at_boundary(
+                    self._client,
+                    http_request,
+                    context=context,
+                    metadata=error_metadata,
+                    failure_cost_policy=exa_failure_cost_usd,
+                )
+            except DiscoveryProviderError as exc:
+                if on_progress is not None:
+                    raise
+                failure_cost = exc.usage_event.estimated_cost_usd
+                cumulative_cost: float | None = None
+                if failure_cost is not None and all(cost is not None for cost in costs):
+                    cumulative_cost = (
+                        sum(cost for cost in costs if cost is not None) + failure_cost
+                    )
+                raise context.error(
+                    kind=exc.kind,
+                    retryable=exc.retryable,
+                    status_code=exc.status_code,
+                    metadata=dict(exc.usage_event.metadata),
+                    estimated_cost_usd=cumulative_cost,
+                ) from None
             if not isinstance(payload_raw, dict):
                 raise context.error(
                     kind="invalid_response",

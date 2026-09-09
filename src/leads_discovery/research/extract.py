@@ -19,6 +19,7 @@ from leads_discovery.discovery.base import (
     provider_error,
     read_bounded_response,
     safe_transport_call,
+    validation_error,
 )
 from leads_discovery.models import (
     CompanyRecord,
@@ -140,14 +141,11 @@ class DeepSeekExtractor:
         if bundle.company_id != company.company_id:
             raise ValueError("evidence bundle company_id must match company")
         if not bundle.items:
-            raise provider_error(
+            raise validation_error(
                 provider="deepseek",
                 request_id=company.company_id,
+                message="evidence bundle must contain items for extraction",
                 operation="structured_extraction",
-                request_count=0,
-                kind="invalid_request",
-                retryable=False,
-                metadata={"company_id": company.company_id},
             ) from None
         evidence_json = _evidence_json(company, bundle)
         body = {

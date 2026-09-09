@@ -8,6 +8,8 @@ from typing import Any
 import httpx
 import pytest
 
+from leads_discovery.contacts.providers import ContactProviderError, ExaPeopleProvider
+from leads_discovery.discovery.apify import ApifyDiscoveryProvider
 from leads_discovery.discovery.base import (
     DiscoveryProviderError,
     ResponseTooLargeError,
@@ -20,7 +22,9 @@ from leads_discovery.models import (
     DiscoveryRequest,
     EvidenceBundle,
     EvidenceItem,
+    UsageEvent,
 )
+from leads_discovery.pipeline.costs import CostTracker
 from leads_discovery.research.evidence import ExaEvidenceResearcher
 from leads_discovery.research.extract import DeepSeekExtractor, DeepSeekPriceSchedule
 
@@ -209,7 +213,9 @@ def test_exa_research_owns_explicit_timeout_with_injected_transport() -> None:
     )
 
 
+@pytest.mark.parametrize("status_code", [200, 429])
 def test_deepseek_declared_oversize_is_secret_safe_and_unread(
+    status_code: int,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("LEADS_MAX_HTTP_RESPONSE_BYTES", "8")
@@ -217,7 +223,7 @@ def test_deepseek_declared_oversize_is_secret_safe_and_unread(
 
     def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(
-            200,
+            status_code,
             headers={"Content-Length": "9"},
             stream=stream,
         )
@@ -249,3 +255,286 @@ def test_deepseek_declared_oversize_is_secret_safe_and_unread(
     assert captured.value.kind == "invalid_response"
     assert "deepseek-secret" not in str(captured.value)
     assert stream.chunks_consumed == 0
+
+
+def test_exa_rate_limited_search_keeps_cost_unknown_and_freezes_budget() -> None:
+    """An Exa 429 may have billed and must freeze later paid work."""
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(429, json={"error": "rate limited"})
+
+    with (
+        httpx.Client(transport=httpx.MockTransport(handler), timeout=None) as client,
+        pytest.raises(DiscoveryProviderError) as captured,
+    ):
+        ExaDiscoveryProvider(api_key="test-key", client=client).search(_exa_request())
+
+    assert captured.value.kind == "rate_limited"
+    assert captured.value.retryable is True
+    assert captured.value.usage_event.estimated_cost_usd is None
+
+    tracker = CostTracker(
+        [
+            UsageEvent(
+                provider="exa",
+                operation="company_search",
+                estimated_cost_usd=0.098,
+            ),
+            captured.value.usage_event,
+        ]
+    )
+
+    assert tracker.provider_estimated_spend("exa") is None
+
+
+@pytest.mark.parametrize(
+    ("status_code", "expected_kind"),
+    [(408, "rate_limited"), (500, "transient"), (403, "authentication")],
+)
+def test_exa_unproven_http_rejections_keep_cost_unknown(
+    status_code: int,
+    expected_kind: str,
+) -> None:
+    """Every completed Exa HTTP rejection remains potentially billed and unknown."""
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status_code, json={"error": "rejected"})
+
+    with (
+        httpx.Client(transport=httpx.MockTransport(handler), timeout=None) as client,
+        pytest.raises(DiscoveryProviderError) as captured,
+    ):
+        ExaDiscoveryProvider(api_key="test-key", client=client).search(_exa_request())
+
+    assert captured.value.kind == expected_kind
+    assert captured.value.usage_event.estimated_cost_usd is None
+
+
+def test_exa_connect_failure_records_zero_cost_as_never_billed() -> None:
+    """An Exa connect failure never reached the provider and must cost zero."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection refused", request=request)
+
+    with (
+        httpx.Client(transport=httpx.MockTransport(handler), timeout=None) as client,
+        pytest.raises(DiscoveryProviderError) as captured,
+    ):
+        ExaDiscoveryProvider(api_key="test-key", client=client).search(_exa_request())
+
+    assert captured.value.kind == "transient"
+    assert captured.value.retryable is True
+    assert captured.value.usage_event.estimated_cost_usd == 0.0
+
+
+def test_exa_ambiguous_failure_keeps_cost_unknown() -> None:
+    """An ambiguous mid-dispatch Exa failure may have billed and must stay unknown."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadError("connection dropped", request=request)
+
+    with (
+        httpx.Client(transport=httpx.MockTransport(handler), timeout=None) as client,
+        pytest.raises(DiscoveryProviderError) as captured,
+    ):
+        ExaDiscoveryProvider(api_key="test-key", client=client).search(_exa_request())
+
+    assert captured.value.kind == "transient"
+    assert captured.value.retryable is False
+    assert captured.value.usage_event.estimated_cost_usd is None
+
+
+def test_exa_research_late_rate_limit_freezes_cost_unknown() -> None:
+    """Without progress callbacks, a later Exa 429 makes cumulative spend unknown."""
+    calls = 0
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx.Response(
+                200,
+                json={"results": [], "costDollars": {"total": 0.007}},
+            )
+        return httpx.Response(429, json={"error": "rate limited"})
+
+    with (
+        httpx.Client(transport=httpx.MockTransport(handler), timeout=None) as client,
+        pytest.raises(DiscoveryProviderError) as captured,
+    ):
+        ExaEvidenceResearcher(api_key="test-key", client=client).research(_company())
+
+    assert calls == 2
+    assert captured.value.kind == "rate_limited"
+    assert captured.value.usage_event.request_count == 2
+    assert captured.value.usage_event.estimated_cost_usd is None
+    spend = CostTracker([captured.value.usage_event]).provider_estimated_spend("exa")
+    assert spend is None
+
+
+def test_exa_research_progress_failure_stays_delta_accounting() -> None:
+    """Progress mode emits prior spend once and leaves a later Exa 429 unknown."""
+    calls = 0
+    progress: list[EvidenceBundle] = []
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx.Response(
+                200,
+                json={"results": [], "costDollars": {"total": 0.007}},
+            )
+        return httpx.Response(429, json={"error": "rate limited"})
+
+    with (
+        httpx.Client(transport=httpx.MockTransport(handler), timeout=None) as client,
+        pytest.raises(DiscoveryProviderError) as captured,
+    ):
+        ExaEvidenceResearcher(api_key="test-key", client=client).research(
+            _company(),
+            on_progress=progress.append,
+        )
+
+    assert calls == 2
+    assert len(progress) == 1
+    prior = progress[0].usage_events[0]
+    assert prior.request_count == 1
+    assert prior.estimated_cost_usd == pytest.approx(0.007)
+    assert captured.value.usage_event.request_count == 1
+    assert captured.value.usage_event.estimated_cost_usd is None
+    assert CostTracker([prior, captured.value.usage_event]).provider_estimated_spend(
+        "exa"
+    ) is None
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected_kind", "expected_cost", "expected_spend"),
+    [
+        ("rate_limited", "rate_limited", None, None),
+        ("connect", "transient", 0.0, 0.098),
+    ],
+)
+def test_exa_people_failure_cost_distinguishes_rejection_from_connect(
+    failure: str,
+    expected_kind: str,
+    expected_cost: float | None,
+    expected_spend: float | None,
+) -> None:
+    """Exa People keeps HTTP rejection unknown but records connect failure as zero."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if failure == "connect":
+            raise httpx.ConnectError("connection refused", request=request)
+        return httpx.Response(429, json={"error": "rate limited"})
+
+    with (
+        httpx.Client(transport=httpx.MockTransport(handler), timeout=None) as client,
+        pytest.raises(ContactProviderError) as captured,
+    ):
+        ExaPeopleProvider(api_key="test-key", client=client).search(_company())
+
+    assert captured.value.kind == expected_kind
+    assert captured.value.usage_event.estimated_cost_usd == expected_cost
+    tracker = CostTracker(
+        [
+            UsageEvent(
+                provider="exa",
+                operation="people_search",
+                estimated_cost_usd=0.098,
+            ),
+            captured.value.usage_event,
+        ]
+    )
+    assert tracker.provider_estimated_spend("exa") == expected_spend
+
+
+def test_exa_local_validation_error_records_zero_cost() -> None:
+    """Exa local validation never dispatched and must not poison the budget ledger."""
+    bad_request = DiscoveryRequest(
+        request_id="exa:transport:v1",
+        provider="exa",
+        query_family="core-pvf",
+        target_country_code="US",
+        queries=("one query", "second query"),
+        max_results_per_query=1,
+        max_results_total=2,
+        max_cost_usd=None,
+    )
+
+    with (
+        httpx.Client(transport=httpx.MockTransport(_unreachable), timeout=None) as client,
+        pytest.raises(DiscoveryProviderError) as captured,
+    ):
+        ExaDiscoveryProvider(api_key="test-key", client=client).search(bad_request)
+
+    assert captured.value.kind == "invalid_request"
+    assert captured.value.usage_event.request_count == 0
+    assert captured.value.usage_event.estimated_cost_usd == 0.0
+
+
+def test_deepseek_empty_bundle_validation_records_zero_cost() -> None:
+    """DeepSeek local validation never dispatched and must not poison the budget ledger."""
+    empty = EvidenceBundle(
+        company_id="cmp_transport",
+        items=[],
+        raw_records=[],
+        usage_events=[],
+    )
+
+    with httpx.Client(transport=httpx.MockTransport(_unreachable), timeout=None) as client:
+        extractor = DeepSeekExtractor(
+            api_key="deepseek-secret",
+            client=client,
+            model="deepseek-v4-flash",
+            prices=DeepSeekPriceSchedule(0.0, 0.0, 0.0),
+        )
+        with pytest.raises(DiscoveryProviderError) as captured:
+            extractor.extract(_company(), empty)
+
+    assert captured.value.kind == "invalid_request"
+    assert captured.value.usage_event.request_count == 0
+    assert captured.value.usage_event.estimated_cost_usd == 0.0
+
+
+def test_apify_post_start_poll_failure_keeps_cost_unknown() -> None:
+    """A post-start Apify poll failure leaves actor spend ambiguous and stays unknown."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            return httpx.Response(
+                201,
+                json={"data": {"id": "run-123", "status": "RUNNING"}},
+            )
+        return httpx.Response(500, json={"error": "actor host failed"})
+
+    with httpx.Client(transport=httpx.MockTransport(handler), timeout=None) as client:
+        provider = ApifyDiscoveryProvider(
+            api_token="test-token",
+            client=client,
+            monotonic=lambda: 0.0,
+            sleep=lambda _seconds: None,
+        )
+        with pytest.raises(DiscoveryProviderError) as captured:
+            provider.search(_apify_request())
+
+    assert captured.value.usage_event.estimated_cost_usd is None
+
+
+def _unreachable(_request: httpx.Request) -> httpx.Response:
+    """Fail any test that unexpectedly reaches the network."""
+    raise AssertionError("local validation must fail before dispatch")
+
+
+def _apify_request() -> DiscoveryRequest:
+    """Build one valid Apify request for post-start failure coverage."""
+    return DiscoveryRequest(
+        request_id="apify:transport:v1",
+        provider="apify",
+        query_family="core-pvf",
+        target_country_code="US",
+        queries=("pvf one", "pvf two", "pvf three"),
+        max_results_per_query=1,
+        max_results_total=3,
+        max_cost_usd=0.25,
+    )

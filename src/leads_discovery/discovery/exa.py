@@ -9,6 +9,7 @@ import httpx
 
 from leads_discovery.discovery.base import (
     ProviderRequestContext,
+    TransportFailureKind,
     provider_error,
     request_json_at_boundary,
     stable_raw_record_id,
@@ -20,6 +21,13 @@ from leads_discovery.models import DiscoveryBatch, DiscoveryRecord, DiscoveryReq
 
 _EXA_SEARCH_URL = "https://api.exa.ai/search"
 _REQUEST_TIMEOUT = httpx.Timeout(30.0, connect=5.0)
+
+
+def exa_failure_cost_usd(failure: TransportFailureKind) -> float | None:
+    """Return zero only when transport proves the Exa request was never delivered."""
+    if failure is TransportFailureKind.CONNECT:
+        return 0.0
+    return None
 
 
 class ExaDiscoveryProvider:
@@ -77,6 +85,7 @@ class ExaDiscoveryProvider:
             self._client,
             http_request,
             context=context,
+            failure_cost_policy=exa_failure_cost_usd,
         )
         if not isinstance(payload_raw, dict):
             raise context.error(

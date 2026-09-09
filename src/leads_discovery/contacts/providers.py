@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import re
+from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Literal, Never, cast
@@ -17,9 +18,11 @@ from leads_discovery.discovery.base import (
     DiscoveryProviderError,
     ProviderRequestContext,
     ResponseTooLargeError,
+    TransportFailureKind,
     read_bounded_response,
     safe_transport_call,
 )
+from leads_discovery.discovery.exa import exa_failure_cost_usd
 from leads_discovery.models import CompanyRecord, ErrorKind, UsageEvent
 
 _EXA_SEARCH_URL = "https://api.exa.ai/search"
@@ -181,6 +184,7 @@ def _call(
     provider: str,
     operation: str,
     metadata: dict[str, Any] | None = None,
+    failure_cost_policy: Callable[[TransportFailureKind], float | None] | None = None,
 ) -> httpx.Response:
     """Dispatch through the shared provider transport guard and preserve M4 error contracts."""
     context = ProviderRequestContext(
@@ -194,6 +198,7 @@ def _call(
             lambda: client.send(request, stream=True),
             context=context,
             metadata=metadata,
+            failure_cost_policy=failure_cost_policy,
         )
     except DiscoveryProviderError as exc:
         raise ContactProviderError(
@@ -327,6 +332,7 @@ class ExaPeopleProvider:
             provider="exa",
             operation="people_search",
             metadata=metadata,
+            failure_cost_policy=exa_failure_cost_usd,
         )
         payload = _json_object(
             response,
