@@ -92,16 +92,16 @@ def test_exact_score_70_is_inclusive_and_epsilon_above_blocks() -> None:
     assert "score_below_acceptance" in blocked.review_reasons
 
 
-def test_ambiguous_quote_automation_relationship_does_not_block_acceptance() -> None:
-    """A positive automation relationship affects scoring but does not block acceptance."""
+def test_quote_automation_incumbent_conflict_blocks_acceptance_but_never_hard_rejects() -> None:
+    """A positive automation relationship is ambiguous context, not a direct-customer hard rule."""
     facts = accepted_facts()
     facts["known_current_direct_competitor_customer"] = (False, 0.99)
     facts["known_quote_automation_or_order_automation_relationship"] = (True, 0.99)
     result = evaluate_company(build_company(facts=facts))
 
-    assert result.final_decision == "accepted"
+    assert result.final_decision == "uncertain"
     assert result.rejection_reasons == []
-    assert "incumbent_exposure_ambiguous" not in result.review_reasons
+    assert "incumbent_exposure_ambiguous" in result.review_reasons
 
 
 @pytest.mark.parametrize(

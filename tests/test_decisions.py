@@ -37,6 +37,11 @@ def test_each_acceptance_gate_independently_forces_uncertain() -> None:
         "regional_independent_signal",
         "revenue_if_reliably_available",
     )
+    incumbent = _without(
+        "known_current_direct_competitor_customer",
+        "known_quote_automation_or_order_automation_relationship",
+    )
+
     low_overall: dict[str, FactInput] = {
         "pvf_relevant": (True, .90),
         "rfq_or_quote_workflow_evidence": (True, .90),
@@ -53,6 +58,7 @@ def test_each_acceptance_gate_independently_forces_uncertain() -> None:
         (low_overall, "low_overall_coverage"),
         (workload, "low_workload_coverage"),
         (economic, "low_economic_coverage"),
+        (incumbent, "incumbent_exposure_unresolved"),
     ]
     for facts, reason in cases:
         result = evaluate_company(build_company(facts=facts))
@@ -61,25 +67,14 @@ def test_each_acceptance_gate_independently_forces_uncertain() -> None:
         assert reason in result.review_reasons
 
 
-def test_ambiguous_incumbent_does_not_block_acceptance() -> None:
-    """Current competitor evidence below confirmation blocks neither acceptance nor rejection."""
+def test_incumbent_true_below_hard_threshold_is_ambiguous() -> None:
+    """Current competitor evidence at 0.8499 blocks acceptance but does not reject."""
     facts = accepted_facts()
     facts["known_current_direct_competitor_customer"] = (True, .8499)
     result = evaluate_company(build_company(facts=facts))
-    assert result.final_decision == "accepted"
+    assert result.final_decision == "uncertain"
     assert result.rejection_reasons == []
-    assert "incumbent_exposure_ambiguous" not in result.review_reasons
-
-
-def test_unknown_incumbent_does_not_block_acceptance() -> None:
-    """Missing incumbent evidence does not block an otherwise passing company."""
-    facts = _without(
-        "known_current_direct_competitor_customer",
-        "known_quote_automation_or_order_automation_relationship",
-    )
-    result = evaluate_company(build_company(facts=facts))
-    assert result.final_decision == "accepted"
-    assert result.rejection_reasons == []
+    assert "incumbent_exposure_ambiguous" in result.review_reasons
 
 
 def test_acceptance_thresholds_are_inclusive() -> None:
@@ -154,7 +149,7 @@ def test_current_competitor_rejects_only_at_exact_threshold(confidence: float) -
     facts["known_current_direct_competitor_customer"] = (True, confidence)
     result = evaluate_company(build_company(facts=facts))
     if confidence < .85:
-        assert result.final_decision == "accepted"
+        assert result.final_decision == "uncertain"
         assert "confirmed_current_direct_competitor_customer" not in result.rejection_reasons
     else:
         assert result.final_decision == "rejected"

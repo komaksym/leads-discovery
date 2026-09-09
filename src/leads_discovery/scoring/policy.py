@@ -175,6 +175,10 @@ _REVIEW_EXPLANATIONS: Final[Mapping[str, str]] = MappingProxyType(
         "low_economic_coverage": (
             "Economic-fit evidence coverage is below the acceptance threshold."
         ),
+        "incumbent_exposure_unresolved": "No incumbent-exposure fact is usable.",
+        "incumbent_exposure_ambiguous": (
+            "Usable evidence indicates a possible incumbent relationship."
+        ),
         "competitor_history_review": (
             "Public evidence indicates prior competitor evaluation history."
         ),
@@ -568,6 +572,29 @@ def _hard_rejections(
     return reasons
 
 
+def _incumbent_review(
+    facts: Mapping[str, _UsableFact | None],
+) -> DecisionReason | None:
+    """Return the exact acceptance-gate review for unresolved or positive incumbency."""
+    keys = (
+        "known_current_direct_competitor_customer",
+        "known_quote_automation_or_order_automation_relationship",
+    )
+    usable = [fact for key in keys if (fact := facts.get(key)) is not None]
+    if not usable:
+        return _fact_review("incumbent_exposure_unresolved")
+    if not any(fact.value is True for fact in usable):
+        return None
+    cited = sorted({item for fact in usable for item in fact.evidence_ids})
+    return DecisionReason(
+        code="incumbent_exposure_ambiguous",
+        kind="review",
+        explanation=_REVIEW_EXPLANATIONS["incumbent_exposure_ambiguous"],
+        confidence=max(fact.confidence for fact in usable),
+        evidence_ids=cited,
+    )
+
+
 def _acceptance_reviews(
     facts: Mapping[str, _UsableFact | None],
     final_score: float | None,
@@ -593,6 +620,9 @@ def _acceptance_reviews(
         reasons.append(_fact_review("low_workload_coverage"))
     if coverage["economic_fit"] < policy.minimum_economic_coverage:
         reasons.append(_fact_review("low_economic_coverage"))
+    incumbent = _incumbent_review(facts)
+    if incumbent is not None:
+        reasons.append(incumbent)
     return reasons
 
 
