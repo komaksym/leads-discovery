@@ -8,6 +8,7 @@ import os
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from enum import Enum
 from typing import Any, Protocol, cast
 
 import httpx
@@ -21,6 +22,13 @@ from leads_discovery.models import (
 )
 
 _DEFAULT_MAX_HTTP_RESPONSE_BYTES = 2 * 1024 * 1024
+
+
+class TransportFailureKind(Enum):
+    """Distinguish transport failures that carry different billing certainty."""
+
+    CONNECT = "connect"
+    HTTP_REJECTION = "http_rejection"
 
 
 class DiscoveryProvider(Protocol):
@@ -328,14 +336,14 @@ def safe_transport_call(
     operation: str | None = None,
     request_count: int | None = None,
     metadata: dict[str, Any] | None = None,
-    failure_cost_policy: Callable[[int | None], float | None] | None = None,
+    failure_cost_policy: Callable[[TransportFailureKind], float | None] | None = None,
 ) -> httpx.Response:
     """Run one streamed dispatch and enforce the stable provider request boundary.
 
     Provider billing semantics stay outside generic transport. When supplied,
-    failure_cost_policy receives None only for connect failures and the concrete
-    status code for completed non-2xx responses. Ambiguous mid-dispatch failures
-    never invoke it.
+    failure_cost_policy receives CONNECT only when no request reached the provider
+    and HTTP_REJECTION only after the response passed declared-size validation.
+    Ambiguous mid-dispatch failures never invoke it.
     """
     if context is None:
         if provider is None or request_id is None or operation is None or request_count is None:
@@ -352,7 +360,9 @@ def safe_transport_call(
             retryable=True,
             metadata={**(metadata or {"request_id": context.request_id}), "safe_to_retry": True},
             estimated_cost_usd=(
-                failure_cost_policy(None) if failure_cost_policy is not None else None
+                failure_cost_policy(TransportFailureKind.CONNECT)
+                if failure_cost_policy is not None
+                else None
             ),
         ) from None
     except httpx.HTTPError:
@@ -363,6 +373,16 @@ def safe_transport_call(
         ) from None
 
     status_code = response.status_code
+    try:
+        _enforce_declared_response_limit(response, _http_response_limit())
+    except ResponseTooLargeError:
+        raise context.error(
+            kind="invalid_response",
+            retryable=False,
+            status_code=status_code,
+            metadata=metadata,
+        ) from None
+
     if not 200 <= status_code < 300:
         response.close()
         kind, retryable = classify_http_status(status_code)
@@ -372,18 +392,10 @@ def safe_transport_call(
             status_code=status_code,
             metadata=metadata,
             estimated_cost_usd=(
-                failure_cost_policy(status_code) if failure_cost_policy is not None else None
+                failure_cost_policy(TransportFailureKind.HTTP_REJECTION)
+                if failure_cost_policy is not None
+                else None
             ),
-        ) from None
-
-    try:
-        _enforce_declared_response_limit(response, _http_response_limit())
-    except ResponseTooLargeError:
-        raise context.error(
-            kind="invalid_response",
-            retryable=False,
-            status_code=status_code,
-            metadata=metadata,
         ) from None
     return response
 
@@ -394,7 +406,7 @@ def request_json_at_boundary(
     *,
     context: ProviderRequestContext,
     metadata: dict[str, Any] | None = None,
-    failure_cost_policy: Callable[[int | None], float | None] | None = None,
+    failure_cost_policy: Callable[[TransportFailureKind], float | None] | None = None,
 ) -> tuple[Any, int]:
     """Dispatch one streamed request and return bounded JSON plus its successful status."""
     response = safe_transport_call(

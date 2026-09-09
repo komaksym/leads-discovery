@@ -213,7 +213,9 @@ def test_exa_research_owns_explicit_timeout_with_injected_transport() -> None:
     )
 
 
+@pytest.mark.parametrize("status_code", [200, 429])
 def test_deepseek_declared_oversize_is_secret_safe_and_unread(
+    status_code: int,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("LEADS_MAX_HTTP_RESPONSE_BYTES", "8")
@@ -221,7 +223,7 @@ def test_deepseek_declared_oversize_is_secret_safe_and_unread(
 
     def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(
-            200,
+            status_code,
             headers={"Content-Length": "9"},
             stream=stream,
         )
@@ -255,8 +257,8 @@ def test_deepseek_declared_oversize_is_secret_safe_and_unread(
     assert stream.chunks_consumed == 0
 
 
-def test_exa_rate_limited_search_records_zero_cost_and_keeps_budget_known() -> None:
-    """An Exa 429 proves no billed search and must not poison the budget ledger."""
+def test_exa_rate_limited_search_keeps_cost_unknown_and_freezes_budget() -> None:
+    """An Exa 429 may have billed and must freeze later paid work."""
 
     def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(429, json={"error": "rate limited"})
@@ -269,7 +271,7 @@ def test_exa_rate_limited_search_records_zero_cost_and_keeps_budget_known() -> N
 
     assert captured.value.kind == "rate_limited"
     assert captured.value.retryable is True
-    assert captured.value.usage_event.estimated_cost_usd == 0.0
+    assert captured.value.usage_event.estimated_cost_usd is None
 
     tracker = CostTracker(
         [
@@ -282,7 +284,7 @@ def test_exa_rate_limited_search_records_zero_cost_and_keeps_budget_known() -> N
         ]
     )
 
-    assert tracker.provider_estimated_spend("exa") == 0.098
+    assert tracker.provider_estimated_spend("exa") is None
 
 
 @pytest.mark.parametrize(
@@ -293,7 +295,7 @@ def test_exa_unproven_http_rejections_keep_cost_unknown(
     status_code: int,
     expected_kind: str,
 ) -> None:
-    """Only explicitly proven Exa rejections may be recorded as zero cost."""
+    """Every completed Exa HTTP rejection remains potentially billed and unknown."""
 
     def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(status_code, json={"error": "rejected"})
@@ -306,31 +308,6 @@ def test_exa_unproven_http_rejections_keep_cost_unknown(
 
     assert captured.value.kind == expected_kind
     assert captured.value.usage_event.estimated_cost_usd is None
-
-
-def test_exa_rate_limit_is_classified_before_declared_size(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A huge declared 429 body stays unread and keeps Exa's known-unbilled classification."""
-    monkeypatch.setenv("LEADS_MAX_HTTP_RESPONSE_BYTES", "8")
-    stream = _UnreadableStream()
-
-    def handler(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            429,
-            headers={"Content-Length": "999"},
-            stream=stream,
-        )
-
-    with (
-        httpx.Client(transport=httpx.MockTransport(handler), timeout=None) as client,
-        pytest.raises(DiscoveryProviderError) as captured,
-    ):
-        ExaDiscoveryProvider(api_key="test-key", client=client).search(_exa_request())
-
-    assert captured.value.kind == "rate_limited"
-    assert captured.value.usage_event.estimated_cost_usd == 0.0
-    assert stream.chunks_consumed == 0
 
 
 def test_exa_connect_failure_records_zero_cost_as_never_billed() -> None:
@@ -367,8 +344,8 @@ def test_exa_ambiguous_failure_keeps_cost_unknown() -> None:
     assert captured.value.usage_event.estimated_cost_usd is None
 
 
-def test_exa_research_late_rate_limit_preserves_prior_known_cost() -> None:
-    """Without progress callbacks, a later zero-cost failure preserves earlier billed spend."""
+def test_exa_research_late_rate_limit_freezes_cost_unknown() -> None:
+    """Without progress callbacks, a later Exa 429 makes cumulative spend unknown."""
     calls = 0
 
     def handler(_request: httpx.Request) -> httpx.Response:
@@ -390,13 +367,13 @@ def test_exa_research_late_rate_limit_preserves_prior_known_cost() -> None:
     assert calls == 2
     assert captured.value.kind == "rate_limited"
     assert captured.value.usage_event.request_count == 2
-    assert captured.value.usage_event.estimated_cost_usd == pytest.approx(0.007)
+    assert captured.value.usage_event.estimated_cost_usd is None
     spend = CostTracker([captured.value.usage_event]).provider_estimated_spend("exa")
-    assert spend == pytest.approx(0.007)
+    assert spend is None
 
 
 def test_exa_research_progress_failure_stays_delta_accounting() -> None:
-    """Progress mode emits prior spend once and leaves a later known-unbilled failure at zero."""
+    """Progress mode emits prior spend once and leaves a later Exa 429 unknown."""
     calls = 0
     progress: list[EvidenceBundle] = []
 
@@ -425,21 +402,26 @@ def test_exa_research_progress_failure_stays_delta_accounting() -> None:
     assert prior.request_count == 1
     assert prior.estimated_cost_usd == pytest.approx(0.007)
     assert captured.value.usage_event.request_count == 1
-    assert captured.value.usage_event.estimated_cost_usd == 0.0
+    assert captured.value.usage_event.estimated_cost_usd is None
     assert CostTracker([prior, captured.value.usage_event]).provider_estimated_spend(
         "exa"
-    ) == pytest.approx(0.007)
+    ) is None
 
 
 @pytest.mark.parametrize(
-    ("failure", "expected_kind"),
-    [("rate_limited", "rate_limited"), ("connect", "transient")],
+    ("failure", "expected_kind", "expected_cost", "expected_spend"),
+    [
+        ("rate_limited", "rate_limited", None, None),
+        ("connect", "transient", 0.0, 0.098),
+    ],
 )
-def test_exa_people_known_unbilled_failures_keep_prior_spend_known(
+def test_exa_people_failure_cost_distinguishes_rejection_from_connect(
     failure: str,
     expected_kind: str,
+    expected_cost: float | None,
+    expected_spend: float | None,
 ) -> None:
-    """M4 Exa People shares the same zero-cost policy for 429 and connect failure."""
+    """Exa People keeps HTTP rejection unknown but records connect failure as zero."""
 
     def handler(request: httpx.Request) -> httpx.Response:
         if failure == "connect":
@@ -453,7 +435,7 @@ def test_exa_people_known_unbilled_failures_keep_prior_spend_known(
         ExaPeopleProvider(api_key="test-key", client=client).search(_company())
 
     assert captured.value.kind == expected_kind
-    assert captured.value.usage_event.estimated_cost_usd == 0.0
+    assert captured.value.usage_event.estimated_cost_usd == expected_cost
     tracker = CostTracker(
         [
             UsageEvent(
@@ -464,7 +446,7 @@ def test_exa_people_known_unbilled_failures_keep_prior_spend_known(
             captured.value.usage_event,
         ]
     )
-    assert tracker.provider_estimated_spend("exa") == 0.098
+    assert tracker.provider_estimated_spend("exa") == expected_spend
 
 
 def test_exa_local_validation_error_records_zero_cost() -> None:

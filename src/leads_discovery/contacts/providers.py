@@ -18,6 +18,7 @@ from leads_discovery.discovery.base import (
     DiscoveryProviderError,
     ProviderRequestContext,
     ResponseTooLargeError,
+    TransportFailureKind,
     read_bounded_response,
     safe_transport_call,
 )
@@ -183,7 +184,7 @@ def _call(
     provider: str,
     operation: str,
     metadata: dict[str, Any] | None = None,
-    failure_cost_policy: Callable[[int | None], float | None] | None = None,
+    failure_cost_policy: Callable[[TransportFailureKind], float | None] | None = None,
 ) -> httpx.Response:
     """Dispatch through the shared provider transport guard and preserve M4 error contracts."""
     context = ProviderRequestContext(

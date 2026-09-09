@@ -9,6 +9,7 @@ import httpx
 
 from leads_discovery.discovery.base import (
     ProviderRequestContext,
+    TransportFailureKind,
     provider_error,
     request_json_at_boundary,
     stable_raw_record_id,
@@ -22,9 +23,9 @@ _EXA_SEARCH_URL = "https://api.exa.ai/search"
 _REQUEST_TIMEOUT = httpx.Timeout(30.0, connect=5.0)
 
 
-def exa_failure_cost_usd(status_code: int | None) -> float | None:
-    """Return zero only for Exa failures established by contract as unbilled."""
-    if status_code is None or status_code == 429:
+def exa_failure_cost_usd(failure: TransportFailureKind) -> float | None:
+    """Return zero only when transport proves the Exa request was never delivered."""
+    if failure is TransportFailureKind.CONNECT:
         return 0.0
     return None
 
