@@ -286,6 +286,8 @@ python -m leads_discovery calibrate --run-id RUN --labels labels.csv
 
 `calibrate` is also local-only and zero-provider-spend. It reports disagreements; it never edits scores, decisions, policy, checkpoint state, evidence, or usage.
 
+Calibration is optional. Normal `run` already performs model-based fact extraction and deterministic decisioning; no manual labels are required to produce leads.
+
 ## Score and coverage are different
 
 M3 deliberately keeps two questions separate:
@@ -328,10 +330,11 @@ final score >= 70
 overall coverage >= 0.70
 workload coverage >= 0.60
 economic coverage >= 0.50
-at least one incumbent fact usable, with no usable incumbent fact true
 ```
 
 If any acceptance gate fails, the decision is `uncertain`. For example, a score of 82 with coverage 0.55 is uncertain rather than accepted.
+
+Incumbent exposure is handled separately from acceptance coverage. A confirmed current direct-competitor relationship at high confidence rejects the company. An ambiguous or unknown incumbent relationship does not block acceptance, although a positive automation signal can still lower the incumbent-exposure score.
 
 Historical competitor evaluation is review context only; it does not lower the score or reject a company.
 

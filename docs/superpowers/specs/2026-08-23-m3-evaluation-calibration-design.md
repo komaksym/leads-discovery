@@ -213,11 +213,14 @@ Otherwise, `accepted` requires every gate below:
 | overall coverage | `>=0.70` |
 | workload coverage | `>=0.60` |
 | economic coverage | `>=0.50` |
-| incumbent resolution | at least one incumbent fact is usable, and neither usable incumbent fact is `True` |
 
 If no hard rule fires and any acceptance gate fails, set `final_decision="uncertain"`. This is
 intentional: score `72` with overall coverage `0.55` is uncertain. A well-covered low score is
 also uncertain until manual calibration provides evidence for a soft-rejection rule.
+
+Incumbent exposure is not an acceptance gate. A confirmed current direct-competitor relationship
+at the hard-rejection confidence threshold rejects the company. Ambiguous or unknown incumbent
+evidence does not block acceptance; a positive automation relationship remains a scored signal.
 
 Stable review reason codes identify every failed acceptance gate:
 
@@ -228,8 +231,6 @@ score_unavailable
 low_overall_coverage
 low_workload_coverage
 low_economic_coverage
-incumbent_exposure_unresolved
-incumbent_exposure_ambiguous
 competitor_history_review
 invalid_fact:<fact_key>
 ```

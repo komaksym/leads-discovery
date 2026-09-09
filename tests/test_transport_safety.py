@@ -391,9 +391,8 @@ def test_exa_research_late_rate_limit_preserves_prior_known_cost() -> None:
     assert captured.value.kind == "rate_limited"
     assert captured.value.usage_event.request_count == 2
     assert captured.value.usage_event.estimated_cost_usd == pytest.approx(0.007)
-    assert CostTracker([captured.value.usage_event]).provider_estimated_spend("exa") == pytest.approx(
-        0.007
-    )
+    spend = CostTracker([captured.value.usage_event]).provider_estimated_spend("exa")
+    assert spend == pytest.approx(0.007)
 
 
 def test_exa_research_progress_failure_stays_delta_accounting() -> None:
