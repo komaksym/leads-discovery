@@ -8,6 +8,7 @@ from typing import Any
 import httpx
 import pytest
 
+from leads_discovery.contacts.providers import ContactProviderError, ExaPeopleProvider
 from leads_discovery.discovery.apify import ApifyDiscoveryProvider
 from leads_discovery.discovery.base import (
     DiscoveryProviderError,
@@ -284,6 +285,54 @@ def test_exa_rate_limited_search_records_zero_cost_and_keeps_budget_known() -> N
     assert tracker.provider_estimated_spend("exa") == 0.098
 
 
+@pytest.mark.parametrize(
+    ("status_code", "expected_kind"),
+    [(408, "rate_limited"), (500, "transient"), (403, "authentication")],
+)
+def test_exa_unproven_http_rejections_keep_cost_unknown(
+    status_code: int,
+    expected_kind: str,
+) -> None:
+    """Only explicitly proven Exa rejections may be recorded as zero cost."""
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status_code, json={"error": "rejected"})
+
+    with (
+        httpx.Client(transport=httpx.MockTransport(handler), timeout=None) as client,
+        pytest.raises(DiscoveryProviderError) as captured,
+    ):
+        ExaDiscoveryProvider(api_key="test-key", client=client).search(_exa_request())
+
+    assert captured.value.kind == expected_kind
+    assert captured.value.usage_event.estimated_cost_usd is None
+
+
+def test_exa_rate_limit_is_classified_before_declared_size(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A huge declared 429 body stays unread and keeps Exa's known-unbilled classification."""
+    monkeypatch.setenv("LEADS_MAX_HTTP_RESPONSE_BYTES", "8")
+    stream = _UnreadableStream()
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            429,
+            headers={"Content-Length": "999"},
+            stream=stream,
+        )
+
+    with (
+        httpx.Client(transport=httpx.MockTransport(handler), timeout=None) as client,
+        pytest.raises(DiscoveryProviderError) as captured,
+    ):
+        ExaDiscoveryProvider(api_key="test-key", client=client).search(_exa_request())
+
+    assert captured.value.kind == "rate_limited"
+    assert captured.value.usage_event.estimated_cost_usd == 0.0
+    assert stream.chunks_consumed == 0
+
+
 def test_exa_connect_failure_records_zero_cost_as_never_billed() -> None:
     """An Exa connect failure never reached the provider and must cost zero."""
 
@@ -316,6 +365,107 @@ def test_exa_ambiguous_failure_keeps_cost_unknown() -> None:
     assert captured.value.kind == "transient"
     assert captured.value.retryable is False
     assert captured.value.usage_event.estimated_cost_usd is None
+
+
+def test_exa_research_late_rate_limit_preserves_prior_known_cost() -> None:
+    """Without progress callbacks, a later zero-cost failure preserves earlier billed spend."""
+    calls = 0
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx.Response(
+                200,
+                json={"results": [], "costDollars": {"total": 0.007}},
+            )
+        return httpx.Response(429, json={"error": "rate limited"})
+
+    with (
+        httpx.Client(transport=httpx.MockTransport(handler), timeout=None) as client,
+        pytest.raises(DiscoveryProviderError) as captured,
+    ):
+        ExaEvidenceResearcher(api_key="test-key", client=client).research(_company())
+
+    assert calls == 2
+    assert captured.value.kind == "rate_limited"
+    assert captured.value.usage_event.request_count == 2
+    assert captured.value.usage_event.estimated_cost_usd == pytest.approx(0.007)
+    assert CostTracker([captured.value.usage_event]).provider_estimated_spend("exa") == pytest.approx(
+        0.007
+    )
+
+
+def test_exa_research_progress_failure_stays_delta_accounting() -> None:
+    """Progress mode emits prior spend once and leaves a later known-unbilled failure at zero."""
+    calls = 0
+    progress: list[EvidenceBundle] = []
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx.Response(
+                200,
+                json={"results": [], "costDollars": {"total": 0.007}},
+            )
+        return httpx.Response(429, json={"error": "rate limited"})
+
+    with (
+        httpx.Client(transport=httpx.MockTransport(handler), timeout=None) as client,
+        pytest.raises(DiscoveryProviderError) as captured,
+    ):
+        ExaEvidenceResearcher(api_key="test-key", client=client).research(
+            _company(),
+            on_progress=progress.append,
+        )
+
+    assert calls == 2
+    assert len(progress) == 1
+    prior = progress[0].usage_events[0]
+    assert prior.request_count == 1
+    assert prior.estimated_cost_usd == pytest.approx(0.007)
+    assert captured.value.usage_event.request_count == 1
+    assert captured.value.usage_event.estimated_cost_usd == 0.0
+    assert CostTracker([prior, captured.value.usage_event]).provider_estimated_spend(
+        "exa"
+    ) == pytest.approx(0.007)
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected_kind"),
+    [("rate_limited", "rate_limited"), ("connect", "transient")],
+)
+def test_exa_people_known_unbilled_failures_keep_prior_spend_known(
+    failure: str,
+    expected_kind: str,
+) -> None:
+    """M4 Exa People shares the same zero-cost policy for 429 and connect failure."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if failure == "connect":
+            raise httpx.ConnectError("connection refused", request=request)
+        return httpx.Response(429, json={"error": "rate limited"})
+
+    with (
+        httpx.Client(transport=httpx.MockTransport(handler), timeout=None) as client,
+        pytest.raises(ContactProviderError) as captured,
+    ):
+        ExaPeopleProvider(api_key="test-key", client=client).search(_company())
+
+    assert captured.value.kind == expected_kind
+    assert captured.value.usage_event.estimated_cost_usd == 0.0
+    tracker = CostTracker(
+        [
+            UsageEvent(
+                provider="exa",
+                operation="people_search",
+                estimated_cost_usd=0.098,
+            ),
+            captured.value.usage_event,
+        ]
+    )
+    assert tracker.provider_estimated_spend("exa") == 0.098
 
 
 def test_exa_local_validation_error_records_zero_cost() -> None:

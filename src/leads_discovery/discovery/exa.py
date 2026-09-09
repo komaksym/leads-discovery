@@ -22,6 +22,13 @@ _EXA_SEARCH_URL = "https://api.exa.ai/search"
 _REQUEST_TIMEOUT = httpx.Timeout(30.0, connect=5.0)
 
 
+def exa_failure_cost_usd(status_code: int | None) -> float | None:
+    """Return zero only for Exa failures established by contract as unbilled."""
+    if status_code is None or status_code == 429:
+        return 0.0
+    return None
+
+
 class ExaDiscoveryProvider:
     """Translate one bounded discovery request to Exa's company search endpoint."""
 
@@ -77,9 +84,7 @@ class ExaDiscoveryProvider:
             self._client,
             http_request,
             context=context,
-            # Single-shot Exa search rejected before execution proves no charge;
-            # a 2xx with missing/malformed costDollars below stays unknown.
-            known_unbilled_rejection=True,
+            failure_cost_policy=exa_failure_cost_usd,
         )
         if not isinstance(payload_raw, dict):
             raise context.error(
